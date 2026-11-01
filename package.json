@@ -1,0 +1,43 @@
+{
+  "name": "flipdesk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Crosslisting, AI listing writer, inventory & profit tracking for resellers. eBay-first, 11 marketplaces.",
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "tsx watch --disable-warning=ExperimentalWarning server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "NODE_ENV=production tsx --disable-warning=ExperimentalWarning server/index.ts",
+    "seed": "tsx --disable-warning=ExperimentalWarning server/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "express": "^5.3.0",
+    "multer": "^2.5.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.5",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/supertest": "^7.2.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "supertest": "^7.3.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

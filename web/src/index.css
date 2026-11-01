@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #3987e5;
+  --color-good: #0ca30c;
+  --color-warn: #fab219;
+  --color-serious: #ec835a;
+  --color-critical: #d03b3b;
+}
+
+:root { color-scheme: dark; }
+@utility input { @apply w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 outline-none focus:border-brand focus:ring-1 focus:ring-brand; }
+@utility btn { @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50; }
+@utility btn-primary { @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 bg-brand text-white hover:bg-blue-500; }
+@utility btn-ghost { @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800; }
+@utility btn-danger { @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 border border-red-900 bg-red-950 text-red-200 hover:bg-red-900; }
+@utility card { @apply rounded-xl border border-zinc-800 bg-zinc-900/60; }
+@utility label { @apply mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-400; }

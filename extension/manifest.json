@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "FlipDesk Crosslister",
+  "version": "0.1.0",
+  "description": "Fills listing forms on Poshmark, Mercari, Depop, Vinted, Grailed, Facebook Marketplace and Whatnot from your FlipDesk inventory.",
+  "permissions": ["storage", "tabs", "scripting", "alarms"],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://poshmark.com/*",
+    "https://www.mercari.com/*",
+    "https://www.depop.com/*",
+    "https://www.vinted.com/*",
+    "https://www.grailed.com/*",
+    "https://www.facebook.com/*",
+    "https://www.whatnot.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "FlipDesk" }
+}
