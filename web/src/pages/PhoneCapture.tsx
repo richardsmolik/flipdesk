@@ -5,7 +5,7 @@ import { uploadWithProgress } from "../api";
 /** The page your phone opens from the QR code: take photos, they upload straight into the item. */
 export default function PhoneCapture() {
   const { token = "" } = useParams();
-  const [info, setInfo] = useState<{ title: string; sku: string; photos: string[]; remaining: number } | null>(null);
+  const [info, setInfo] = useState<{ title: string; sku: string; price: number; photos: string[]; remaining: number; ai: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [pct, setPct] = useState<number | null>(null);
   const [added, setAdded] = useState(0);
@@ -21,6 +21,12 @@ export default function PhoneCapture() {
       })
       .catch((e: Error) => setErr(e.message));
   useEffect(() => void load(), [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  // While the AI is drafting, check back every 2 seconds.
+  useEffect(() => {
+    if (info?.ai !== "pending" && info?.ai !== "writing") return;
+    const t = setTimeout(load, 2000);
+    return () => clearTimeout(t);
+  }, [info]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const send = async (files: FileList | null) => {
     if (!files?.length) return;
@@ -63,6 +69,16 @@ export default function PhoneCapture() {
             </div>
           )}
           {added > 0 && <div className="text-sm text-green-400">✓ {added} photo{added === 1 ? "" : "s"} sent. They're already on your computer.</div>}
+          {(info.ai === "pending" || info.ai === "writing") && (
+            <div className="rounded-lg border border-blue-900 bg-blue-950/40 p-3 text-sm text-blue-100">✨ {info.ai === "pending" ? "Keep shooting. The AI writes the listing a few seconds after your last photo." : "AI is writing your listing…"}</div>
+          )}
+          {info.ai === "done" && info.title !== "New item" && (
+            <div className="rounded-lg border border-green-900 bg-green-950/30 p-3 text-sm">
+              <div className="text-xs text-green-300">✨ Draft ready on your computer</div>
+              <div className="font-medium">{info.title}</div>
+              {info.price > 0 && <div className="text-zinc-300">${info.price.toFixed(2)}</div>}
+            </div>
+          )}
           <div className="grid grid-cols-4 gap-1.5">
             {info.photos.map((u) => <img key={u} src={u} alt="" className="aspect-square w-full rounded object-cover" />)}
           </div>

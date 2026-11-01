@@ -95,6 +95,7 @@ export default function Dashboard() {
         <div className="flex gap-2">
           <Link to="/items/new" className="btn-primary">✨ New AI listing</Link>
           <Link to="/inventory" className="btn-ghost">Inventory</Link>
+          <Link to="/switch" className="btn-ghost">Coming from Vendoo / List Perfectly?</Link>
         </div>
       </div>
 

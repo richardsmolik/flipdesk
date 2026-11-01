@@ -10,6 +10,7 @@ export default function PhoneUpload({ item, onClose, onPhotos }: { item: Item; o
   const [qr, setQr] = useState("");
   const [count, setCount] = useState(item.photos.length);
   const [err, setErr] = useState<string | null>(null);
+  const [ai, setAi] = useState<string>("idle");
 
   useEffect(() => {
     api
@@ -27,14 +28,21 @@ export default function PhoneUpload({ item, onClose, onPhotos }: { item: Item; o
   // Poll for photos arriving from the phone.
   useEffect(() => {
     const t = setInterval(async () => {
-      const i = await api.get<Item>(`/api/items/${item.id}`).catch(() => null);
+      const [i, st] = await Promise.all([
+        api.get<Item>(`/api/items/${item.id}`).catch(() => null),
+        api.get<{ state: string }>(`/api/items/${item.id}/ai-status`).catch(() => null),
+      ]);
+      if (st && st.state !== ai) {
+        setAi(st.state);
+        if (st.state === "done" && i) onPhotos(i); // AI filled in the listing
+      }
       if (i && i.photos.length !== count) {
         setCount(i.photos.length);
         onPhotos(i);
       }
     }, 2500);
     return () => clearInterval(t);
-  }, [item.id, count, onPhotos]);
+  }, [item.id, count, onPhotos, ai]);
 
   return (
     <Modal open onClose={onClose} title="📱 Add photos from your phone">
@@ -52,6 +60,15 @@ export default function PhoneUpload({ item, onClose, onPhotos }: { item: Item; o
             <div className="break-all text-[11px] text-zinc-500">{url}</div>
             {link.hint && <div className="rounded border border-amber-900 bg-amber-950/30 px-2 py-1 text-left text-xs text-amber-200">{link.hint}</div>}
             <div className="text-lg font-semibold tabular-nums">{count} photo{count === 1 ? "" : "s"} on this item</div>
+            {!item.title && (
+              <div className={`rounded px-2 py-1 text-xs ${ai === "done" ? "bg-green-950/40 text-green-300" : ai === "error" ? "bg-red-950/40 text-red-300" : "bg-blue-950/40 text-blue-200"}`}>
+                {ai === "idle" && "✨ The AI will write this listing a few seconds after the last photo arrives."}
+                {ai === "pending" && "✨ Waiting for more photos…"}
+                {ai === "writing" && "✨ AI is writing the listing…"}
+                {ai === "done" && "✨ Draft written. Close this window to review it."}
+                {ai === "error" && "AI couldn't write this one. Use AI rewrite on the item."}
+              </div>
+            )}
             <p className="text-[11px] text-zinc-500">Link works for 30 minutes and can only add photos to this item. Your phone must be on the same Wi-Fi (or use your online address).</p>
             <button className="btn-primary w-full" onClick={onClose}>Done</button>
           </>

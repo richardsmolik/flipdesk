@@ -43,7 +43,7 @@ describe("phone upload links", () => {
     const info = await request(a).get(`/api/m/${link.token}`).expect(200);
     expect(info.body.title).toBe("Phone item");
     const up = await request(a).post(`/api/m/${link.token}/photos`).attach("photos", await img("#336699"), "IMG_1.jpg").expect(200);
-    expect(up.body).toEqual({ added: 1, total: 1 });
+    expect(up.body).toMatchObject({ added: 1, total: 1, autoWriting: false }); // titled item: no auto-write
     expect(getItem(db, item.id)!.photos).toHaveLength(1);
     // the token can't read anything else
     await request(a).get("/api/items").expect(401);

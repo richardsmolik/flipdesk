@@ -211,6 +211,11 @@ function EditItem({ id }: { id: number }) {
   useEffect(() => {
     if (item) setForm(item);
   }, [item]);
+  // AI notes written in the background (phone / Shoot mode) live on the server.
+  useEffect(() => {
+    if (draft || !item?.title) return;
+    api.get<{ draft: Draft | null }>(`/api/items/${id}/ai-status`).then((r) => r.draft && setDraft(r.draft)).catch(() => {});
+  }, [id, item?.title]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (recs && !picked.length) {
       const live = new Set(item?.listings.filter((l) => ["active", "queued"].includes(l.status)).map((l) => l.marketplace));

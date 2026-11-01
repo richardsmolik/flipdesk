@@ -22,12 +22,15 @@ import { BinDetail, BinList } from "./pages/Bins";
 import Mileage from "./pages/Mileage";
 import Bulk from "./pages/Bulk";
 import PhoneCapture from "./pages/PhoneCapture";
+import Shoot from "./pages/Shoot";
+import Switch from "./pages/Switch";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
   ["/inbox", "Inbox", "🔔"],
   ["/items/new", "New listing", "✨"],
   ["/bulk", "Bulk upload", "🗂️"],
+  ["/shoot", "Shoot (phone)", "📷"],
   ["/source", "Sourcing mode", "🛒"],
   ["/inventory", "Inventory", "📦"],
   ["/bins", "Bins", "🗄️"],
@@ -40,6 +43,7 @@ const NAV = [
   ["/queue", "Sync queue", "🔄"],
   ["/connections", "Marketplaces", "🔌"],
   ["/settings", "Settings", "⚙️"],
+  ["/switch", "Switch to FlipDesk", "🔀"],
 ] as const;
 
 function Login() {
@@ -136,12 +140,19 @@ function Shell() {
           <Route path="/bins" element={<BinList />} />
           <Route path="/mileage" element={<Mileage />} />
           <Route path="/bulk" element={<Bulk />} />
+          <Route path="/shoot" element={<Shoot />} />
+          <Route path="/switch" element={<Switch />} />
           <Route path="/bins/:name" element={<BinDetail />} />
         </Routes>
       </main>
       <Toaster />
     </div>
   );
+}
+
+// Installable app: register the offline service worker (secure origins only: HTTPS or localhost).
+if (import.meta.env.PROD && "serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }
 
 createRoot(document.getElementById("root")!).render(

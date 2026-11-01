@@ -21,6 +21,7 @@ import { checkItem } from "./services/sourcing.js";
 import { isImageUpload, normalizeUploads } from "./services/uploads.js";
 import { importInventory, previewInventory } from "./services/inventoryImport.js";
 import { findDuplicates } from "./services/duplicates.js";
+import { aiStatus, scheduleAutoWrite } from "./services/autowrite.js";
 import { importSales, previewSales } from "./services/salesImport.js";
 import { checkUploadToken, createUploadToken, MAX_PER_TOKEN, phoneAddresses } from "./services/phone.js";
 import { advise, learn, recordPriceChange } from "./services/priceAdvice.js";
@@ -113,7 +114,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     try {
       const t = checkUploadToken(db, String(req.params.token));
       const item = getItem(db, t.item_id)!;
-      res.json({ title: item.title || "New item", sku: item.sku, photos: item.photos.map((p) => p.url), expiresAt: t.expires_at, remaining: MAX_PER_TOKEN - t.uploads });
+      const ai = aiStatus(db, item.id);
+      res.json({ title: item.title || "New item", sku: item.sku, price: item.price, photos: item.photos.map((p) => p.url), expiresAt: t.expires_at, remaining: MAX_PER_TOKEN - t.uploads, ai: ai.state });
     } catch (e) {
       res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
     }
@@ -132,7 +134,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     files.forEach((f, i) => db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(t.item_id, f.path, start + i));
     db.prepare("UPDATE upload_tokens SET uploads = uploads + ? WHERE token = ?").run(files.length, t.token);
     db.prepare("UPDATE items SET updated_at = datetime('now') WHERE id = ?").run(t.item_id);
-    res.json({ added: files.length, total: (db.prepare("SELECT COUNT(*) AS n FROM photos WHERE item_id = ?").get(t.item_id) as { n: number }).n });
+    const autoWriting = files.length ? scheduleAutoWrite(db, t.item_id) : false;
+    res.json({ autoWriting, added: files.length, total: (db.prepare("SELECT COUNT(*) AS n FROM photos WHERE item_id = ?").get(t.item_id) as { n: number }).n });
   });
 
   // eBay Marketplace Account Deletion notifications (required for production keysets when hosted). No login: eBay calls it.
@@ -305,6 +308,15 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     files.forEach((f, i) => db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(id, f.path, start + i));
     const skipped = (req as typeof req & { skippedUploads?: string[] }).skippedUploads ?? [];
     res.json({ ...getItem(db, id), skippedUploads: skipped });
+  });
+
+  api.get("/items/:id/ai-status", (req, res) => void res.json(aiStatus(db, Number(req.params.id))));
+  // Shoot mode: write the draft right away (no pause), in the background.
+  api.post("/items/:id/auto-write", (req, res) => {
+    const id = Number(req.params.id);
+    if (!getItem(db, id)) return void res.status(404).json({ error: "Not found" });
+    if (scheduleAutoWrite(db, id, 0)) return void res.json({ queued: true });
+    res.json({ queued: false, reason: "Item already has a title" });
   });
 
   api.get("/items/:id/duplicates", async (req, res) => void res.json(await findDuplicates(db, Number(req.params.id))));

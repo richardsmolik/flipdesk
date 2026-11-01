@@ -24,6 +24,11 @@ const app = createApp(db, { uploadDir: process.env.FLIPDESK_UPLOADS });
 app.set("trust proxy", 1); // behind Fly/Cloudflare/Render HTTPS proxies
 
 if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
+  // The service worker must never be cached, or app updates would get stuck.
+  app.get("/sw.js", (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
+    res.sendFile(path.resolve("dist/sw.js"));
+  });
   app.use(express.static("dist"));
   app.get(/^\/(?!api|uploads).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
 }
