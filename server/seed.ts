@@ -8,6 +8,7 @@ import { crosslist, processApiJobs, claimExtensionJob, completeJob } from "./ser
 import { recordSale, saveVariations } from "./services/sync.js";
 import { importComps } from "./services/comps.js";
 import { ingestEmail } from "./services/email.js";
+import { logTrip, savePlace } from "./services/mileage.js";
 
 const DB = process.env.FLIPDESK_DB ?? "data/flipdesk.db";
 for (const f of [DB, `${DB}-wal`, `${DB}-shm`]) fs.rmSync(f, { force: true });
@@ -211,6 +212,18 @@ ingestEmail(db, {
   subject: "Your item sold!",
   text: "Great news! Your Stanley Quencher tumbler sold. Price: $38.00. Ship by Nov 4.",
 });
+
+// ---- Mileage + a return ----
+savePlace(db, "Goodwill", 12.4);
+savePlace(db, "Estate sale", 22);
+savePlace(db, "Thrift store", 8.6);
+for (const [d, p] of [[3, "Goodwill"], [9, "Estate sale"], [16, "Thrift store"], [23, "Goodwill"], [30, "Goodwill"]] as const) {
+  logTrip(db, { place: p, date: new Date(Date.now() - d * 86400_000).toISOString().slice(0, 10) });
+}
+logTrip(db, { place: "Post office", miles: 3.2, purpose: "post office" });
+db.prepare(
+  "INSERT INTO returns (marketplace, kind, reason, sale_price, refund, return_shipping, fees_lost, restocked, sku, title, category, returned_at) VALUES ('poshmark', 'return', 'wrong_size', 44, 44, 0, 0, 1, 'FD-X1', 'Free People top', 'Clothing > Women', datetime('now','-12 days')), ('ebay', 'return', 'not_as_described', 89, 89, 9.4, 1.2, 1, 'FD-X2', 'Sony headphones', 'electronics', datetime('now','-20 days'))",
+).run();
 
 // ---- Shipping demo: older sales shipped; recent ones waiting (some with addresses) ----
 db.prepare("UPDATE sales SET shipped_at = sold_at, label_source = 'marketplace' WHERE sold_at < datetime('now','-3 days')").run();

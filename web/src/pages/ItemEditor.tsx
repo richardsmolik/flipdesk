@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, CONDITIONS, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import VariationsCard from "../components/Variations";
+import Lightbox from "../components/Lightbox";
 
 interface Draft {
   title: string;
@@ -162,6 +163,7 @@ function EditItem({ id }: { id: number }) {
   const { data: recs, reload: reloadRecs } = useFetch<Rec[]>(`/api/items/${id}/recommend?shipping=${shipping}`, [item?.price, item?.cost]);
   const [picked, setPicked] = useState<string[]>([]);
   const photoInput = useRef<HTMLInputElement>(null);
+  const [viewPhoto, setViewPhoto] = useState<number | null>(null);
   const { data: lotParts } = useFetch<{ itemId: number; quantity: number; sku: string; title: string; price: number; available: number }[]>(`/api/items/${id}/bundle`, [item?.quantity]);
 
   useEffect(() => {
@@ -263,7 +265,9 @@ function EditItem({ id }: { id: number }) {
             <div className="flex flex-wrap gap-2">
               {item.photos.map((p, i) => (
                 <div key={p.id} className="group relative">
-                  <img src={p.url} alt="" className="h-24 w-24 rounded-md object-cover" />
+                  <button onClick={() => setViewPhoto(i)} aria-label={`View photo ${i + 1}`}>
+                    <img src={p.url} alt="" className="h-24 w-24 rounded-md object-cover" />
+                  </button>
                   {i === 0 && <span className="absolute left-1 top-1 rounded bg-black/70 px-1 text-[10px]">Cover</span>}
                   <button className="absolute right-1 top-1 hidden rounded bg-black/70 px-1 text-xs group-hover:block" onClick={async () => (await api.del(`/api/photos/${p.id}`), reload())} aria-label="Remove photo">✕</button>
                   {i > 0 && (
@@ -471,6 +475,7 @@ function EditItem({ id }: { id: number }) {
         </div>
       </div>
 
+      {viewPhoto !== null && <Lightbox item={item} start={viewPhoto} onClose={() => setViewPhoto(null)} />}
       <SoldModal open={modal === "sold"} item={item} onClose={() => setModal(null)} onDone={(i) => (setData(i), setModal(null))} />
       <RestockModal open={modal === "restock"} item={item} onClose={() => setModal(null)} onDone={(i) => (setData(i), setModal(null))} />
       <CompsModal open={modal === "comps"} query={[form.brand, form.title].filter(Boolean).join(" ").slice(0, 80)} onClose={() => setModal(null)} onUse={(p) => (set("price", p), setModal(null))} />

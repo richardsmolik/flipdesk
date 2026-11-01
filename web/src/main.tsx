@@ -17,6 +17,9 @@ import Source from "./pages/Source";
 import Reports from "./pages/Reports";
 import Bundles from "./pages/Bundles";
 import Shipping from "./pages/Shipping";
+import { Labels, PackingSlips, PickList } from "./pages/Print";
+import { BinDetail, BinList } from "./pages/Bins";
+import Mileage from "./pages/Mileage";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
@@ -24,9 +27,11 @@ const NAV = [
   ["/items/new", "New listing", "✨"],
   ["/source", "Sourcing mode", "🛒"],
   ["/inventory", "Inventory", "📦"],
+  ["/bins", "Bins", "🗄️"],
   ["/shipping", "Shipping", "🚚"],
   ["/sales", "Sales & profit", "💵"],
   ["/reports", "Reports", "📈"],
+  ["/mileage", "Mileage", "🚗"],
   ["/bundles", "Bundles", "🎁"],
   ["/tools", "Power tools", "⚡"],
   ["/queue", "Sync queue", "🔄"],
@@ -125,6 +130,9 @@ function Shell() {
           <Route path="/reports" element={<Reports />} />
           <Route path="/bundles" element={<Bundles />} />
           <Route path="/shipping" element={<Shipping />} />
+          <Route path="/bins" element={<BinList />} />
+          <Route path="/mileage" element={<Mileage />} />
+          <Route path="/bins/:name" element={<BinDetail />} />
         </Routes>
       </main>
       <Toaster />
@@ -135,7 +143,13 @@ function Shell() {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <BrowserRouter>
-      <Shell />
+      <Routes>
+        {/* Print pages render without the app chrome */}
+        <Route path="/print/slips" element={<PackingSlips />} />
+        <Route path="/print/picklist" element={<PickList />} />
+        <Route path="/print/labels" element={<Labels />} />
+        <Route path="*" element={<Shell />} />
+      </Routes>
     </BrowserRouter>
   </StrictMode>,
 );

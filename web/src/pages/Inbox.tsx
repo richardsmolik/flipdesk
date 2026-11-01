@@ -59,7 +59,7 @@ export default function Inbox() {
               {!a.resolved_at && (
                 <div className="flex shrink-0 flex-col gap-1">
                   {a.kind === "oversell" && a.sale_id && (
-                    <button className="btn-ghost text-xs" title="Removes the second sale so your profit stays accurate" onClick={async () => { await api.post(`/api/sales/${a.sale_id}/cancel`, { restock: false, reason: "oversell cancelled" }); toast("Cancelled order removed from your sales"); reload(); }}>
+                    <button className="btn-ghost text-xs" title="Removes the second sale so your profit stays accurate" onClick={async () => { await api.post(`/api/sales/${a.sale_id}/cancel`, { restock: false, kind: "oversell", reason: "oversold" }); toast("Cancelled order removed from your sales"); reload(); }}>
                       Order cancelled, remove sale
                     </button>
                   )}

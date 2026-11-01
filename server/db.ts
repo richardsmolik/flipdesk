@@ -254,6 +254,46 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // v4: returns, mileage (saved places + trips), purchased labels
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+        variation_id INTEGER,
+        marketplace TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'return',        -- return | cancel | oversell
+        reason TEXT NOT NULL DEFAULT '',            -- not_as_described | changed_mind | damaged | wrong_size | never_arrived | other
+        sale_price REAL NOT NULL DEFAULT 0,
+        refund REAL NOT NULL DEFAULT 0,
+        return_shipping REAL NOT NULL DEFAULT 0,    -- what the return cost you
+        fees_lost REAL NOT NULL DEFAULT 0,          -- fees the marketplace kept
+        restocked INTEGER NOT NULL DEFAULT 0,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        sku TEXT, title TEXT, brand TEXT, category TEXT,
+        sold_at TEXT,
+        returned_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS places (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        round_trip_miles REAL NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS trips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL DEFAULT (date('now')),
+        place TEXT NOT NULL DEFAULT '',
+        purpose TEXT NOT NULL DEFAULT 'sourcing',   -- sourcing | post office | supplies | other
+        miles REAL NOT NULL,
+        rate REAL NOT NULL,
+        amount REAL NOT NULL,
+        odometer_start REAL, odometer_end REAL,
+        note TEXT NOT NULL DEFAULT '',
+        expense_id INTEGER REFERENCES expenses(id) ON DELETE SET NULL
+      );
+      ALTER TABLE sales ADD COLUMN label_url TEXT;
+    `);
+  },
 ];
 
 function migrate(db: DatabaseSync) {

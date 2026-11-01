@@ -3,6 +3,9 @@ import { api } from "../api";
 import { toast, useFetch, useMarketplaces } from "../ui";
 
 interface S {
+  shipFrom: { name?: string; street1?: string; street2?: string; city?: string; state?: string; zip?: string; phone?: string; email?: string } | null;
+  mileage: { rate?: number } | null;
+  shop: { name?: string; thankYou?: string } | null;
   shipping: { defaultProvider?: string; perMarketplace?: Record<string, string>; defaultPackage?: { weightOz?: number; length?: number; width?: number; height?: number } } | null;
   weekly: { enabled?: boolean; day?: number; hour?: number; timezone?: string } | null;
   notify: { ntfyTopic?: string; onSale?: boolean; onOversell?: boolean; onEmailReview?: boolean; onWeekly?: boolean } | null;
@@ -51,13 +54,16 @@ export default function Settings() {
   const autoDrop = s.autoDrop ?? { enabled: false, afterDays: 21, everyDays: 7, dropPct: 5 };
   const ebay = s.ebay ?? {};
   const fees = s.feeOverrides ?? {};
+  const shipFrom = s.shipFrom ?? {};
+  const mileage = s.mileage ?? { rate: 0.7 };
+  const shop = s.shop ?? { name: "", thankYou: "Thank you for your order! If anything isn't right, message me before leaving feedback and I'll make it right." };
   const shipping = s.shipping ?? { defaultProvider: "ebay", perMarketplace: {}, defaultPackage: { weightOz: 16 } };
   const pkg = shipping.defaultPackage ?? {};
   const weekly = s.weekly ?? { enabled: true, day: 1, hour: 8, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
   const sourcing = s.sourcing ?? { minProfit: 10, minRoiPct: 100 };
   const notifyS = s.notify ?? { onSale: true, onOversell: true, onEmailReview: true };
   const save = async () => {
-    await api.put("/api/settings", { shipping, weekly, notify: notifyS, sourcing, minutesPerItem: s.minutesPerItem ?? 20, feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
+    await api.put("/api/settings", { shipFrom, mileage, shop, shipping, weekly, notify: notifyS, sourcing, minutesPerItem: s.minutesPerItem ?? 20, feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
     toast("Settings saved");
   };
 
@@ -119,6 +125,12 @@ export default function Settings() {
       </section>
 
       <section className="card space-y-3 p-4">
+        <h2 className="font-semibold">🧾 Packing slips</h2>
+        <div><label className="label">Shop name</label><input className="input" value={shop.name ?? ""} onChange={(e) => setS({ ...s, shop: { ...shop, name: e.target.value } })} /></div>
+        <div><label className="label">Thank-you note</label><textarea className="input min-h-16" value={shop.thankYou ?? ""} onChange={(e) => setS({ ...s, shop: { ...shop, thankYou: e.target.value } })} /></div>
+      </section>
+
+      <section className="card space-y-3 p-4">
         <h2 className="font-semibold">Listing defaults</h2>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">SKU prefix</label><input className="input" value={s.skuPrefix ?? "FD"} onChange={(e) => setS({ ...s, skuPrefix: e.target.value })} /></div>
@@ -134,6 +146,11 @@ export default function Settings() {
           <div><label className="label">Min return on cost (%)</label><input className="input" type="number" value={sourcing.minRoiPct} onChange={(e) => setS({ ...s, sourcing: { ...sourcing, minRoiPct: Number(e.target.value) } })} /></div>
           <div><label className="label">Minutes per item</label><input className="input" type="number" value={s.minutesPerItem ?? 20} onChange={(e) => setS({ ...s, minutesPerItem: Number(e.target.value) })} /></div>
         </div>
+        <div className="flex items-center gap-2 text-sm">
+          <label className="label mb-0">Mileage rate ($/mile)</label>
+          <input className="input w-24" type="number" step="0.005" value={mileage.rate ?? 0.7} onChange={(e) => setS({ ...s, mileage: { rate: Number(e.target.value) } })} />
+          <span className="text-xs text-zinc-500">Use the IRS standard business rate for the current year (it changes every January).</span>
+        </div>
         <p className="text-xs text-zinc-500">Sourcing mode's "pay at most" price must meet both the profit and return targets. Minutes per item (sourcing, photos, listing, shipping) is used for profit per hour in Reports.</p>
       </section>
 
@@ -141,7 +158,7 @@ export default function Settings() {
         <h2 className="font-semibold">🚚 Shipping labels</h2>
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <span className="text-zinc-400">When I buy my own label, use:</span>
-          {[["ebay", "eBay labels (eBay orders) + Pirate Ship elsewhere"], ["pirateship", "Pirate Ship for everything"], ["manual", "Manual"]].map(([v, label]) => (
+          {[["ebay", "eBay labels (eBay orders) + Pirate Ship elsewhere"], ["pirateship", "Pirate Ship for everything"], ["shippo", "Buy in FlipDesk (Shippo)"], ["manual", "Manual"]].map(([v, label]) => (
             <label key={v} className="flex items-center gap-1.5"><input type="radio" name="prov" checked={(shipping.defaultProvider ?? "ebay") === v} onChange={() => setS({ ...s, shipping: { ...shipping, defaultProvider: v } })} /> {label}</label>
           ))}
         </div>
@@ -156,6 +173,7 @@ export default function Settings() {
                   <option value="marketplace">Site's prepaid label</option>
                   {m.id === "ebay" && <option value="ebay">eBay labels</option>}
                   <option value="pirateship">Pirate Ship</option>
+                  <option value="shippo">Shippo (in FlipDesk)</option>
                   <option value="manual">Manual</option>
                 </select>
               </label>
@@ -166,6 +184,14 @@ export default function Settings() {
           {([["weightOz", "Default weight (oz)"], ["length", "Length (in)"], ["width", "Width (in)"], ["height", "Height (in)"]] as const).map(([k, label]) => (
             <div key={k}><label className="label">{label}</label><input className="input" type="number" value={pkg[k] ?? ""} onChange={(e) => setS({ ...s, shipping: { ...shipping, defaultPackage: { ...pkg, [k]: e.target.value === "" ? undefined : Number(e.target.value) } } })} /></div>
           ))}
+        </div>
+        <div>
+          <label className="label">Ship-from address (for labels bought in FlipDesk)</label>
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+            {([["name", "Name"], ["street1", "Street"], ["street2", "Apt / suite"], ["city", "City"], ["state", "State"], ["zip", "ZIP"], ["phone", "Phone"], ["email", "Email"]] as const).map(([k, ph]) => (
+              <input key={k} className="input" placeholder={ph} value={shipFrom[k] ?? ""} onChange={(e) => setS({ ...s, shipFrom: { ...shipFrom, [k]: e.target.value } })} />
+            ))}
+          </div>
         </div>
         <p className="text-xs text-zinc-500">Poshmark, Mercari, Depop, Vinted, Grailed, Whatnot and Facebook give you a prepaid label by default. Pirate Ship has no public API, so FlipDesk uses its spreadsheet import and export.</p>
       </section>

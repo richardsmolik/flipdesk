@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, money, type Item } from "../api";
 import { toast } from "../ui";
 import BarcodeScanner from "../components/BarcodeScanner";
+import { QuickTrip } from "./Mileage";
 
 interface Check {
   demo: boolean;
@@ -81,6 +82,7 @@ export default function Source() {
 
   const reset = () => (setPhoto(null), setQ(""), setBarcode(""), setAsk(""), setR(null), setBought(null));
   const v = r ? VERDICT[r.verdict] : null;
+  const [showTrip, setShowTrip] = useState(false);
 
   return (
     <div className="mx-auto max-w-md space-y-4">
@@ -89,6 +91,10 @@ export default function Source() {
         <p className="text-sm text-zinc-400">Should I buy this? Snap it, enter the price on the tag, get an answer.</p>
       </div>
 
+      <div className="text-right">
+        <button className="text-xs text-zinc-400 hover:text-zinc-100" onClick={() => setShowTrip(!showTrip)}>🚗 {showTrip ? "Hide" : "Log this sourcing trip"}</button>
+      </div>
+      {showTrip && <div className="card p-3"><QuickTrip defaultPlace={store} onLogged={() => setShowTrip(false)} /></div>}
       <BarcodeScanner onCode={(c) => (setBarcode(c), setPhoto(null), setQ(""), check(undefined, c))} />
       {barcode && <div className="text-xs text-zinc-400">Barcode <span className="tabular-nums text-zinc-200">{barcode}</span> <button className="ml-1 text-zinc-500 hover:text-zinc-200" onClick={() => setBarcode("")}>✕</button></div>}
       <div className="text-center text-[11px] uppercase tracking-wide text-zinc-600">or</div>

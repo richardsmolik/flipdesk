@@ -1,5 +1,6 @@
 /** "What's actually making me money" - profit, ROI and speed by source, brand, category, marketplace. */
 import { getSetting, type Db } from "../db.js";
+import { returnsReport } from "./sync.js";
 
 const r1 = (n: number) => Math.round(n * 10) / 10;
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -16,6 +17,8 @@ export interface GroupRow {
   avgDaysToSell: number | null;
   avgProfit: number | null;
   avgAgeDays: number | null;
+  mileageCost?: number;
+  profitAfterMileage?: number;
 }
 
 function groupBy(db: Db, keyExpr: string, days: number): GroupRow[] {
@@ -62,6 +65,15 @@ function groupBy(db: Db, keyExpr: string, days: number): GroupRow[] {
 
 export function profitReport(db: Db, days = 365) {
   const bySource = groupBy(db, "COALESCE(NULLIF(TRIM(i.source), ''), '(not set)')", days);
+  // Gas money: trips whose destination matches the source name.
+  const miles = db.prepare("SELECT LOWER(TRIM(place)) AS p, SUM(amount) AS amt FROM trips WHERE date >= date('now', ?) GROUP BY 1").all(`-${days} days`) as { p: string; amt: number }[];
+  for (const g of bySource) {
+    const m = miles.find((x) => x.p === g.key.toLowerCase().trim());
+    if (m) {
+      g.mileageCost = r2(m.amt);
+      g.profitAfterMileage = r2(g.profit - m.amt);
+    }
+  }
   const byBrand = groupBy(db, "COALESCE(NULLIF(TRIM(i.brand), ''), '(not set)')", days);
   const byCategory = groupBy(
     db,
@@ -128,5 +140,12 @@ export function profitReport(db: Db, days = 365) {
   if (mp) insights.push({ kind: "info", text: `Most profit per sale on ${mp.key}: $${r2(mp.profit / mp.units)} average, ${mp.feePct}% fees.` });
   if (perHour !== null) insights.push({ kind: perHour >= 25 ? "good" : "info", text: `You're earning about $${perHour}/hour at ${minutes} min per item (change the minutes in Settings).` });
 
-  return { days, bySource, byBrand: byBrand.slice(0, 25), byCategory, byMarketplace, byMonth, aging, perHour, minutesPerItem: minutes, insights };
+  const returns = returnsReport(db, days);
+  const avgRate = returns.totals.ratePct;
+  const worst = returns.byMarketplace.find((m) => m.returned >= 3 && m.ratePct >= Math.max(5, avgRate * 2));
+  if (worst) insights.push({ kind: "bad", text: `Returns on ${worst.marketplace} run ${worst.ratePct}%, versus ${avgRate}% overall. Check measurements and flaw photos for items you list there.` });
+  const topReason = returns.reasons[0];
+  if (topReason && returns.totals.returned >= 3) insights.push({ kind: "info", text: `Most common return reason: ${topReason.reason.replace(/_/g, " ")} (${topReason.n}).` });
+
+  return { returns, days, bySource, byBrand: byBrand.slice(0, 25), byCategory, byMarketplace, byMonth, aging, perHour, minutesPerItem: minutes, insights };
 }

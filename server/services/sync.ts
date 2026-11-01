@@ -381,17 +381,43 @@ export function saveVariations(db: Db, itemId: number, input: VariationInput[]) 
   return getItem(db, itemId);
 }
 
+export type ReturnKind = "return" | "cancel" | "oversell" | "partial_refund";
+export const RETURN_REASONS = ["not_as_described", "changed_mind", "wrong_size", "damaged_in_shipping", "never_arrived", "buyer_cancelled", "other"] as const;
+
 /**
- * Cancel a sale (buyer cancelled, oversell, refund) or record a return.
- * restock=true puts the units back (return / cancelled before shipping);
- * restock=false just removes the sale (e.g. the oversold second order - the item went to the first buyer).
+ * Cancel a sale, record a return, or give a partial refund - and log it in `returns` for return-rate reports.
+ *  - return / cancel / oversell: the sale is removed from revenue; restock=true puts units back.
+ *  - partial_refund: the sale stays, its price drops by `refund`.
+ * Cost of a return = return shipping + fees the marketplace kept (+ the item's cost if it can't be restocked).
  */
-export function cancelSale(db: Db, saleId: number, opts: { restock: boolean; reason?: string }) {
+export function cancelSale(
+  db: Db,
+  saleId: number,
+  opts: { restock: boolean; reason?: string; kind?: ReturnKind; refund?: number; returnShipping?: number; feesLost?: number },
+) {
   const s = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as
-    | { id: number; item_id: number; variation_id: number | null; quantity: number; marketplace: string; sale_price: number; cost: number }
+    | { id: number; item_id: number; variation_id: number | null; quantity: number; marketplace: string; sale_price: number; shipping_charged: number; shipping_cost: number; fees: number; cost: number; sold_at: string }
     | undefined;
   if (!s) throw new Error("Sale not found");
   const item = getItem(db, s.item_id);
+  const kind: ReturnKind = opts.kind ?? (opts.restock ? "return" : "cancel");
+  const refund = opts.refund ?? (kind === "partial_refund" ? 0 : s.sale_price + s.shipping_charged);
+  db.prepare(
+    `INSERT INTO returns (item_id, variation_id, marketplace, kind, reason, sale_price, refund, return_shipping, fees_lost, restocked, quantity, sku, title, brand, category, sold_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    s.item_id, s.variation_id, s.marketplace, kind, opts.reason ?? "", s.sale_price, refund, opts.returnShipping ?? 0, opts.feesLost ?? 0,
+    opts.restock ? 1 : 0, s.quantity, item?.sku ?? null, item?.title ?? null, item?.brand ?? null, item?.category ?? null, s.sold_at,
+  );
+
+  if (kind === "partial_refund") {
+    const price = Math.max(0, s.sale_price - refund);
+    const profit = r2(price + s.shipping_charged - s.fees - s.shipping_cost - s.cost);
+    db.prepare("UPDATE sales SET sale_price = ?, profit = ? WHERE id = ?").run(price, profit, saleId);
+    logActivity(db, "refund", `Partial refund of $${refund.toFixed(2)} on ${item?.sku ?? "item"}${opts.reason ? ` (${opts.reason.replace(/_/g, " ")})` : ""}`, s.item_id);
+    return getItem(db, s.item_id);
+  }
+
   db.prepare("DELETE FROM sales WHERE id = ?").run(saleId); // alerts tied to it are removed too
   if (opts.restock && item) {
     const unitCost = s.quantity ? s.cost / s.quantity : item.cost;
@@ -401,11 +427,57 @@ export function cancelSale(db: Db, saleId: number, opts: { restock: boolean; rea
     else db.prepare("UPDATE items SET quantity_purchased = MAX(quantity, quantity_purchased - ?) WHERE id = ?").run(s.quantity, s.item_id);
     recomputeItemTotals(db, s.item_id);
   }
+  const label = kind === "return" ? "Return" : kind === "oversell" ? "Oversold order cancelled" : "Cancelled";
   logActivity(
     db,
-    "cancel",
-    `Removed ${MARKETPLACES[s.marketplace as MarketplaceId]?.name ?? s.marketplace} sale of ${item?.sku ?? "item"} ($${s.sale_price.toFixed(2)})${opts.restock ? " - units back in stock" : ""}${opts.reason ? ` - ${opts.reason}` : ""}`,
+    kind === "return" ? "return" : "cancel",
+    `${label}: ${MARKETPLACES[s.marketplace as MarketplaceId]?.name ?? s.marketplace} sale of ${item?.sku ?? "item"} ($${s.sale_price.toFixed(2)})${opts.restock ? " - back in stock" : ""}${opts.reason ? ` - ${opts.reason.replace(/_/g, " ")}` : ""}`,
     s.item_id,
   );
   return getItem(db, s.item_id);
+}
+
+/** Return rates and costs by marketplace and category. */
+export function returnsReport(db: Db, days = 365) {
+  const since = `-${days} days`;
+  const sales = db.prepare("SELECT marketplace, COUNT(*) AS n FROM sales WHERE sold_at >= datetime('now', ?) GROUP BY marketplace").all(since) as { marketplace: string; n: number }[];
+  const rets = db
+    .prepare(
+      `SELECT marketplace, COUNT(*) AS n, SUM(return_shipping + fees_lost) AS cost
+       FROM returns WHERE kind IN ('return','partial_refund') AND returned_at >= datetime('now', ?) GROUP BY marketplace`,
+    )
+    .all(since) as { marketplace: string; n: number; cost: number }[];
+  const byMarketplace = [...new Set([...sales.map((x) => x.marketplace), ...rets.map((x) => x.marketplace)])]
+    .map((m) => {
+      const sold = sales.find((x) => x.marketplace === m)?.n ?? 0;
+      const r = rets.find((x) => x.marketplace === m);
+      const returned = r?.n ?? 0;
+      return { marketplace: m, sold, returned, ratePct: sold + returned ? Math.round((returned / (sold + returned)) * 1000) / 10 : 0, cost: r2(r?.cost ?? 0) };
+    })
+    .sort((a, b) => b.ratePct - a.ratePct);
+  const byCategory = db
+    .prepare(
+      `SELECT COALESCE(NULLIF(TRIM(CASE WHEN instr(category, '>') > 0 THEN substr(category, 1, instr(category, '>') - 1) ELSE category END), ''), '(not set)') AS category,
+              COUNT(*) AS returned, ROUND(SUM(return_shipping + fees_lost), 2) AS cost
+       FROM returns WHERE kind IN ('return','partial_refund') AND returned_at >= datetime('now', ?) GROUP BY 1 ORDER BY returned DESC`,
+    )
+    .all(since) as { category: string; returned: number; cost: number }[];
+  const reasons = db
+    .prepare("SELECT COALESCE(NULLIF(reason, ''), 'not given') AS reason, COUNT(*) AS n FROM returns WHERE kind IN ('return','partial_refund') AND returned_at >= datetime('now', ?) GROUP BY 1 ORDER BY n DESC")
+    .all(since) as { reason: string; n: number }[];
+  const t = db
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(return_shipping + fees_lost),0) AS cost, COALESCE(SUM(CASE WHEN restocked = 0 AND kind = 'return' THEN 1 ELSE 0 END),0) AS lost,
+              COALESCE(SUM(CASE WHEN kind IN ('cancel','oversell') THEN 1 ELSE 0 END),0) AS cancels
+       FROM returns WHERE returned_at >= datetime('now', ?)`,
+    )
+    .get(since) as { n: number; cost: number; lost: number; cancels: number };
+  const totalSold = sales.reduce((a, x) => a + x.n, 0);
+  const totalReturned = rets.reduce((a, x) => a + x.n, 0);
+  return {
+    byMarketplace,
+    byCategory,
+    reasons,
+    totals: { returned: totalReturned, cancels: t.cancels, notRestocked: t.lost, cost: r2(t.cost), ratePct: totalSold + totalReturned ? Math.round((totalReturned / (totalSold + totalReturned)) * 1000) / 10 : 0 },
+  };
 }

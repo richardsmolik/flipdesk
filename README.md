@@ -19,6 +19,11 @@ A reseller command center. Create a listing once, post it to **11 marketplaces**
 | **Bundles** | Lot listings made of several items, kept in sync both ways (lot sells: its items come down; an item sells alone: the lot comes down; restock: the lot can be filled again). Suggestions for natural groups (same brand, size or category, similar prices, stale stock first). eBay multi-buy discounts ("buy 2 save 10%") via the Marketing API. |
 | **Weekly summary** | Monday-morning push (day, hour and time zone are configurable): sales and profit vs last week, top sale, best source, stock going stale, a bundle idea and this week's to-dos |
 | **Shipping labels** | Choose per marketplace: the site's prepaid label (Poshmark, Depop, Vinted, Whatnot...), **eBay labels** (exact cost pulled from eBay's Finances API), or **Pirate Ship** (export orders as CSV, then import shipment history to attach costs and tracking, which go back to eBay automatically). Profit updates with the real label cost. |
+| **Photo views** | Photo grid with tabs for **Inventory / Selling / Not sold yet** (oldest first, with days-listed badges) **/ Drafts / Sold**, and a full-screen photo viewer (arrow keys or swipe, thumbnails, links to each live listing). A list layout is still available. |
+| **Packing slips, pick list, labels** | 4x6 packing slips with item photo, SKU, bin and your thank-you note; a pick list sorted by bin; QR labels for bins and items (2.25x1.25 thermal or 4x6). Scan a bin's QR to see everything in it, with photos. |
+| **Returns tracking** | Returns, cancellations and partial refunds recorded with reason, refund, return label and fees kept. Return rate by site and category, top reasons, and alerts when one site's returns run high. |
+| **Mileage** | Save stores with round-trip miles and log trips with one tap (also from sourcing mode). Each trip becomes a mileage expense at your rate, with an IRS-ready log (date, destination, purpose, miles) as CSV. Reports show profit per store after gas money. |
+| **Buy labels in FlipDesk** | Shippo: compare USPS/UPS/FedEx rates, buy a 4x6 label, save the cost and tracking, and send tracking to eBay. Demo rates without a key. |
 | **Cancellations and returns** | Remove a cancelled or oversold sale, or put a returned item back in stock, so profit stays honest |
 | **Profit-first** | Per-site fee math (with your own overrides), a "where you keep the most" ranking for every item, true profit after fees, shipping and cost of goods |
 | **eBay power tools** | Stale-listing radar with a recommended fix for each listing, offers to watchers, relisting, bulk repricing, automatic price drops that never go below your floor price |
@@ -42,6 +47,7 @@ Everything works in **demo mode** without any keys. Add keys to `.env` (copy `.e
 | Shopify | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_ADMIN_TOKEN` |
 | Sale emails | `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` (Gmail: an app password from myaccount.google.com/apppasswords) |
 | Phone access (sourcing) | `HOST=0.0.0.0` and `FLIPDESK_PASSWORD`, then `npm run build && npm start` and open `http://<computer-LAN-IP>:8787` on your phone. The server refuses to start on your network without a password. |
+| Labels in FlipDesk | `SHIPPO_API_KEY` (free test keys start with `shippo_test_`), plus your ship-from address in Settings |
 | Phone notifications | Install the ntfy app, subscribe to a private topic name, and enter the same name in Settings |
 
 eBay setup notes:
@@ -76,7 +82,7 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 ## Status and known gaps
 
-- **Tested:** `npm test` runs 56 tests, including barcodes, lots (both directions and restock), bundle suggestions, multi-buy, weekly summary scheduling, the Pirate Ship round trip and cancellations/returns. The earlier 39 tests cover covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
+- **Tested:** `npm test` runs 62 tests, including the inventory views, bins and packing-slip data, returns and partial refunds, the mileage log and after-gas profit, and Shippo label buying (demo mode). Of the earlier tests, 56, including barcodes, lots (both directions and restock), bundle suggestions, multi-buy, weekly summary scheduling, the Pirate Ship round trip and cancellations/returns. The earlier 39 tests cover covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
 - **Barcode lookups** (Open Library, UPCitemdb) couldn't be reached from the build sandbox, so they're tested with stand-in services. Live camera scanning needs HTTPS (or localhost); over plain home Wi-Fi the scanner reads a photo of the barcode instead.
 - **Pirate Ship has no public API.** The integration uses its spreadsheet import and shipment-history export. Exported orders carry an "Order ID" of `FD-<sale>` so labels match back exactly.
 - **eBay label costs** come from the Finances API (`sell.finances` scope). If you connected eBay before this update, reconnect once.
@@ -91,6 +97,5 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 - Sold-comps pricing through eBay's Marketplace Insights API (needs partner approval)
 - Multi-size listings filled by the extension on Poshmark and Depop
-- Buying shipping labels inside FlipDesk (EasyPost/Shippo) for sellers who want one-click labels
-- Packing slips and printable SKU/bin labels
+- Live Shippo test against a real key (the code follows Shippo's documented shipments/transactions API, but this build ran in demo mode)
 - Product mode: users, Postgres, Stripe billing, hosted image CDN

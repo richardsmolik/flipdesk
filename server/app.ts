@@ -18,6 +18,8 @@ import { dashboard, toCsv } from "./services/reports.js";
 import { notify } from "./services/alerts.js";
 import { compsLibrary, importComps } from "./services/comps.js";
 import { checkItem } from "./services/sourcing.js";
+import { buyLabel, getRates, shippoLive } from "./services/shippo.js";
+import { deleteTrip, logTrip, mileageSummary, savePlace } from "./services/mileage.js";
 import { parseAddress, pirateShipExport, pirateShipImport, providerFor, syncEbayLabelCosts, toShip, updateShipping } from "./services/shipping.js";
 import { buildDigest, sendDigest } from "./services/digest.js";
 import { bundleParts, createBundle, createMultiBuy, endPromotion, suggestBundles } from "./services/bundles.js";
@@ -129,19 +131,43 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
 
   // ---------------- Items ----------------
   api.get("/items", (req, res) => {
-    const { status, q, marketplace } = req.query as Record<string, string | undefined>;
+    const { status, q, marketplace, view } = req.query as Record<string, string | undefined>;
     const where: string[] = [];
     const args: (string | number)[] = [];
-    if (status && status !== "all") (where.push("i.status = ?"), args.push(status));
+    let order = "i.updated_at DESC, i.id DESC";
+    const LIVE = "EXISTS (SELECT 1 FROM listings l WHERE l.item_id = i.id AND l.status = 'active')";
+    // Views: inventory (everything in stock) | selling (live somewhere) | unsold (live, never sold a unit; oldest first) | drafts | sold
+    if (view === "inventory") where.push("i.status IN ('active','draft') AND i.quantity > 0");
+    else if (view === "selling") where.push(`i.status = 'active' AND i.quantity > 0 AND ${LIVE}`);
+    else if (view === "unsold") {
+      where.push(`i.status = 'active' AND i.quantity > 0 AND ${LIVE} AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id)`);
+      order = "(SELECT MIN(l.listed_at) FROM listings l WHERE l.item_id = i.id AND l.status = 'active') ASC";
+    } else if (view === "drafts") where.push("i.status = 'draft'");
+    else if (view === "sold") {
+      where.push("EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id)");
+      order = "(SELECT MAX(sold_at) FROM sales s WHERE s.item_id = i.id) DESC";
+    } else if (status && status !== "all") (where.push("i.status = ?"), args.push(status));
     if (q) {
       where.push("(i.title LIKE ? OR i.sku LIKE ? OR i.brand LIKE ? OR i.location LIKE ?)");
       args.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     if (marketplace) (where.push("EXISTS (SELECT 1 FROM listings l WHERE l.item_id = i.id AND l.marketplace = ? AND l.status = 'active')"), args.push(marketplace));
     const rows = db
-      .prepare(`SELECT i.* FROM items i ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY i.updated_at DESC, i.id DESC LIMIT 500`)
+      .prepare(`SELECT i.* FROM items i ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${order} LIMIT 500`)
       .all(...args) as unknown as ItemRow[];
     res.json(rows.map((r) => hydrateItem(db, r)));
+  });
+
+  api.get("/items-counts", (_req, res) => {
+    const LIVE = "EXISTS (SELECT 1 FROM listings l WHERE l.item_id = i.id AND l.status = 'active')";
+    const c = (where: string) => (db.prepare(`SELECT COUNT(*) AS n FROM items i WHERE ${where}`).get() as { n: number }).n;
+    res.json({
+      inventory: c("i.status IN ('active','draft') AND i.quantity > 0"),
+      selling: c(`i.status = 'active' AND i.quantity > 0 AND ${LIVE}`),
+      unsold: c(`i.status = 'active' AND i.quantity > 0 AND ${LIVE} AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id)`),
+      drafts: c("i.status = 'draft'"),
+      sold: c("EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id)"),
+    });
   });
 
   api.post("/items", (req, res) => {
@@ -325,7 +351,16 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   api.post("/sales/:id/cancel", async (req, res) => {
-    const b = z.object({ restock: z.boolean().default(false), reason: z.string().optional() }).parse(req.body);
+    const b = z
+      .object({
+        restock: z.boolean().default(false),
+        reason: z.string().optional(),
+        kind: z.enum(["return", "cancel", "oversell", "partial_refund"]).optional(),
+        refund: z.number().min(0).optional(),
+        returnShipping: z.number().min(0).optional(),
+        feesLost: z.number().min(0).optional(),
+      })
+      .parse(req.body);
     const item = cancelSale(db, Number(req.params.id), b);
     await processApiJobs(db);
     res.json(item);
@@ -358,12 +393,60 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   const memUploadShip = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+  // ---------------- Bins & printing ----------------
+  api.get("/bins", (_req, res) => {
+    res.json(
+      db
+        .prepare(
+          `SELECT TRIM(location) AS name, COUNT(*) AS items, SUM(quantity) AS units, ROUND(SUM(price * quantity), 2) AS value,
+                  MAX(CAST(julianday('now') - julianday(COALESCE(sourced_at, created_at)) AS INTEGER)) AS oldest_days
+           FROM items WHERE TRIM(location) != '' AND status IN ('active','draft') AND quantity > 0
+           GROUP BY TRIM(location) ORDER BY TRIM(location)`,
+        )
+        .all(),
+    );
+  });
+  api.get("/bins/:name", (req, res) => {
+    const rows = db
+      .prepare("SELECT * FROM items WHERE TRIM(location) = ? AND status IN ('active','draft') AND quantity > 0 ORDER BY title")
+      .all(String(req.params.name).trim()) as unknown as ItemRow[];
+    res.json(rows.map((r) => hydrateItem(db, r)));
+  });
+  // Packing slips / pick list data for sales (default: everything not shipped yet).
+  api.get("/print/orders", (req, res) => {
+    const ids = String(req.query.ids ?? "")
+      .split(",")
+      .map(Number)
+      .filter(Boolean);
+    const rows = db
+      .prepare(
+        `SELECT s.id, s.marketplace, s.quantity, s.sale_price, s.order_id, s.buyer, s.sold_at, s.ship_to, s.variation_id,
+                i.id AS item_id, i.sku, i.title, i.location, i.condition,
+                (SELECT path FROM photos p WHERE p.item_id = i.id ORDER BY position LIMIT 1) AS photo,
+                (SELECT attrs FROM variations v WHERE v.id = s.variation_id) AS attrs
+         FROM sales s JOIN items i ON i.id = s.item_id
+         WHERE ${ids.length ? `s.id IN (${ids.map(() => "?").join(",")})` : "s.shipped_at IS NULL AND s.sold_at >= datetime('now','-30 days')"}
+         ORDER BY i.location, i.title`,
+      )
+      .all(...ids) as Record<string, unknown>[];
+    res.json({
+      shop: getSetting(db, "shop", { name: "", thankYou: "Thank you for your order! If anything isn't right, message me before leaving feedback and I'll make it right." }),
+      orders: rows.map((r) => ({
+        ...r,
+        ship_to: r.ship_to ? JSON.parse(String(r.ship_to)) : null,
+        variation: r.attrs ? Object.entries(JSON.parse(String(r.attrs))).map(([k, v]) => `${k}: ${v}`).join(" / ") : null,
+        photo: r.photo ? (String(r.photo).startsWith("http") ? r.photo : `/uploads/${path.basename(String(r.photo))}`) : null,
+      })),
+    });
+  });
+
   // ---------------- Shipping ----------------
   api.get("/shipping", (req, res) => {
     res.json({
       rows: toShip(db, Number(req.query.days ?? 30)),
       providers: Object.fromEntries(MARKETPLACE_IDS.map((m) => [m, providerFor(db, m)])),
       ebayLive: ebayIsLive(db),
+      shippoLive: shippoLive(),
     });
   });
   api.post("/sales/:id/shipping", (req, res) => {
@@ -390,6 +473,12 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     if (!req.file) return void res.status(400).json({ error: "Choose your Pirate Ship export CSV." });
     const r = await pirateShipImport(db, req.file.buffer.toString("utf8"));
     res.json(r);
+  });
+  const Parcel = z.object({ weightOz: z.number().positive().optional(), length: z.number().positive().optional(), width: z.number().positive().optional(), height: z.number().positive().optional() });
+  api.post("/sales/:id/rates", async (req, res) => void res.json(await getRates(db, Number(req.params.id), Parcel.parse(req.body ?? {}))));
+  api.post("/sales/:id/label", async (req, res) => {
+    const { rate } = z.object({ rate: z.object({ id: z.string(), carrier: z.string(), service: z.string(), amount: z.number(), days: z.number().nullable() }) }).parse(req.body);
+    res.json(await buyLabel(db, Number(req.params.id), rate));
   });
   api.post("/shipping/ebay-sync", async (_req, res) => void res.json({ updated: await syncEbayLabelCosts(db) }));
 
@@ -645,7 +734,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- Settings ----------------
-  const SETTING_KEYS = ["weekly", "shipping", "notify", "minutesPerItem", "sourcing", "feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
+  const SETTING_KEYS = ["shop", "mileage", "shipFrom", "weekly", "shipping", "notify", "minutesPerItem", "sourcing", "feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
   api.get("/settings", (_req, res) => {
     res.json({
       ...Object.fromEntries(SETTING_KEYS.map((k) => [k, getSetting(db, k, null)])),
@@ -662,6 +751,39 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- Expenses & exports ----------------
+  // ---------------- Mileage ----------------
+  api.get("/mileage", (req, res) => {
+    const year = Number(req.query.year ?? new Date().getFullYear());
+    res.json({
+      summary: mileageSummary(db, year),
+      places: db.prepare("SELECT * FROM places ORDER BY name").all(),
+      trips: db.prepare("SELECT * FROM trips WHERE strftime('%Y', date) = ? ORDER BY date DESC, id DESC LIMIT 500").all(String(year)),
+    });
+  });
+  api.post("/mileage/trips", (req, res) => {
+    const b = z
+      .object({
+        date: z.string().optional(),
+        place: z.string().min(1),
+        purpose: z.string().optional(),
+        miles: z.number().positive().optional(),
+        odometerStart: z.number().min(0).optional(),
+        odometerEnd: z.number().min(0).optional(),
+        note: z.string().optional(),
+        remember: z.boolean().optional(),
+      })
+      .parse(req.body);
+    res.status(201).json(logTrip(db, b));
+  });
+  api.delete("/mileage/trips/:id", (req, res) => (deleteTrip(db, Number(req.params.id)), void res.status(204).end()));
+  api.post("/mileage/places", (req, res) => {
+    const b = z.object({ name: z.string().min(1), roundTripMiles: z.number().positive() }).parse(req.body);
+    savePlace(db, b.name, b.roundTripMiles);
+    res.status(201).json({ ok: true });
+  });
+  api.delete("/mileage/places/:id", (req, res) => (db.prepare("DELETE FROM places WHERE id = ?").run(Number(req.params.id)), void res.status(204).end()));
+
+  api.get("/returns", (_req, res) => void res.json(db.prepare("SELECT * FROM returns ORDER BY id DESC LIMIT 200").all()));
   api.get("/expenses", (_req, res) => void res.json(db.prepare("SELECT * FROM expenses ORDER BY date DESC, id DESC").all()));
   api.post("/expenses", (req, res) => {
     const b = z.object({ date: z.string().optional(), category: z.string(), amount: z.number(), note: z.string().optional() }).parse(req.body);
@@ -687,6 +809,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
       rows = db
         .prepare(`SELECT sku, title, brand, category, condition, quantity_purchased, (SELECT COALESCE(SUM(quantity),0) FROM sales s WHERE s.item_id = items.id) AS quantity_sold, quantity AS quantity_left, cost AS unit_cost, price, location, source, sourced_at, status, created_at FROM items ORDER BY id`)
         .all() as Record<string, unknown>[];
+    } else if (req.params.kind === "mileage") {
+      rows = db.prepare("SELECT date, place AS destination, purpose, miles, rate, amount AS deduction, odometer_start, odometer_end, note FROM trips WHERE strftime('%Y', date) = ? ORDER BY date").all(year) as Record<string, unknown>[];
     } else if (req.params.kind === "expenses") {
       rows = db.prepare("SELECT date, category, amount, note FROM expenses WHERE strftime('%Y', date) = ? ORDER BY date").all(year) as Record<string, unknown>[];
     } else return void res.status(404).end();

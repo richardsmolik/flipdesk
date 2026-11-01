@@ -13,7 +13,7 @@ import type { MarketplaceId } from "../marketplaces/registry.js";
 import { parseCsv } from "./comps.js";
 import { toCsv } from "./reports.js";
 
-export type LabelProvider = "marketplace" | "ebay" | "pirateship" | "manual";
+export type LabelProvider = "marketplace" | "ebay" | "pirateship" | "shippo" | "manual";
 
 export interface ShippingSettings {
   defaultProvider?: LabelProvider; // for sites where you buy your own label
@@ -28,8 +28,8 @@ export function providerFor(db: Db, m: MarketplaceId): LabelProvider {
   const s = getSetting<ShippingSettings>(db, "shipping", {});
   if (s.perMarketplace?.[m]) return s.perMarketplace[m]!;
   if (PREPAID.includes(m)) return "marketplace";
-  if (m === "ebay") return s.defaultProvider === "pirateship" ? "pirateship" : "ebay";
-  return s.defaultProvider && s.defaultProvider !== "ebay" ? s.defaultProvider : "pirateship";
+  if (m === "ebay") return s.defaultProvider === "pirateship" || s.defaultProvider === "shippo" ? s.defaultProvider : "ebay";
+  return s.defaultProvider && s.defaultProvider !== "ebay" ? s.defaultProvider : process.env.SHIPPO_API_KEY ? "shippo" : "pirateship";
 }
 
 export interface Address {
@@ -69,6 +69,7 @@ export interface ShipRow {
   buyer: string | null;
   sold_at: string;
   tracking: string | null;
+  label_url: string | null;
   sku: string;
   title: string;
   weight_oz: number | null;
@@ -80,7 +81,7 @@ export interface ShipRow {
 export function toShip(db: Db, days = 30): ShipRow[] {
   const rows = db
     .prepare(
-      `SELECT s.id, s.item_id, s.marketplace, s.quantity, s.sale_price, s.shipping_cost, s.order_id, s.buyer, s.sold_at, s.ship_to, s.tracking, i.sku, i.title, i.weight_oz
+      `SELECT s.id, s.item_id, s.marketplace, s.quantity, s.sale_price, s.shipping_cost, s.order_id, s.buyer, s.sold_at, s.ship_to, s.tracking, s.label_url, i.sku, i.title, i.weight_oz
        FROM sales s JOIN items i ON i.id = s.item_id
        WHERE s.shipped_at IS NULL AND s.sold_at >= datetime('now', ?) ORDER BY s.sold_at`,
     )

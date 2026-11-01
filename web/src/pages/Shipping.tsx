@@ -1,17 +1,18 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, money } from "../api";
-import { MpBadge, toast, useFetch, useMarketplaces } from "../ui";
+import { Modal, MpBadge, toast, useFetch, useMarketplaces } from "../ui";
 
 interface Addr { name: string; line1: string; line2?: string; city: string; state: string; zip: string }
 interface Row {
   id: number; item_id: number; marketplace: string; quantity: number; sale_price: number; shipping_cost: number;
   order_id: string | null; buyer: string | null; sold_at: string; tracking: string | null; sku: string; title: string;
-  ship_to: Addr | null; provider: "marketplace" | "ebay" | "pirateship" | "manual";
+  ship_to: Addr | null; provider: "marketplace" | "ebay" | "pirateship" | "shippo" | "manual"; label_url: string | null;
 }
 
 const GROUPS = [
   { key: "ebay", title: "🏷️ Buy label on eBay", hint: "Buy the label in eBay Seller Hub as usual. FlipDesk pulls the exact label cost from eBay automatically." },
+  { key: "shippo", title: "🚀 Buy label in FlipDesk (Shippo)", hint: "Compare USPS, UPS and FedEx rates and print a 4x6 label without leaving FlipDesk. Cost and tracking are saved automatically, and tracking goes back to eBay." },
   { key: "pirateship", title: "🏴‍☠️ Pirate Ship", hint: "Select orders, then Export CSV and upload it in Pirate Ship (Ship > Import Spreadsheet). After buying the labels, export your Pirate Ship history and import it here to attach costs and tracking. Tracking goes back to eBay automatically." },
   { key: "marketplace", title: "📦 Prepaid label from the marketplace", hint: "Print the label from the site's app. Usually the buyer pays, so the label cost is $0." },
   { key: "manual", title: "✍️ Manual", hint: "Enter label cost and tracking yourself." },
@@ -23,6 +24,7 @@ function ShipRow({ r, selectable, selected, onToggle, onDone }: { r: Row; select
   const [tracking, setTracking] = useState(r.tracking ?? "");
   const [addr, setAddr] = useState("");
   const [editAddr, setEditAddr] = useState(false);
+  const [rates, setRates] = useState(false);
   const save = async (shipped: boolean) => {
     try {
       await api.post(`/api/sales/${r.id}/shipping`, { cost: cost === "" ? undefined : Number(cost), tracking: tracking || undefined, shipped, address: addr || undefined });
@@ -57,8 +59,12 @@ function ShipRow({ r, selectable, selected, onToggle, onDone }: { r: Row; select
         <input className="input w-20 py-1" type="number" step="0.01" placeholder="Label $" value={cost} onChange={(e) => setCost(e.target.value)} aria-label="Label cost" />
         <input className="input w-40 py-1" placeholder="Tracking #" value={tracking} onChange={(e) => setTracking(e.target.value)} aria-label="Tracking" />
         {editAddr && <button className="btn-ghost py-1 text-xs" onClick={() => save(false)}>Save</button>}
+        {(r.provider === "shippo" || r.provider === "pirateship" || r.provider === "manual") && (
+          <button className="btn-primary py-1 text-xs" disabled={!r.ship_to?.line1} title={r.ship_to?.line1 ? "Compare rates and buy a label" : "Add the address first"} onClick={() => setRates(true)}>🚀 Buy label</button>
+        )}
         <button className="btn-ghost py-1 text-xs" onClick={() => save(true)}>✓ Shipped</button>
       </div>
+      {rates && <RatesModal row={r} onClose={() => setRates(false)} onDone={() => (setRates(false), onDone())} />}
     </div>
   );
 }
@@ -98,6 +104,10 @@ export default function Shipping() {
         <div>
           <h1 className="text-2xl font-semibold">Shipping</h1>
           <p className="text-sm text-zinc-400">{rows.length} order(s) to ship. Choose eBay labels or Pirate Ship for each marketplace in Settings.</p>
+        </div>
+        <div className="flex gap-2">
+          <button className="btn-ghost" disabled={!rows.length} onClick={() => window.open(`/print/slips?ids=${rows.map((r) => r.id).join(",")}`, "_blank")}>🖨 Packing slips</button>
+          <button className="btn-ghost" disabled={!rows.length} onClick={() => window.open(`/print/picklist?ids=${rows.map((r) => r.id).join(",")}`, "_blank")}>🧺 Pick list</button>
         </div>
         {data?.ebayLive && (
           <button className="btn-ghost" onClick={async () => { const r = await api.post<{ updated: number }>("/api/shipping/ebay-sync"); toast(`Pulled ${r.updated} eBay label cost(s)`); reload(); }}>
@@ -139,5 +149,69 @@ export default function Shipping() {
       })}
       {data && !rows.length && <div className="card p-8 text-center text-sm text-zinc-500">Nothing to ship. 🎉</div>}
     </div>
+  );
+}
+
+interface Rate { id: string; carrier: string; service: string; amount: number; days: number | null }
+
+function RatesModal({ row, onClose, onDone }: { row: Row; onClose: () => void; onDone: () => void }) {
+  const [rates, setRates] = useState<Rate[] | null>(null);
+  const [demo, setDemo] = useState(false);
+  const [oz, setOz] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const load = async () => {
+    try {
+      const r = await api.post<{ rates: Rate[]; demo: boolean }>(`/api/sales/${row.id}/rates`, oz ? { weightOz: Number(oz) } : {});
+      setRates(r.rates);
+      setDemo(r.demo);
+    } catch (e) {
+      toast((e as Error).message, "err");
+      onClose();
+    }
+  };
+  useEffect(() => {
+    if (rates === null) void load();
+  }, [rates]); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <Modal open onClose={onClose} title={`Label for ${row.title.slice(0, 36)}`}>
+      <div className="space-y-3 text-sm">
+        <div className="text-xs text-zinc-400">To {row.ship_to?.name}, {row.ship_to?.city} {row.ship_to?.state} {row.ship_to?.zip}</div>
+        <div className="flex gap-2">
+          <input className="input" type="number" placeholder="Weight (oz), blank = item/default" value={oz} onChange={(e) => setOz(e.target.value)} />
+          <button className="btn-ghost" onClick={() => (setRates(null))}>Re-rate</button>
+        </div>
+        {demo && <div className="rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">Demo rates. Add SHIPPO_API_KEY to .env to buy real labels.</div>}
+        {!rates && <div className="text-zinc-500">Getting rates…</div>}
+        <ul className="divide-y divide-zinc-800">
+          {rates?.map((r, i) => (
+            <li key={r.id} className="flex items-center justify-between py-2">
+              <div>
+                <div className="font-medium">{r.carrier} {r.service} {i === 0 && <span className="ml-1 rounded bg-green-950 px-1.5 text-[10px] text-green-300">cheapest</span>}</div>
+                <div className="text-xs text-zinc-500">{r.days ? `${r.days} day${r.days === 1 ? "" : "s"}` : ""}</div>
+              </div>
+              <button
+                className="btn-primary py-1"
+                disabled={!!busy}
+                onClick={async () => {
+                  setBusy(r.id);
+                  try {
+                    const b = await api.post<{ labelUrl: string | null; tracking: string; trackingUploaded: boolean }>(`/api/sales/${row.id}/label`, { rate: r });
+                    if (b.labelUrl) window.open(b.labelUrl, "_blank");
+                    toast(`Label bought: ${money(r.amount)} · ${b.tracking}${b.trackingUploaded ? " · tracking sent to eBay" : ""}`);
+                    onDone();
+                  } catch (e) {
+                    toast((e as Error).message, "err");
+                  } finally {
+                    setBusy(null);
+                  }
+                }}
+              >
+                {busy === r.id ? "Buying…" : `Buy ${money(r.amount)}`}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </Modal>
   );
 }

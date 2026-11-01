@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, money } from "../api";
-import { MpBadge, Stat, toast, useFetch, useMarketplaces } from "../ui";
+import { Modal, MpBadge, Stat, toast, useFetch, useMarketplaces } from "../ui";
 
 interface Sale {
   id: number; item_id: number; sku: string; title: string; marketplace: string; quantity: number; sale_price: number;
@@ -14,6 +14,7 @@ export default function Sales() {
   const { data: sales, reload: reloadSales } = useFetch<Sale[]>(`/api/sales?days=${days}`);
   const { data: expenses, reload: reloadExp } = useFetch<Expense[]>("/api/expenses");
   const { byId } = useMarketplaces();
+  const [returning, setReturning] = useState<Sale | null>(null);
   const [exp, setExp] = useState({ category: "supplies", amount: "", note: "" });
   const s = sales ?? [];
   const sum = (f: (x: Sale) => number) => s.reduce((a, x) => a + f(x), 0);
@@ -56,17 +57,8 @@ export default function Sales() {
                 <td className={`p-3 text-right font-medium ${x.profit < 0 ? "text-red-400" : "text-zinc-100"}`}>{money(x.profit)}</td>
                 <td className="p-3 text-xs text-zinc-500">{x.sold_at.slice(0, 10)}</td>
                 <td className="p-3">
-                  <button
-                    className="text-xs text-zinc-500 hover:text-red-400"
-                    title="Cancelled order or return"
-                    onClick={async () => {
-                      const ret = confirm(`Remove this sale of "${x.title}"?\n\nOK = it's coming back to me (return / cancelled before shipping): put it back in stock.\nCancel = keep it out of stock (e.g. an oversold order).`);
-                      await api.post(`/api/sales/${x.id}/cancel`, { restock: ret });
-                      toast(ret ? "Sale removed, item back in stock" : "Sale removed");
-                      reloadSales();
-                    }}
-                  >
-                    Cancel / return
+                  <button className="text-xs text-zinc-500 hover:text-red-400" title="Return, cancellation or partial refund" onClick={() => setReturning(x)}>
+                    Return / cancel
                   </button>
                 </td>
               </tr>
@@ -75,6 +67,8 @@ export default function Sales() {
           </tbody>
         </table>
       </div>
+
+      {returning && <ReturnModal sale={returning} onClose={() => setReturning(null)} onDone={() => (setReturning(null), reloadSales())} />}
 
       <div className="card p-4">
         <h2 className="mb-3 text-sm font-semibold">Business expenses (for taxes)</h2>
@@ -96,5 +90,57 @@ export default function Sales() {
         </ul>
       </div>
     </div>
+  );
+}
+
+const REASONS: [string, string][] = [
+  ["not_as_described", "Not as described"],
+  ["changed_mind", "Changed mind"],
+  ["wrong_size", "Wrong size / didn't fit"],
+  ["damaged_in_shipping", "Damaged in shipping"],
+  ["never_arrived", "Never arrived"],
+  ["buyer_cancelled", "Buyer cancelled before shipping"],
+  ["other", "Other"],
+];
+
+function ReturnModal({ sale, onClose, onDone }: { sale: Sale; onClose: () => void; onDone: () => void }) {
+  const [kind, setKind] = useState<"return" | "cancel" | "partial_refund">("return");
+  const [reason, setReason] = useState("not_as_described");
+  const [refund, setRefund] = useState(sale.sale_price + sale.shipping_charged);
+  const [returnShipping, setReturnShipping] = useState(0);
+  const [feesLost, setFeesLost] = useState(0);
+  const [restock, setRestock] = useState(true);
+  return (
+    <Modal open onClose={onClose} title={`Return / cancel: ${sale.title.slice(0, 40)}`}>
+      <div className="space-y-3 text-sm">
+        <div className="flex gap-1 rounded-md border border-zinc-800 bg-zinc-950 p-0.5">
+          {([["return", "Returned"], ["cancel", "Cancelled"], ["partial_refund", "Partial refund"]] as const).map(([k, l]) => (
+            <button key={k} className={`flex-1 rounded px-2 py-1 ${kind === k ? "bg-zinc-700 text-white" : "text-zinc-400"}`} onClick={() => (setKind(k), setRefund(k === "partial_refund" ? 0 : sale.sale_price + sale.shipping_charged), setRestock(k !== "partial_refund"))}>{l}</button>
+          ))}
+        </div>
+        <div><label className="label">Reason</label>
+          <select className="input" value={reason} onChange={(e) => setReason(e.target.value)}>{REASONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div><label className="label">Refunded</label><input className="input" type="number" step="0.01" value={refund} onChange={(e) => setRefund(Number(e.target.value))} /></div>
+          {kind !== "partial_refund" && <div><label className="label">Return label</label><input className="input" type="number" step="0.01" value={returnShipping} onChange={(e) => setReturnShipping(Number(e.target.value))} /></div>}
+          {kind !== "partial_refund" && <div><label className="label">Fees kept</label><input className="input" type="number" step="0.01" value={feesLost} onChange={(e) => setFeesLost(Number(e.target.value))} title="Fees the marketplace didn't refund" /></div>}
+        </div>
+        {kind !== "partial_refund" && (
+          <label className="flex items-center gap-2"><input type="checkbox" checked={restock} onChange={(e) => setRestock(e.target.checked)} /> Put it back in stock (uncheck if damaged or kept by the buyer)</label>
+        )}
+        <p className="text-xs text-zinc-500">{kind === "partial_refund" ? "The sale stays; its price drops by the refund." : "The sale is removed from revenue and logged for return-rate reports."}</p>
+        <button
+          className="btn-primary w-full"
+          onClick={async () => {
+            await api.post(`/api/sales/${sale.id}/cancel`, { kind, reason, refund, returnShipping, feesLost, restock: kind !== "partial_refund" && restock });
+            toast(kind === "partial_refund" ? "Partial refund recorded" : restock ? "Recorded, item back in stock" : "Recorded");
+            onDone();
+          }}
+        >
+          Save
+        </button>
+      </div>
+    </Modal>
   );
 }

@@ -2,16 +2,32 @@ import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, toast, useFetch, useMarketplaces } from "../ui";
+import Lightbox from "../components/Lightbox";
 
-const TABS = ["active", "draft", "sold", "archived", "all"] as const;
+const VIEWS = [
+  { key: "inventory", label: "Inventory", hint: "Everything in stock" },
+  { key: "selling", label: "Selling", hint: "Live on at least one site" },
+  { key: "unsold", label: "Not sold yet", hint: "Live but no sales yet, oldest first" },
+  { key: "drafts", label: "Drafts", hint: "Not listed yet" },
+  { key: "sold", label: "Sold", hint: "Has at least one sale" },
+] as const;
+type ViewKey = (typeof VIEWS)[number]["key"];
+
+const daysListed = (i: Item) => {
+  const first = i.listings.filter((l) => l.listed_at).map((l) => Date.parse(l.listed_at!.replace(" ", "T") + "Z")).sort()[0];
+  return first ? Math.floor((Date.now() - first) / 86400_000) : null;
+};
 
 export default function Inventory() {
-  const [status, setStatus] = useState<(typeof TABS)[number]>("active");
+  const [view, setView] = useState<ViewKey>(() => (new URLSearchParams(location.search).get("view") as ViewKey) || "inventory");
+  const [layout, setLayout] = useState<"grid" | "list">(() => (localStorage.getItem("fd-layout") as "grid" | "list") || "grid");
+  const [viewer, setViewer] = useState<{ idx: number; photo: number } | null>(null);
+  const { data: counts } = useFetch<Record<ViewKey, number>>("/api/items-counts");
   const [q, setQ] = useState("");
   const [mp, setMp] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [bulk, setBulk] = useState<null | "crosslist" | "price">(null);
-  const url = `/api/items?status=${status}&q=${encodeURIComponent(q)}${mp ? `&marketplace=${mp}` : ""}`;
+  const url = `/api/items?view=${view}&q=${encodeURIComponent(q)}${mp ? `&marketplace=${mp}` : ""}`;
   const { data: items, reload } = useFetch<Item[]>(url);
   const { marketplaces, byId } = useMarketplaces();
   const nav = useNavigate();
@@ -44,10 +60,23 @@ export default function Inventory() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
-          {TABS.map((t) => (
-            <button key={t} onClick={() => (setStatus(t), setSel(new Set()))} className={`rounded px-3 py-1 text-sm capitalize ${status === t ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-100"}`}>
-              {t}
+        <div className="flex flex-wrap rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+          {VIEWS.map((t) => (
+            <button
+              key={t.key}
+              title={t.hint}
+              onClick={() => (setView(t.key), setSel(new Set()), history.replaceState(null, "", `?view=${t.key}`))}
+              className={`rounded px-3 py-1 text-sm ${view === t.key ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-100"}`}
+            >
+              {t.label}
+              {counts && <span className="ml-1 text-xs text-zinc-500">{counts[t.key]}</span>}
+            </button>
+          ))}
+        </div>
+        <div className="flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5" role="group" aria-label="Layout">
+          {(["grid", "list"] as const).map((l) => (
+            <button key={l} onClick={() => (setLayout(l), localStorage.setItem("fd-layout", l))} className={`rounded px-2 py-1 text-sm ${layout === l ? "bg-zinc-700 text-white" : "text-zinc-400"}`} aria-pressed={layout === l}>
+              {l === "grid" ? "▦ Photos" : "☰ List"}
             </button>
           ))}
         </div>
@@ -63,6 +92,7 @@ export default function Inventory() {
           <span className="text-blue-200">{sel.size} selected</span>
           <button className="btn-ghost" onClick={() => setBulk("crosslist")}>🔁 Crosslist to…</button>
           <button className="btn-ghost" onClick={() => setBulk("price")}>💲 Change price…</button>
+          <button className="btn-ghost" onClick={() => window.open(`/print/labels?items=${[...sel].join(",")}`, "_blank")}>🏷️ Print labels</button>
           {sel.size >= 2 && (
             <button
               className="btn-ghost"
@@ -83,7 +113,45 @@ export default function Inventory() {
         </div>
       )}
 
-      <div className="card overflow-x-auto">
+      {layout === "grid" && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-6">
+          {items?.map((i, idx) => {
+            const age = daysListed(i);
+            const live = [...new Map(i.listings.filter((l) => ["active", "queued", "sold"].includes(l.status)).map((l) => [l.marketplace, l])).values()];
+            return (
+              <div key={i.id} className={`card group overflow-hidden ${sel.has(i.id) ? "ring-2 ring-brand" : ""}`}>
+                <div className="relative aspect-square bg-zinc-800">
+                  <button className="h-full w-full" onClick={() => setViewer({ idx, photo: 0 })} aria-label={`View photos of ${i.title}`}>
+                    {i.photos[0] ? <img src={i.photos[0].url} alt="" loading="lazy" className="h-full w-full object-cover transition group-hover:scale-[1.02]" /> : <span className="text-3xl text-zinc-600">📷</span>}
+                  </button>
+                  <input type="checkbox" className="absolute left-2 top-2 h-4 w-4" checked={sel.has(i.id)} onChange={() => toggle(i.id)} aria-label={`Select ${i.sku}`} />
+                  {i.photos.length > 1 && <span className="pointer-events-none absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[11px]">📷 {i.photos.length}</span>}
+                  {view === "unsold" && age !== null && (
+                    <span className={`pointer-events-none absolute right-2 top-2 rounded px-1.5 py-0.5 text-[11px] font-medium ${age >= 60 ? "bg-red-900/90 text-red-100" : age >= 30 ? "bg-amber-900/90 text-amber-100" : "bg-black/70 text-zinc-200"}`}>{age}d listed</span>
+                  )}
+                  {i.status === "draft" && <span className="pointer-events-none absolute right-2 top-2 rounded bg-zinc-900/90 px-1.5 py-0.5 text-[11px]">Draft</span>}
+                  {i.quantity === 0 && i.quantity_sold > 0 && <span className="pointer-events-none absolute right-2 top-2 rounded bg-green-900/90 px-1.5 py-0.5 text-[11px] text-green-100">Sold</span>}
+                </div>
+                <Link to={`/items/${i.id}`} className="block space-y-1.5 p-2.5">
+                  <div className="line-clamp-2 min-h-[2.5rem] text-sm font-medium text-zinc-100">{i.title || <span className="text-zinc-500">Untitled draft</span>}</div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold tabular-nums text-zinc-100">{money(i.price)}</span>
+                    <span className="text-zinc-500">{i.sku}</span>
+                  </div>
+                  <QtyBar compact purchased={i.quantity_purchased} sold={i.quantity_sold} left={i.quantity} />
+                  <div className="flex flex-wrap gap-1">
+                    {live.map((l) => <MpBadge key={l.id} small id={l.marketplace} status={l.status} mp={byId[l.marketplace]} />)}
+                    {!live.length && <span className="text-[11px] text-zinc-600">not listed</span>}
+                  </div>
+                </Link>
+              </div>
+            );
+          })}
+          {items?.length === 0 && <div className="col-span-full p-10 text-center text-zinc-500">Nothing here. <Link to="/items/new" className="text-brand hover:underline">Create a listing</Link></div>}
+        </div>
+      )}
+
+      {layout === "list" && <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="border-b border-zinc-800 text-left text-xs text-zinc-500">
             <tr>
@@ -102,7 +170,11 @@ export default function Inventory() {
                 <td className="p-3" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={sel.has(i.id)} onChange={() => toggle(i.id)} aria-label={`Select ${i.sku}`} /></td>
                 <td className="p-3">
                   <div className="flex items-center gap-3">
-                    {i.photos[0] ? <img src={i.photos[0].url} alt="" className="h-11 w-11 rounded-md object-cover" /> : <div className="h-11 w-11 rounded-md bg-zinc-800" />}
+                    {i.photos[0] ? (
+                      <button onClick={(e) => (e.stopPropagation(), setViewer({ idx: items.indexOf(i), photo: 0 }))} aria-label={`View photos of ${i.title}`}>
+                        <img src={i.photos[0].url} alt="" className="h-11 w-11 rounded-md object-cover" />
+                      </button>
+                    ) : <div className="h-11 w-11 rounded-md bg-zinc-800" />}
                     <div className="min-w-0">
                       <div className="max-w-md truncate font-medium text-zinc-100">{i.title || <span className="text-zinc-500">Untitled draft</span>}</div>
                       <div className="text-xs text-zinc-500">{i.sku}{i.brand ? ` · ${i.brand}` : ""}{i.variations.length ? <span className="ml-1 rounded bg-zinc-800 px-1 text-[10px] text-zinc-300">{i.variations.length} options</span> : null}</div>
@@ -126,7 +198,17 @@ export default function Inventory() {
             )}
           </tbody>
         </table>
-      </div>
+      </div>}
+
+      {viewer && items?.[viewer.idx] && (
+        <Lightbox
+          item={items[viewer.idx]}
+          start={viewer.photo}
+          onClose={() => setViewer(null)}
+          onPrevItem={viewer.idx > 0 ? () => setViewer({ idx: viewer.idx - 1, photo: 0 }) : undefined}
+          onNextItem={viewer.idx < items.length - 1 ? () => setViewer({ idx: viewer.idx + 1, photo: 0 }) : undefined}
+        />
+      )}
 
       <BulkCrosslist open={bulk === "crosslist"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), setSel(new Set()), reload())} />
       <BulkPrice open={bulk === "price"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), reload())} />
