@@ -27,6 +27,7 @@ export const EBAY_SCOPES = [
   "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
   "https://api.ebay.com/oauth/api_scope/sell.marketing",
   "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+  "https://api.ebay.com/oauth/api_scope/sell.finances",
 ];
 
 export function ebayHasAppKeys() {
@@ -167,6 +168,9 @@ export function toInventoryItem(item: Item) {
       aspects,
       imageUrls: photoUrls(item),
       brand: item.brand || undefined,
+      ...(item.specifics["UPC"] ? { upc: [item.specifics["UPC"]] } : {}),
+      ...(item.specifics["ISBN"] ? { isbn: [item.specifics["ISBN"]] } : {}),
+      ...(item.specifics["EAN"] ? { ean: [item.specifics["EAN"]] } : {}),
     },
     ...(item.weight_oz
       ? { packageWeightAndSize: { weight: { value: item.weight_oz, unit: "OUNCE" } } }
@@ -299,11 +303,19 @@ export async function ebayUpdatePrice(db: Db, item: Item, listing: ListingRow, p
   });
 }
 
+export interface EbayAddress {
+  fullName?: string;
+  contactAddress?: { addressLine1?: string; addressLine2?: string; city?: string; stateOrProvince?: string; postalCode?: string; countryCode?: string };
+  primaryPhone?: { phoneNumber?: string };
+  email?: string;
+}
+
 export interface EbayOrder {
   orderId: string;
   creationDate: string;
   buyer?: { username?: string };
-  lineItems: { sku?: string; quantity?: number; legacyItemId?: string; lineItemCost: { value: string }; deliveryCost?: { shippingCost?: { value: string } } }[];
+  fulfillmentStartInstructions?: { shippingStep?: { shipTo?: EbayAddress } }[];
+  lineItems: { lineItemId?: string; sku?: string; quantity?: number; legacyItemId?: string; lineItemCost: { value: string }; deliveryCost?: { shippingCost?: { value: string } } }[];
 }
 
 /** Orders since a timestamp (ISO). Used by the sales poller for auto-delist. */
@@ -332,11 +344,12 @@ export async function ebaySendOffer(db: Db, listingId: string, price: number, me
 }
 
 /** Active-listing comps via the Browse API (app token only; no seller login needed). */
-export async function ebayBrowseSearch(db: Db, q: string, limit = 20) {
+export async function ebayBrowseSearch(db: Db, q: string, limit = 20, gtin?: string) {
   if (!ebayHasAppKeys()) return null;
+  const query = gtin ? `gtin=${encodeURIComponent(gtin)}` : `q=${encodeURIComponent(q)}`;
   const r = await call<{
     itemSummaries?: { title: string; price?: { value: string }; condition?: string; itemWebUrl?: string; image?: { imageUrl: string } }[];
-  }>(db, "GET", `/buy/browse/v1/item_summary/search?q=${encodeURIComponent(q)}&limit=${limit}`, undefined, true);
+  }>(db, "GET", `/buy/browse/v1/item_summary/search?${query}&limit=${limit}`, undefined, true);
   return (r.itemSummaries ?? [])
     .filter((x) => x.price)
     .map((x) => ({ title: x.title, price: Number(x.price!.value), condition: x.condition, url: x.itemWebUrl, image: x.image?.imageUrl }));
@@ -389,4 +402,68 @@ async function ebayPublishGroup(db: Db, item: Item, price: number, cfg: EbayCfg)
   });
   const host = ENV() === "production" ? "www.ebay.com" : "sandbox.ebay.com";
   return { externalId: pub.listingId, url: `https://${host}/itm/${pub.listingId}` };
+}
+
+/**
+ * Multi-buy ("volume pricing") promotion via the Marketing API: e.g. buy 2 save 10%, 3+ save 15%.
+ * Returns the promotion id from the Location header.
+ */
+export async function ebayCreateVolumeDiscount(db: Db, name: string, listingIds: string[], tiers: { minQuantity: number; pctOff: number }[]) {
+  if (!ebayIsLive(db)) return { demo: true, promotionId: `DEMO-PROMO-${Date.now()}` };
+  const token = await userToken(db);
+  const start = new Date(Date.now() + 60_000);
+  const end = new Date(Date.now() + 30 * 86400_000);
+  const rules = [{ minQuantity: 1, pctOff: 0 }, ...tiers.sort((a, b) => a.minQuantity - b.minQuantity)].map((t, i) => ({
+    ruleOrder: i + 1,
+    discountSpecification: { minQuantity: t.minQuantity },
+    discountBenefit: { percentageOffOrder: String(t.pctOff) },
+  }));
+  const res = await fetch(`${API()}/sell/marketing/v1/item_promotion`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID() },
+    body: JSON.stringify({
+      name: name.slice(0, 90),
+      marketplaceId: MARKETPLACE_ID(),
+      promotionStatus: "SCHEDULED",
+      promotionType: "VOLUME_DISCOUNT",
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+      discountRules: rules,
+      inventoryCriterion: { inventoryCriterionType: "INVENTORY_BY_VALUE", listingIds },
+    }),
+  });
+  if (!res.ok) throw new Error(`eBay promotion failed: ${res.status} ${(await res.text()).slice(0, 400)}`);
+  const loc = res.headers.get("location") ?? "";
+  return { demo: false, promotionId: loc.split("/").pop() || "" };
+}
+
+export async function ebayEndPromotion(db: Db, promotionId: string) {
+  if (!ebayIsLive(db) || promotionId.startsWith("DEMO")) return;
+  await call(db, "DELETE", `/sell/marketing/v1/item_promotion/${encodeURIComponent(promotionId)}`);
+}
+
+const FIN_API = () => (ENV() === "production" ? "https://apiz.ebay.com" : "https://apiz.sandbox.ebay.com");
+
+/** Shipping labels bought on eBay since a date (Finances API) -> exact label cost per order. */
+export async function ebayLabelTransactions(db: Db, sinceIso: string): Promise<{ orderId: string; amount: number; date: string }[]> {
+  if (!ebayIsLive(db)) return [];
+  const token = await userToken(db);
+  const filter = encodeURIComponent(`transactionType:{SHIPPING_LABEL},transactionDate:[${sinceIso}..]`);
+  const res = await fetch(`${FIN_API()}/sell/finances/v1/transaction?filter=${filter}&limit=200`, {
+    headers: { Authorization: `Bearer ${token}`, "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID() },
+  });
+  if (!res.ok) throw new Error(`eBay finances -> ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const j = (await res.json()) as { transactions?: { orderId?: string; amount?: { value: string }; transactionDate: string }[] };
+  return (j.transactions ?? []).filter((t) => t.orderId && t.amount).map((t) => ({ orderId: t.orderId!, amount: Math.abs(Number(t.amount!.value)), date: t.transactionDate }));
+}
+
+/** Upload tracking to an eBay order (e.g. after buying the label on Pirate Ship). */
+export async function ebayAddTracking(db: Db, orderId: string, lineItemId: string, quantity: number, carrier: string, tracking: string) {
+  if (!ebayIsLive(db)) return { demo: true };
+  return call(db, "POST", `/sell/fulfillment/v1/order/${encodeURIComponent(orderId)}/shipping_fulfillment`, {
+    lineItems: [{ lineItemId, quantity }],
+    shippedDate: new Date().toISOString(),
+    shippingCarrierCode: carrier.toUpperCase(),
+    trackingNumber: tracking.replace(/\s+/g, ""),
+  });
 }

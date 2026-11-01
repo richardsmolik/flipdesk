@@ -50,6 +50,99 @@ function resolveVariation(db: Db, s: SaleInput, item: NonNullable<ReturnType<typ
   return v;
 }
 
+/**
+ * After any stock change, bring every live listing of an item in line:
+ * sold out -> delist (or mark the selling listing sold), single-qty site sold -> relist,
+ * otherwise sync quantities. `marketplace` / `variationId` identify the listing that sold, if any.
+ */
+export function syncListings(db: Db, itemId: number, ctx: { marketplace?: MarketplaceId; variationId?: number | null; reason: string }) {
+  const item = getItem(db, itemId)!;
+  const remaining = item.quantity;
+  const vLeft = (id: number) => item.variations.find((x) => x.id === id)?.quantity ?? 0;
+  const delisted: string[] = [];
+  const synced: string[] = [];
+  const relisted: string[] = [];
+  const live = db.prepare("SELECT * FROM listings WHERE item_id = ? AND status IN ('active','queued','error')").all(item.id) as unknown as ListingRow[];
+
+  for (const l of live) {
+    const m = l.marketplace as MarketplaceId;
+    const isSellingListing = !!ctx.marketplace && l.marketplace === ctx.marketplace && (l.variation_id === null || l.variation_id === (ctx.variationId ?? null));
+    const pool = l.variation_id !== null ? vLeft(l.variation_id) : remaining;
+    if (pool === 0) {
+      if (isSellingListing) db.prepare("UPDATE listings SET status = 'sold', quantity = 0, ended_at = datetime('now') WHERE id = ?").run(l.id);
+      else {
+        requestDelist(db, l, `sold out (${ctx.reason})`);
+        delisted.push(l.marketplace);
+      }
+      continue;
+    }
+    const want = l.variation_id === null && item.variations.length ? Math.max(1, remaining) : listingQty(m, pool);
+    if (isSellingListing) {
+      if (!MARKETPLACES[m].multiQty && (l.variation_id !== null || !item.variations.length)) {
+        // Single-quantity site: that listing is gone; post the next unit.
+        db.prepare("UPDATE listings SET status = 'queued', quantity = 1, external_id = NULL, url = NULL WHERE id = ?").run(l.id);
+        enqueue(db, m, "publish", item.id, l.id);
+        relisted.push(l.marketplace);
+      } else {
+        db.prepare("UPDATE listings SET quantity = ? WHERE id = ?").run(want, l.id); // marketplace already decremented itself
+      }
+    } else if (l.quantity !== want || (l.variation_id === null && ctx.variationId && MARKETPLACES[m].variations)) {
+      // Variation-capable sites track per-size stock inside one listing, so push an update even if the total looks equal.
+      db.prepare("UPDATE listings SET quantity = ? WHERE id = ?").run(want, l.id);
+      if (l.status === "active") enqueue(db, m, "update", item.id, l.id);
+      synced.push(l.marketplace);
+    }
+  }
+  return { item, remaining, delisted, synced, relisted };
+}
+
+/** How many complete lots can be built from current stock. */
+export function bundleCapacity(db: Db, bundleId: number) {
+  const parts = db
+    .prepare("SELECT b.quantity AS need, i.quantity AS have FROM bundle_items b JOIN items i ON i.id = b.item_id WHERE b.bundle_id = ?")
+    .all(bundleId) as { need: number; have: number }[];
+  if (!parts.length) return null;
+  return Math.min(...parts.map((p) => Math.floor(p.have / Math.max(1, p.need))));
+}
+
+/** Re-size every lot that contains this item; pull lots that can no longer be filled. */
+function recomputeBundles(db: Db, childId: number, skipBundleId?: number) {
+  const notes: string[] = [];
+  const bundles = db.prepare("SELECT DISTINCT bundle_id FROM bundle_items WHERE item_id = ?").all(childId) as { bundle_id: number }[];
+  for (const { bundle_id } of bundles) {
+    if (bundle_id === skipBundleId) continue;
+    const cap = bundleCapacity(db, bundle_id) ?? 0;
+    const b = db.prepare("SELECT sku, quantity, status FROM items WHERE id = ?").get(bundle_id) as { sku: string; quantity: number; status: string };
+    if (cap === b.quantity) continue;
+    db.prepare(
+      `UPDATE items SET quantity = ?, status = CASE WHEN ? = 0 AND status IN ('active','draft') THEN 'archived' WHEN ? > 0 AND status = 'archived' THEN 'draft' ELSE status END, updated_at = datetime('now') WHERE id = ?`,
+    ).run(cap, cap, cap, bundle_id);
+    const r = syncListings(db, bundle_id, { reason: "an item in this lot sold" });
+    notes.push(cap === 0 ? `lot ${b.sku} can't be filled anymore${r.delisted.length ? " - delisting it" : ""}` : `lot ${b.sku} now ${cap} available`);
+  }
+  return notes;
+}
+
+/** A lot sold: consume its items (no separate sale rows, so profit isn't double-counted). An item sold: re-check its lots. */
+function propagateBundles(db: Db, itemId: number, qtySold: number) {
+  const parts = db.prepare("SELECT item_id, quantity FROM bundle_items WHERE bundle_id = ?").all(itemId) as { item_id: number; quantity: number }[];
+  const notes: string[] = [];
+  if (parts.length) {
+    for (const p of parts) {
+      const child = getItem(db, p.item_id);
+      if (!child) continue;
+      const left = Math.max(0, child.quantity - p.quantity * qtySold);
+      db.prepare("UPDATE items SET quantity = ?, status = CASE WHEN ? = 0 THEN 'sold' ELSE status END, updated_at = datetime('now') WHERE id = ?").run(left, left, child.id);
+      const r = syncListings(db, child.id, { reason: "sold as part of a lot" });
+      if (r.delisted.length) notes.push(`${child.sku} delisted (sold in lot)`);
+      notes.push(...recomputeBundles(db, child.id, itemId));
+    }
+  } else {
+    notes.push(...recomputeBundles(db, itemId));
+  }
+  return notes;
+}
+
 export function recordSale(db: Db, s: SaleInput) {
   const before = getItem(db, s.itemId);
   if (!before) throw new Error("Item not found");
@@ -84,50 +177,9 @@ export function recordSale(db: Db, s: SaleInput) {
       const left = Math.max(0, before.quantity - qty);
       db.prepare("UPDATE items SET quantity = ?, status = ?, updated_at = datetime('now') WHERE id = ?").run(left, left === 0 ? "sold" : before.status, before.id);
     }
-    const item = getItem(db, before.id)!;
-    const remaining = item.quantity;
-    const vLeft = (id: number) => item.variations.find((x) => x.id === id)?.quantity ?? 0;
-
-    const delisted: string[] = [];
-    const synced: string[] = [];
-    const relisted: string[] = [];
-    const live = db
-      .prepare("SELECT * FROM listings WHERE item_id = ? AND status IN ('active','queued','error')")
-      .all(item.id) as unknown as ListingRow[];
-
-    for (const l of live) {
-      const m = l.marketplace as MarketplaceId;
-      const isSellingSite = l.marketplace === s.marketplace;
-      const isSellingListing = isSellingSite && (l.variation_id === null || l.variation_id === (v?.id ?? null));
-      const markSold = () => db.prepare("UPDATE listings SET status = 'sold', quantity = 0, ended_at = datetime('now') WHERE id = ?").run(l.id);
-
-      // How many units should this listing now offer?
-      const pool = l.variation_id !== null ? vLeft(l.variation_id) : remaining;
-      if (pool === 0) {
-        if (isSellingListing) markSold();
-        else {
-          requestDelist(db, l, `sold out (sold on ${s.marketplace})`);
-          delisted.push(l.marketplace);
-        }
-        continue;
-      }
-      const want = l.variation_id === null && item.variations.length ? Math.max(1, remaining) : listingQty(m, pool);
-      if (isSellingListing) {
-        if (!MARKETPLACES[m].multiQty && (l.variation_id !== null || !item.variations.length)) {
-          // Single-quantity site: that listing is gone; post the next unit.
-          db.prepare("UPDATE listings SET status = 'queued', quantity = 1, external_id = NULL, url = NULL WHERE id = ?").run(l.id);
-          enqueue(db, m, "publish", item.id, l.id);
-          relisted.push(l.marketplace);
-        } else {
-          db.prepare("UPDATE listings SET quantity = ? WHERE id = ?").run(want, l.id); // marketplace already decremented itself
-        }
-      } else if (l.quantity !== want || (l.variation_id === null && v && MARKETPLACES[m].variations)) {
-        // Variation-capable sites track per-size stock inside one listing, so push an update even if the total looks equal.
-        db.prepare("UPDATE listings SET quantity = ? WHERE id = ?").run(want, l.id);
-        if (l.status === "active") enqueue(db, m, "update", item.id, l.id);
-        synced.push(l.marketplace);
-      }
-    }
+    const { item, remaining, delisted, synced, relisted } = syncListings(db, before.id, { marketplace: s.marketplace, variationId: v?.id ?? null, reason: `sold on ${s.marketplace}` });
+    // Lots: a sold lot consumes its items; a sold item may make lots impossible to fill.
+    const bundleNotes = propagateBundles(db, before.id, qty);
 
     const names = (ids: string[]) => [...new Set(ids)].map((d) => MARKETPLACES[d as MarketplaceId].name).join(", ");
     logActivity(
@@ -136,7 +188,8 @@ export function recordSale(db: Db, s: SaleInput) {
       `SOLD ${qty > 1 ? qty + "x " : ""}${item.sku}${v ? ` (${v.name})` : ""} on ${mpName} for $${s.salePrice.toFixed(2)} (profit $${profit.toFixed(2)}) - ${remaining} left` +
         (delisted.length ? ` - auto-delisting from ${names(delisted)}` : "") +
         (synced.length ? ` - quantity synced on ${names(synced)}` : "") +
-        (relisted.length ? ` - relisting on ${names(relisted)}` : ""),
+        (relisted.length ? ` - relisting on ${names(relisted)}` : "") +
+        (bundleNotes.length ? ` - ${bundleNotes.join("; ")}` : ""),
       item.id,
     );
 
@@ -144,7 +197,7 @@ export function recordSale(db: Db, s: SaleInput) {
     if (qty > available) {
       alertId = raiseOversell(db, { item, marketplace: s.marketplace, saleId, buyer: s.buyer, qty, available, variationName: v?.name });
     }
-    return { saleId, profit, fees, remaining, delisted: [...new Set(delisted)], synced: [...new Set(synced)], relisted, oversold: qty > available, alertId };
+    return { saleId, profit, fees, remaining, delisted: [...new Set(delisted)], synced: [...new Set(synced)], relisted, bundles: bundleNotes, oversold: qty > available, alertId };
   });
 
   void notify(db, "sale", `Sold on ${mpName}: $${s.salePrice.toFixed(2)}`, `${before.title}${v ? ` (${v.name})` : ""} - profit $${profit.toFixed(2)}, ${result.remaining} left`);
@@ -176,7 +229,29 @@ export async function pollEbaySales(db: Db) {
         buyer: o.buyer?.username,
         soldAt: o.creationDate,
       });
-      if (!("duplicate" in r)) n++;
+      if (!("duplicate" in r)) {
+        n++;
+        const shipTo = o.fulfillmentStartInstructions?.[0]?.shippingStep?.shipTo;
+        if (shipTo || li.lineItemId) {
+          const a = shipTo?.contactAddress ?? {};
+          db.prepare("UPDATE sales SET ship_to = ? WHERE id = ?").run(
+            JSON.stringify({
+              name: shipTo?.fullName ?? "",
+              line1: a.addressLine1 ?? "",
+              line2: a.addressLine2 ?? "",
+              city: a.city ?? "",
+              state: a.stateOrProvince ?? "",
+              zip: a.postalCode ?? "",
+              country: a.countryCode ?? "US",
+              phone: shipTo?.primaryPhone?.phoneNumber ?? "",
+              email: shipTo?.email ?? "",
+              ebayOrderId: o.orderId,
+              lineItemId: li.lineItemId ?? null,
+            }),
+            r.saleId,
+          );
+        }
+      }
     }
   }
   setSetting(db, "ebay.lastOrderPoll", startedAt);
@@ -218,6 +293,8 @@ export function restock(db: Db, itemId: number, units: number, unitCost?: number
     }
     logActivity(db, "restock", `Restocked ${item.sku}${v ? ` (${v.name})` : ""}: +${units} @ $${newCost.toFixed(2)} (avg cost now $${avgCost.toFixed(2)}, ${fresh.quantity} left)`, itemId);
   });
+
+  recomputeBundles(db, itemId); // more stock may make lots fillable again
 
   // Re-list a restocked variation on sites that list variations separately.
   if (v) {
@@ -302,4 +379,33 @@ export function saveVariations(db: Db, itemId: number, input: VariationInput[]) 
   const needs = liveSites.filter((m) => !MARKETPLACES[m].variations);
   if (needs.length && getItem(db, itemId)!.quantity > 0) crosslist(db, itemId, needs);
   return getItem(db, itemId);
+}
+
+/**
+ * Cancel a sale (buyer cancelled, oversell, refund) or record a return.
+ * restock=true puts the units back (return / cancelled before shipping);
+ * restock=false just removes the sale (e.g. the oversold second order - the item went to the first buyer).
+ */
+export function cancelSale(db: Db, saleId: number, opts: { restock: boolean; reason?: string }) {
+  const s = db.prepare("SELECT * FROM sales WHERE id = ?").get(saleId) as
+    | { id: number; item_id: number; variation_id: number | null; quantity: number; marketplace: string; sale_price: number; cost: number }
+    | undefined;
+  if (!s) throw new Error("Sale not found");
+  const item = getItem(db, s.item_id);
+  db.prepare("DELETE FROM sales WHERE id = ?").run(saleId); // alerts tied to it are removed too
+  if (opts.restock && item) {
+    const unitCost = s.quantity ? s.cost / s.quantity : item.cost;
+    restock(db, s.item_id, s.quantity, unitCost, s.variation_id ?? undefined);
+    // A restock adds to "purchased"; a return isn't a new purchase.
+    if (s.variation_id) db.prepare("UPDATE variations SET quantity_purchased = MAX(quantity, quantity_purchased - ?) WHERE id = ?").run(s.quantity, s.variation_id);
+    else db.prepare("UPDATE items SET quantity_purchased = MAX(quantity, quantity_purchased - ?) WHERE id = ?").run(s.quantity, s.item_id);
+    recomputeItemTotals(db, s.item_id);
+  }
+  logActivity(
+    db,
+    "cancel",
+    `Removed ${MARKETPLACES[s.marketplace as MarketplaceId]?.name ?? s.marketplace} sale of ${item?.sku ?? "item"} ($${s.sale_price.toFixed(2)})${opts.restock ? " - units back in stock" : ""}${opts.reason ? ` - ${opts.reason}` : ""}`,
+    s.item_id,
+  );
+  return getItem(db, s.item_id);
 }

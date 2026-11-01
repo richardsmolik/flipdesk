@@ -158,6 +158,30 @@ for (let j; (j = claimExtensionJob(db, ["mercari", "poshmark"])); ) completeJob(
 const tee = (await import("./db.js")).getItem(db, teeId)!;
 recordSale(db, { itemId: teeId, marketplace: "ebay", salePrice: 32, variationId: tee.variations[1].id, shippingCost: 4.5 });
 
+// ---- Natural bundle groups (stale, same brand + size) ----
+for (const [t, brand, cat, size, e, cost, price, age] of [
+  ["Lululemon Wunder Under Leggings 25in Size 6 Navy", "Lululemon", "Clothing > Women > Leggings", "6", "🩱", 7, 44, 52],
+  ["Lululemon Define Jacket Nulu Size 6 Black", "Lululemon", "Clothing > Women > Jackets", "6", "🧥", 15, 79, 41],
+  ["Lululemon Swiftly Tech Short Sleeve Size 6", "Lululemon", "Clothing > Women > Tops", "6", "👚", 6, 38, 36],
+  ["Funko Pop Star Wars Mandalorian #326", "Funko", "Collectibles > toys > Funko", "", "🧸", 4, 22, 47],
+  ["Funko Pop Star Wars Boba Fett #297", "Funko", "Collectibles > toys > Funko", "", "🧸", 4, 26, 39],
+] as const) {
+  const id = Number(
+    db
+      .prepare(
+        `INSERT INTO items (sku, title, brand, category, size, cost, price, min_price, quantity, quantity_purchased, source, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 'Thrift store', 'active', datetime('now', ?), datetime('now', ?))`,
+      )
+      .run(`FD-B${photoIdx}`, t, brand, cat, size, cost, price, Math.round(price * 0.75), `-${age} days`, `-${age} days`).lastInsertRowid,
+  );
+  db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, 0)").run(id, photo(t, e, photoIdx++));
+  for (const m of ["poshmark", "mercari", "ebay"]) {
+    db.prepare("INSERT INTO listings (item_id, marketplace, status, external_id, price, quantity, views, watchers, listed_at) VALUES (?, ?, 'active', ?, ?, 1, ?, ?, datetime('now', ?))").run(
+      id, m, `${m}-${id}`, price, Math.floor(rand() * 60), m === "ebay" ? 1 : 0, `-${age} days`,
+    );
+  }
+}
+
 // ---- Terapeak-style sold data ----
 importComps(
   db,
@@ -188,4 +212,15 @@ ingestEmail(db, {
   text: "Great news! Your Stanley Quencher tumbler sold. Price: $38.00. Ship by Nov 4.",
 });
 
-console.log(`Seeded ${ITEMS.length + 4} items into ${DB}`);
+// ---- Shipping demo: older sales shipped; recent ones waiting (some with addresses) ----
+db.prepare("UPDATE sales SET shipped_at = sold_at, label_source = 'marketplace' WHERE sold_at < datetime('now','-3 days')").run();
+const ADDR = [
+  { name: "Jess Carter", line1: "418 Maple Ave", line2: "", city: "Columbus", state: "OH", zip: "43215", country: "US" },
+  { name: "Mike Rivera", line1: "77 Harbor Rd", line2: "Unit 2", city: "Tampa", state: "FL", zip: "33602", country: "US" },
+];
+(db.prepare("SELECT id FROM sales WHERE shipped_at IS NULL ORDER BY id").all() as { id: number }[]).forEach((r, i) => {
+  if (i < ADDR.length) db.prepare("UPDATE sales SET ship_to = ? WHERE id = ?").run(JSON.stringify(ADDR[i]), r.id);
+});
+db.prepare("INSERT INTO settings (key, value) VALUES ('shipping', ?)").run(JSON.stringify({ defaultProvider: "ebay", perMarketplace: { etsy: "pirateship", mercari: "pirateship" }, defaultPackage: { weightOz: 16, length: 12, width: 10, height: 4 } }));
+
+console.log(`Seeded ${(db.prepare("SELECT COUNT(*) AS n FROM items").get() as { n: number }).n} items into ${DB}`);

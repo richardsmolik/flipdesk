@@ -63,6 +63,22 @@ export default function Inventory() {
           <span className="text-blue-200">{sel.size} selected</span>
           <button className="btn-ghost" onClick={() => setBulk("crosslist")}>🔁 Crosslist to…</button>
           <button className="btn-ghost" onClick={() => setBulk("price")}>💲 Change price…</button>
+          {sel.size >= 2 && (
+            <button
+              className="btn-ghost"
+              onClick={async () => {
+                try {
+                  const lot = await api.post<Item>("/api/bundles", { parts: [...sel].map((itemId) => ({ itemId })) });
+                  toast(`Lot ${lot.sku} created`);
+                  nav(`/items/${lot.id}`);
+                } catch (e) {
+                  toast((e as Error).message, "err");
+                }
+              }}
+            >
+              🎁 Make a lot
+            </button>
+          )}
           <button className="btn-ghost" onClick={() => setSel(new Set())}>Clear</button>
         </div>
       )}

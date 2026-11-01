@@ -3,7 +3,9 @@ import { api } from "../api";
 import { toast, useFetch, useMarketplaces } from "../ui";
 
 interface S {
-  notify: { ntfyTopic?: string; onSale?: boolean; onOversell?: boolean; onEmailReview?: boolean } | null;
+  shipping: { defaultProvider?: string; perMarketplace?: Record<string, string>; defaultPackage?: { weightOz?: number; length?: number; width?: number; height?: number } } | null;
+  weekly: { enabled?: boolean; day?: number; hour?: number; timezone?: string } | null;
+  notify: { ntfyTopic?: string; onSale?: boolean; onOversell?: boolean; onEmailReview?: boolean; onWeekly?: boolean } | null;
   minutesPerItem: number | null;
   sourcing: { minProfit: number; minRoiPct: number } | null;
   feeOverrides: Record<string, { pct?: number; fixed?: number }> | null;
@@ -42,16 +44,20 @@ export default function Settings() {
   const { data } = useFetch<S>("/api/settings");
   const { marketplaces } = useMarketplaces();
   const [s, setS] = useState<S | null>(null);
+  const [digest, setDigest] = useState<string | null>(null);
   const [policies, setPolicies] = useState<{ fulfillment: { id: string; name: string }[]; payment: { id: string; name: string }[]; returns: { id: string; name: string }[] } | null>(null);
   useEffect(() => void (data && setS(data)), [data]);
   if (!s) return <div className="text-zinc-500">Loading…</div>;
   const autoDrop = s.autoDrop ?? { enabled: false, afterDays: 21, everyDays: 7, dropPct: 5 };
   const ebay = s.ebay ?? {};
   const fees = s.feeOverrides ?? {};
+  const shipping = s.shipping ?? { defaultProvider: "ebay", perMarketplace: {}, defaultPackage: { weightOz: 16 } };
+  const pkg = shipping.defaultPackage ?? {};
+  const weekly = s.weekly ?? { enabled: true, day: 1, hour: 8, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
   const sourcing = s.sourcing ?? { minProfit: 10, minRoiPct: 100 };
   const notifyS = s.notify ?? { onSale: true, onOversell: true, onEmailReview: true };
   const save = async () => {
-    await api.put("/api/settings", { notify: notifyS, sourcing, minutesPerItem: s.minutesPerItem ?? 20, feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
+    await api.put("/api/settings", { shipping, weekly, notify: notifyS, sourcing, minutesPerItem: s.minutesPerItem ?? 20, feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
     toast("Settings saved");
   };
 
@@ -85,10 +91,31 @@ export default function Settings() {
           <button className="btn-ghost shrink-0" onClick={async () => { await save(); try { await api.post("/api/notify/test"); toast("Test sent - check your phone"); } catch (e) { toast((e as Error).message, "err"); } }}>Send test</button>
         </div>
         <div className="flex flex-wrap gap-4 text-sm">
-          {([["onSale", "Every sale"], ["onOversell", "Oversells (urgent)"], ["onEmailReview", "Sale emails to confirm"]] as const).map(([k, label]) => (
+          {([["onSale", "Every sale"], ["onOversell", "Oversells (urgent)"], ["onEmailReview", "Sale emails to confirm"], ["onWeekly", "Weekly summary"]] as const).map(([k, label]) => (
             <label key={k} className="flex items-center gap-2"><input type="checkbox" checked={notifyS[k] !== false} onChange={(e) => setS({ ...s, notify: { ...notifyS, [k]: e.target.checked } })} /> {label}</label>
           ))}
         </div>
+      </section>
+
+      <section className="card space-y-3 p-4">
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold">📊 Weekly summary</h2>
+          <div className="flex gap-2">
+            <button className="btn-ghost text-xs" onClick={async () => { const d = await api.get<{ title: string; body: string }>("/api/digest/preview"); setDigest(`${d.title}\n\n${d.body}`); }}>Preview</button>
+            <button className="btn-ghost text-xs" onClick={async () => { await save(); const r = await api.post<{ pushed: boolean; title: string; body: string }>("/api/digest/send"); setDigest(`${r.title}\n\n${r.body}`); toast(r.pushed ? "Sent to your phone" : "Set an ntfy topic above to get it on your phone", r.pushed ? "ok" : "err"); }}>Send now</button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={weekly.enabled !== false} onChange={(e) => setS({ ...s, weekly: { ...weekly, enabled: e.target.checked } })} /> Enabled</label>
+          <select className="input" value={weekly.day ?? 1} onChange={(e) => setS({ ...s, weekly: { ...weekly, day: Number(e.target.value) } })}>
+            {["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((d, i) => <option key={d} value={i}>{d}</option>)}
+          </select>
+          <select className="input" value={weekly.hour ?? 8} onChange={(e) => setS({ ...s, weekly: { ...weekly, hour: Number(e.target.value) } })}>
+            {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h === 0 ? "12 am" : h < 12 ? `${h} am` : h === 12 ? "12 pm" : `${h - 12} pm`}</option>)}
+          </select>
+          <input className="input" value={weekly.timezone ?? ""} placeholder="America/Chicago" onChange={(e) => setS({ ...s, weekly: { ...weekly, timezone: e.target.value } })} />
+        </div>
+        {digest && <pre className="whitespace-pre-wrap rounded bg-zinc-950 p-3 text-sm text-zinc-200">{digest}</pre>}
       </section>
 
       <section className="card space-y-3 p-4">
@@ -108,6 +135,39 @@ export default function Settings() {
           <div><label className="label">Minutes per item</label><input className="input" type="number" value={s.minutesPerItem ?? 20} onChange={(e) => setS({ ...s, minutesPerItem: Number(e.target.value) })} /></div>
         </div>
         <p className="text-xs text-zinc-500">Sourcing mode's "pay at most" price must meet both the profit and return targets. Minutes per item (sourcing, photos, listing, shipping) is used for profit per hour in Reports.</p>
+      </section>
+
+      <section className="card space-y-3 p-4">
+        <h2 className="font-semibold">🚚 Shipping labels</h2>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="text-zinc-400">When I buy my own label, use:</span>
+          {[["ebay", "eBay labels (eBay orders) + Pirate Ship elsewhere"], ["pirateship", "Pirate Ship for everything"], ["manual", "Manual"]].map(([v, label]) => (
+            <label key={v} className="flex items-center gap-1.5"><input type="radio" name="prov" checked={(shipping.defaultProvider ?? "ebay") === v} onChange={() => setS({ ...s, shipping: { ...shipping, defaultProvider: v } })} /> {label}</label>
+          ))}
+        </div>
+        <details className="text-sm">
+          <summary className="cursor-pointer text-zinc-400">Per-marketplace override</summary>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            {marketplaces.map((m) => (
+              <label key={m.id} className="flex items-center justify-between gap-2">
+                <span>{m.name}</span>
+                <select className="input w-44 py-1" value={shipping.perMarketplace?.[m.id] ?? ""} onChange={(e) => setS({ ...s, shipping: { ...shipping, perMarketplace: { ...shipping.perMarketplace, [m.id]: e.target.value } } })}>
+                  <option value="">Default</option>
+                  <option value="marketplace">Site's prepaid label</option>
+                  {m.id === "ebay" && <option value="ebay">eBay labels</option>}
+                  <option value="pirateship">Pirate Ship</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+            ))}
+          </div>
+        </details>
+        <div className="grid grid-cols-4 gap-2 text-sm">
+          {([["weightOz", "Default weight (oz)"], ["length", "Length (in)"], ["width", "Width (in)"], ["height", "Height (in)"]] as const).map(([k, label]) => (
+            <div key={k}><label className="label">{label}</label><input className="input" type="number" value={pkg[k] ?? ""} onChange={(e) => setS({ ...s, shipping: { ...shipping, defaultPackage: { ...pkg, [k]: e.target.value === "" ? undefined : Number(e.target.value) } } })} /></div>
+          ))}
+        </div>
+        <p className="text-xs text-zinc-500">Poshmark, Mercari, Depop, Vinted, Grailed, Whatnot and Facebook give you a prepaid label by default. Pirate Ship has no public API, so FlipDesk uses its spreadsheet import and export.</p>
       </section>
 
       <section className="card space-y-3 p-4">

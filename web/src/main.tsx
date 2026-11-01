@@ -15,6 +15,8 @@ import Settings from "./pages/Settings";
 import Inbox from "./pages/Inbox";
 import Source from "./pages/Source";
 import Reports from "./pages/Reports";
+import Bundles from "./pages/Bundles";
+import Shipping from "./pages/Shipping";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
@@ -22,8 +24,10 @@ const NAV = [
   ["/items/new", "New listing", "✨"],
   ["/source", "Sourcing mode", "🛒"],
   ["/inventory", "Inventory", "📦"],
+  ["/shipping", "Shipping", "🚚"],
   ["/sales", "Sales & profit", "💵"],
   ["/reports", "Reports", "📈"],
+  ["/bundles", "Bundles", "🎁"],
   ["/tools", "Power tools", "⚡"],
   ["/queue", "Sync queue", "🔄"],
   ["/connections", "Marketplaces", "🔌"],
@@ -119,6 +123,8 @@ function Shell() {
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/source" element={<Source />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/bundles" element={<Bundles />} />
+          <Route path="/shipping" element={<Shipping />} />
         </Routes>
       </main>
       <Toaster />

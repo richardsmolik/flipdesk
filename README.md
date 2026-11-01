@@ -15,6 +15,11 @@ A reseller command center. Create a listing once, post it to **11 marketplaces**
 | **Reports** | Profit, return on cost, sell-through and days to sell by **source, brand, category and marketplace**, cash tied up by inventory age, profit per hour, and plain-English "buy more of / avoid" advice |
 | **Terapeak import** | Import Terapeak (or any sold-listings) CSV exports. Real sold prices then drive every price suggestion and sourcing mode. |
 | **Phone notifications** | Free push notifications via ntfy for sales, oversells and sale emails to confirm |
+| **Barcode scanning** | Scan a UPC/ISBN in sourcing mode with your phone camera, a photo of the barcode, or a Bluetooth scanner. Books are looked up on Open Library, other products on UPCitemdb, and eBay comps by exact barcode. The code is saved as UPC/ISBN on the item so eBay matches its product catalog. |
+| **Bundles** | Lot listings made of several items, kept in sync both ways (lot sells: its items come down; an item sells alone: the lot comes down; restock: the lot can be filled again). Suggestions for natural groups (same brand, size or category, similar prices, stale stock first). eBay multi-buy discounts ("buy 2 save 10%") via the Marketing API. |
+| **Weekly summary** | Monday-morning push (day, hour and time zone are configurable): sales and profit vs last week, top sale, best source, stock going stale, a bundle idea and this week's to-dos |
+| **Shipping labels** | Choose per marketplace: the site's prepaid label (Poshmark, Depop, Vinted, Whatnot...), **eBay labels** (exact cost pulled from eBay's Finances API), or **Pirate Ship** (export orders as CSV, then import shipment history to attach costs and tracking, which go back to eBay automatically). Profit updates with the real label cost. |
+| **Cancellations and returns** | Remove a cancelled or oversold sale, or put a returned item back in stock, so profit stays honest |
 | **Profit-first** | Per-site fee math (with your own overrides), a "where you keep the most" ranking for every item, true profit after fees, shipping and cost of goods |
 | **eBay power tools** | Stale-listing radar with a recommended fix for each listing, offers to watchers, relisting, bulk repricing, automatic price drops that never go below your floor price |
 | **Books** | Sales, expenses and inventory as CSV exports for taxes; dashboard with sell-through and average days to sell |
@@ -71,7 +76,10 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 ## Status and known gaps
 
-- **Tested:** `npm test` runs 39 tests covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
+- **Tested:** `npm test` runs 56 tests, including barcodes, lots (both directions and restock), bundle suggestions, multi-buy, weekly summary scheduling, the Pirate Ship round trip and cancellations/returns. The earlier 39 tests cover covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
+- **Barcode lookups** (Open Library, UPCitemdb) couldn't be reached from the build sandbox, so they're tested with stand-in services. Live camera scanning needs HTTPS (or localhost); over plain home Wi-Fi the scanner reads a photo of the barcode instead.
+- **Pirate Ship has no public API.** The integration uses its spreadsheet import and shipment-history export. Exported orders carry an "Order ID" of `FD-<sale>` so labels match back exactly.
+- **eBay label costs** come from the Finances API (`sell.finances` scope). If you connected eBay before this update, reconnect once.
 - **Variations on Poshmark, Depop and Etsy** are listed as one listing per option for now. Those sites do support multi-size listings, but the extension can't reliably fill their multi-size forms yet.
 - **Sale-email wording** is matched by common phrases plus title scoring, not by fixed templates. If a site's emails slip through, paste one into Settings, Sale emails, Test to see why.
 - **Not yet tested against live accounts:** the eBay, Etsy and Shopify API calls (they need your keys), the live AI call, and the extension selectors on the real sites. Expect to tweak `extension/sites.js` the first time you use each site.
@@ -83,6 +91,6 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 - Sold-comps pricing through eBay's Marketplace Insights API (needs partner approval)
 - Multi-size listings filled by the extension on Poshmark and Depop
-- Barcode / UPC scan in sourcing mode for books, media and toys
-- Shipping labels and packing slips, plus a printable SKU/bin label
+- Buying shipping labels inside FlipDesk (EasyPost/Shippo) for sellers who want one-click labels
+- Packing slips and printable SKU/bin labels
 - Product mode: users, Postgres, Stripe billing, hosted image CDN

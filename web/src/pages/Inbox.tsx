@@ -6,6 +6,7 @@ import EmailReview from "../components/EmailReview";
 
 interface Alert {
   id: number;
+  sale_id: number | null;
   at: string;
   kind: string;
   severity: "info" | "warning" | "critical";
@@ -56,9 +57,16 @@ export default function Inbox() {
                 </div>
               </div>
               {!a.resolved_at && (
-                <button className="btn-ghost shrink-0 text-xs" onClick={async () => (await api.post(`/api/alerts/${a.id}/resolve`), reload())}>
-                  ✓ Resolved
-                </button>
+                <div className="flex shrink-0 flex-col gap-1">
+                  {a.kind === "oversell" && a.sale_id && (
+                    <button className="btn-ghost text-xs" title="Removes the second sale so your profit stays accurate" onClick={async () => { await api.post(`/api/sales/${a.sale_id}/cancel`, { restock: false, reason: "oversell cancelled" }); toast("Cancelled order removed from your sales"); reload(); }}>
+                      Order cancelled, remove sale
+                    </button>
+                  )}
+                  <button className="btn-ghost text-xs" onClick={async () => (await api.post(`/api/alerts/${a.id}/resolve`), reload())}>
+                    ✓ Resolved
+                  </button>
+                </div>
               )}
             </div>
             {a.data.message && (

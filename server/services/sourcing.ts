@@ -12,6 +12,7 @@ import { MARKETPLACES } from "../marketplaces/registry.js";
 import { aiIsLive, MODEL } from "./ai.js";
 import { recommend } from "./fees.js";
 import { researchPrice } from "./pricing.js";
+import { lookupBarcode, type BarcodeProduct } from "./barcode.js";
 
 export const QuickId = z.object({
   name: z.string().describe("What the item is, specific: brand + model/line + type"),
@@ -70,9 +71,17 @@ export async function quickIdentify(photoPath: string | undefined, hint: string 
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-export async function checkItem(db: Db, input: { photoPath?: string; query?: string; askPrice?: number }) {
-  const { id, demo } = await quickIdentify(input.photoPath, input.query);
-  const research = await researchPrice(db, id.search_query || input.query || id.name);
+export async function checkItem(db: Db, input: { photoPath?: string; query?: string; askPrice?: number; barcode?: string; product?: BarcodeProduct }) {
+  // A barcode beats a photo: exact product, exact comps.
+  const product = input.product ?? (input.barcode ? await lookupBarcode(db, input.barcode) : undefined);
+  if (input.barcode && product && !product.found && !input.query && !input.photoPath) {
+    throw new Error(`Barcode ${product.code} wasn't found${product.source === "invalid" ? " (it doesn't look like a valid UPC/ISBN)" : ""}. Type what it is instead.`);
+  }
+  const { id: guessed, demo } = await quickIdentify(product?.found ? undefined : input.photoPath, product?.found ? product.title : input.query);
+  const id = product?.found
+    ? { ...guessed, name: product.title, brand: product.brand || guessed.brand, category: product.category || guessed.category, search_query: product.title.split(" by ")[0].slice(0, 80) }
+    : guessed;
+  const research = await researchPrice(db, id.search_query || input.query || id.name, product?.found ? product.code : undefined);
   const settings = getSetting<SourcingSettings>(db, "sourcing", { minProfit: 10, minRoiPct: 100 });
   const shipping = getSetting(db, "defaultShippingCost", 0) as number;
 
@@ -112,6 +121,7 @@ export async function checkItem(db: Db, input: { photoPath?: string; query?: str
 
   return {
     demo,
+    barcode: product ?? null,
     identified: id,
     expectedPrice: expected,
     priceBasis: basis,

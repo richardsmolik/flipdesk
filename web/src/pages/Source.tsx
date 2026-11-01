@@ -2,9 +2,11 @@ import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, money, type Item } from "../api";
 import { toast } from "../ui";
+import BarcodeScanner from "../components/BarcodeScanner";
 
 interface Check {
   demo: boolean;
+  barcode: { code: string; kind: string; found: boolean; title: string; image: string | null; source: string; extra?: Record<string, string> } | null;
   identified: { name: string; brand: string; category: string; confidence: string; demand: "slow" | "steady" | "hot"; red_flags: string[]; est_low: number; est_high: number };
   expectedPrice: number;
   priceBasis: string;
@@ -29,6 +31,7 @@ const VERDICT = {
 export default function Source() {
   const [photo, setPhoto] = useState<File | null>(null);
   const [q, setQ] = useState("");
+  const [barcode, setBarcode] = useState("");
   const [ask, setAsk] = useState("");
   const [busy, setBusy] = useState(false);
   const [r, setR] = useState<Check | null>(null);
@@ -37,13 +40,15 @@ export default function Source() {
   const [qty, setQty] = useState(1);
   const cam = useRef<HTMLInputElement>(null);
 
-  const check = async (askOverride?: string) => {
+  const check = async (askOverride?: string, codeOverride?: string) => {
     setBusy(true);
     setBought(null);
     try {
       const fd = new FormData();
       if (photo) fd.append("photo", photo);
       if (q) fd.append("q", q);
+      const code = codeOverride ?? barcode;
+      if (code) fd.append("barcode", code);
       const a = askOverride ?? ask;
       if (a) fd.append("askPrice", a);
       setR(await api.post<Check>("/api/source/check", fd));
@@ -66,13 +71,15 @@ export default function Source() {
       price: r.expectedPrice || undefined,
       source: store,
       photo: r.photo,
+      barcode: r.barcode?.found ? r.barcode.code : undefined,
+      specifics: r.barcode?.extra ? Object.fromEntries(Object.entries(r.barcode.extra).filter(([, v]) => v)) : undefined,
       notes: r.identified.red_flags.length ? `Check: ${r.identified.red_flags.join("; ")}` : "",
     });
     setBought(item);
     toast("Added to drafts");
   };
 
-  const reset = () => (setPhoto(null), setQ(""), setAsk(""), setR(null), setBought(null));
+  const reset = () => (setPhoto(null), setQ(""), setBarcode(""), setAsk(""), setR(null), setBought(null));
   const v = r ? VERDICT[r.verdict] : null;
 
   return (
@@ -82,6 +89,9 @@ export default function Source() {
         <p className="text-sm text-zinc-400">Should I buy this? Snap it, enter the price on the tag, get an answer.</p>
       </div>
 
+      <BarcodeScanner onCode={(c) => (setBarcode(c), setPhoto(null), setQ(""), check(undefined, c))} />
+      {barcode && <div className="text-xs text-zinc-400">Barcode <span className="tabular-nums text-zinc-200">{barcode}</span> <button className="ml-1 text-zinc-500 hover:text-zinc-200" onClick={() => setBarcode("")}>✕</button></div>}
+      <div className="text-center text-[11px] uppercase tracking-wide text-zinc-600">or</div>
       <input ref={cam} type="file" accept="image/*" capture="environment" hidden onChange={(e) => (setPhoto(e.target.files?.[0] ?? null), setR(null))} />
       <button className="card flex h-44 w-full flex-col items-center justify-center gap-2 border-dashed hover:border-brand" onClick={() => cam.current?.click()}>
         {photo ? <img src={URL.createObjectURL(photo)} alt="" className="h-40 rounded-md object-contain" /> : <><span className="text-5xl">📷</span><span className="text-sm text-zinc-300">Tap to snap the item</span></>}
@@ -92,7 +102,7 @@ export default function Source() {
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500">$</span>
           <input className="input py-3 pl-7 text-base" inputMode="decimal" placeholder="Price on the tag" value={ask} onChange={(e) => setAsk(e.target.value)} onBlur={() => r && ask && check()} />
         </div>
-        <button className="btn-primary px-6 text-base" disabled={busy || (!photo && !q)} onClick={() => check()}>{busy ? "…" : "Check"}</button>
+        <button className="btn-primary px-6 text-base" disabled={busy || (!photo && !q && !barcode)} onClick={() => check()}>{busy ? "…" : "Check"}</button>
       </div>
 
       {r && v && (
@@ -109,7 +119,13 @@ export default function Source() {
           </div>
 
           <div className="card space-y-2 p-4 text-sm">
-            <div className="font-medium text-zinc-100">{r.identified.name}</div>
+            <div className="flex items-start gap-3">
+              {r.barcode?.image && <img src={r.barcode.image} alt="" className="h-14 w-14 rounded object-contain" />}
+              <div>
+                <div className="font-medium text-zinc-100">{r.identified.name}</div>
+                {r.barcode?.found && <div className="text-[11px] text-zinc-500">Exact match by barcode via {r.barcode.source}</div>}
+              </div>
+            </div>
             <div className="grid grid-cols-3 gap-2 text-center">
               <div><div className="text-[11px] text-zinc-500">Sells for</div><div className="font-semibold tabular-nums">{money(r.expectedPrice)}</div></div>
               <div><div className="text-[11px] text-zinc-500">Quick sale</div><div className="font-semibold tabular-nums">{money(r.quickSale)}</div></div>

@@ -162,6 +162,7 @@ function EditItem({ id }: { id: number }) {
   const { data: recs, reload: reloadRecs } = useFetch<Rec[]>(`/api/items/${id}/recommend?shipping=${shipping}`, [item?.price, item?.cost]);
   const [picked, setPicked] = useState<string[]>([]);
   const photoInput = useRef<HTMLInputElement>(null);
+  const { data: lotParts } = useFetch<{ itemId: number; quantity: number; sku: string; title: string; price: number; available: number }[]>(`/api/items/${id}/bundle`, [item?.quantity]);
 
   useEffect(() => {
     if (item) setForm(item);
@@ -282,6 +283,21 @@ function EditItem({ id }: { id: number }) {
               ))}
             </div>
           </div>
+
+          {!!lotParts?.length && (
+            <div className="card p-4 text-sm">
+              <h2 className="mb-2 font-semibold">🎁 This lot includes</h2>
+              <ul className="divide-y divide-zinc-800">
+                {lotParts.map((p) => (
+                  <li key={p.itemId} className="flex items-center justify-between py-1.5">
+                    <Link to={`/items/${p.itemId}`} className="truncate hover:underline">{p.quantity > 1 ? `${p.quantity}x ` : ""}{p.title}</Link>
+                    <span className={`shrink-0 text-xs ${p.available >= p.quantity ? "text-zinc-400" : "text-red-400"}`}>{p.available} left · {money(p.price)}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[11px] text-zinc-500">If this lot sells, each item above is delisted everywhere. If any item sells on its own, this lot is delisted.</p>
+            </div>
+          )}
 
           {draft && (draft.flaws.length > 0 || draft.verify.length > 0 || draft.price) && (
             <div className="card border-blue-900/70 p-4 text-sm">

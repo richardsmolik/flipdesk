@@ -12,12 +12,16 @@ import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
 import { claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, requestDelist } from "./services/jobs.js";
 import { researchPrice } from "./services/pricing.js";
-import { NeedsVariationError, recordSale, restock, saveVariations } from "./services/sync.js";
+import { NeedsVariationError, cancelSale, recordSale, restock, saveVariations } from "./services/sync.js";
 import { bulkPrice, relist, sendOffersToWatchers, staleListings } from "./services/ebayTools.js";
 import { dashboard, toCsv } from "./services/reports.js";
 import { notify } from "./services/alerts.js";
 import { compsLibrary, importComps } from "./services/comps.js";
 import { checkItem } from "./services/sourcing.js";
+import { parseAddress, pirateShipExport, pirateShipImport, providerFor, syncEbayLabelCosts, toShip, updateShipping } from "./services/shipping.js";
+import { buildDigest, sendDigest } from "./services/digest.js";
+import { bundleParts, createBundle, createMultiBuy, endPromotion, suggestBundles } from "./services/bundles.js";
+import { lookupBarcode, specificKeyFor, normalizeCode } from "./services/barcode.js";
 import { profitReport } from "./services/insights.js";
 import { confirmEmail, imapConfigured, ingestEmail } from "./services/email.js";
 import { simpleParser } from "mailparser";
@@ -320,6 +324,13 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.json({ ...r, item: getItem(db, Number(req.params.id)) });
   });
 
+  api.post("/sales/:id/cancel", async (req, res) => {
+    const b = z.object({ restock: z.boolean().default(false), reason: z.string().optional() }).parse(req.body);
+    const item = cancelSale(db, Number(req.params.id), b);
+    await processApiJobs(db);
+    res.json(item);
+  });
+
   api.post("/items/:id/restock", async (req, res) => {
     const b = z.object({ units: z.number().int().min(1), unitCost: z.number().min(0).optional(), variationId: z.number().int().optional() }).parse(req.body);
     const item = restock(db, Number(req.params.id), b.units, b.unitCost, b.variationId);
@@ -346,15 +357,80 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.json(item);
   });
 
+  const memUploadShip = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+  // ---------------- Shipping ----------------
+  api.get("/shipping", (req, res) => {
+    res.json({
+      rows: toShip(db, Number(req.query.days ?? 30)),
+      providers: Object.fromEntries(MARKETPLACE_IDS.map((m) => [m, providerFor(db, m)])),
+      ebayLive: ebayIsLive(db),
+    });
+  });
+  api.post("/sales/:id/shipping", (req, res) => {
+    const b = z
+      .object({ cost: z.number().min(0).optional(), tracking: z.string().optional(), carrier: z.string().optional(), shipped: z.boolean().optional(), address: z.string().optional() })
+      .parse(req.body);
+    let shipTo;
+    if (b.address) {
+      shipTo = parseAddress(b.address);
+      if (!shipTo) return void res.status(400).json({ error: 'Couldn\'t read that address. Use: name, street, (apt), "City, ST 12345" on separate lines.' });
+    }
+    res.json(updateShipping(db, Number(req.params.id), { cost: b.cost, tracking: b.tracking || undefined, carrier: b.carrier, shipped: b.shipped, shipTo: shipTo ?? undefined, source: b.cost !== undefined ? "manual" : undefined }));
+  });
+  api.post("/shipping/pirateship/export", (req, res) => {
+    const { saleIds } = z.object({ saleIds: z.array(z.number().int()).min(1) }).parse(req.body);
+    const r = pirateShipExport(db, saleIds);
+    if (!r.count) return void res.status(400).json({ error: `No addresses yet for: ${r.missing.join(", ")}. Add them first.` });
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="pirateship-${new Date().toISOString().slice(0, 10)}.csv"`);
+    res.setHeader("X-Missing-Addresses", r.missing.join(","));
+    res.send(r.csv);
+  });
+  api.post("/shipping/pirateship/import", memUploadShip.single("file"), async (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose your Pirate Ship export CSV." });
+    const r = await pirateShipImport(db, req.file.buffer.toString("utf8"));
+    res.json(r);
+  });
+  api.post("/shipping/ebay-sync", async (_req, res) => void res.json({ updated: await syncEbayLabelCosts(db) }));
+
+  // ---------------- Bundles & promotions ----------------
+  api.get("/bundles/suggestions", (req, res) => void res.json(suggestBundles(db, Number(req.query.discount ?? 15))));
+  api.post("/bundles", (req, res) => {
+    const b = z
+      .object({
+        parts: z.array(z.object({ itemId: z.number().int(), quantity: z.number().int().min(1).optional() })).min(2),
+        title: z.string().optional(),
+        price: z.number().positive().optional(),
+        discountPct: z.number().min(0).max(80).optional(),
+      })
+      .parse(req.body);
+    res.status(201).json(createBundle(db, b.parts, b));
+  });
+  api.get("/items/:id/bundle", (req, res) => void res.json(bundleParts(db, Number(req.params.id))));
+  api.get("/promotions", (_req, res) => void res.json(db.prepare("SELECT * FROM promotions ORDER BY id DESC LIMIT 50").all()));
+  api.post("/promotions/multibuy", async (req, res) => {
+    const b = z
+      .object({ itemIds: z.array(z.number().int()).min(2), tiers: z.array(z.object({ minQuantity: z.number().int().min(2), pctOff: z.number().min(1).max(80) })).min(1), name: z.string().optional() })
+      .parse(req.body);
+    res.json(await createMultiBuy(db, b.itemIds, b.tiers, b.name));
+  });
+  api.post("/promotions/:id/end", async (req, res) => {
+    await endPromotion(db, Number(req.params.id));
+    res.json({ ok: true });
+  });
+
   // ---------------- Sourcing mode ----------------
   api.post("/source/check", upload.single("photo"), async (req, res) => {
     const askPrice = req.body.askPrice !== undefined && req.body.askPrice !== "" ? Number(req.body.askPrice) : undefined;
     const query = typeof req.body.q === "string" ? req.body.q.trim() : undefined;
     const photo = (req.file as Express.Multer.File | undefined)?.path;
-    if (!photo && !query) return void res.status(400).json({ error: "Snap a photo or type what it is." });
-    const r = await checkItem(db, { photoPath: photo, query, askPrice });
+    const barcode = typeof req.body.barcode === "string" && req.body.barcode.trim() ? req.body.barcode.trim() : undefined;
+    if (!photo && !query && !barcode) return void res.status(400).json({ error: "Scan a barcode, snap a photo or type what it is." });
+    const r = await checkItem(db, { photoPath: photo, query, askPrice, barcode });
     res.json({ ...r, photo: photo ? path.basename(photo) : null });
   });
+
+  api.get("/barcode/:code", async (req, res) => void res.json(await lookupBarcode(db, String(req.params.code))));
 
   api.post("/source/buy", async (req, res) => {
     const b = z
@@ -368,15 +444,22 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
         source: z.string().optional(),
         photo: z.string().nullable().optional(),
         notes: z.string().optional(),
+        barcode: z.string().optional(),
+        specifics: z.record(z.string(), z.string()).optional(),
       })
       .parse(req.body);
+    const specifics: Record<string, string> = { ...(b.specifics ?? {}) };
+    if (b.barcode) {
+      const n = normalizeCode(b.barcode);
+      if (n.valid) specifics[specificKeyFor(n.kind)] = n.code;
+    }
     const id = Number(
       db
         .prepare(
-          `INSERT INTO items (sku, title, brand, category, cost, price, quantity, quantity_purchased, source, sourced_at, status, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), 'draft', ?)`,
+          `INSERT INTO items (sku, title, brand, category, cost, price, quantity, quantity_purchased, source, sourced_at, status, notes, specifics)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), 'draft', ?, ?)`,
         )
-        .run(nextSku(db), b.name, b.brand ?? "", b.category ?? "", b.cost, b.price ?? 0, b.quantity, b.quantity, b.source ?? "", b.notes ?? "")
+        .run(nextSku(db), b.name, b.brand ?? "", b.category ?? "", b.cost, b.price ?? 0, b.quantity, b.quantity, b.source ?? "", b.notes ?? "", JSON.stringify(specifics))
         .lastInsertRowid,
     );
     if (b.photo) {
@@ -442,6 +525,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     db.prepare("UPDATE alerts SET resolved_at = datetime('now') WHERE id = ?").run(Number(req.params.id));
     res.json({ ok: true });
   });
+  api.get("/digest/preview", (_req, res) => void res.json(buildDigest(db)));
+  api.post("/digest/send", async (_req, res) => void res.json(await sendDigest(db, { force: true })));
   api.post("/notify/test", async (_req, res) => {
     const ok = await notify(db, "sale", "FlipDesk test", "Push notifications are working!");
     res.status(ok ? 200 : 400).json({ ok, error: ok ? undefined : "Set an ntfy topic in Settings first (or the push failed)." });
@@ -560,7 +645,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- Settings ----------------
-  const SETTING_KEYS = ["notify", "minutesPerItem", "sourcing", "feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
+  const SETTING_KEYS = ["weekly", "shipping", "notify", "minutesPerItem", "sourcing", "feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
   api.get("/settings", (_req, res) => {
     res.json({
       ...Object.fromEntries(SETTING_KEYS.map((k) => [k, getSetting(db, k, null)])),

@@ -7,6 +7,8 @@ import { processApiJobs } from "./services/jobs.js";
 import { pollEbaySales } from "./services/sync.js";
 import { applyAutoPriceDrops } from "./services/ebayTools.js";
 import { pollImap } from "./services/email.js";
+import { sendDigest } from "./services/digest.js";
+import { syncEbayLabelCosts } from "./services/shipping.js";
 
 // Minimal .env loader (no dependency).
 if (fs.existsSync(".env")) {
@@ -51,3 +53,5 @@ every(30_000, "jobs", () => processApiJobs(db));
 every(5 * 60_000, "ebay-sales", () => pollEbaySales(db)); // sold on eBay -> delist everywhere else
 every(60 * 60_000, "auto-drop", () => applyAutoPriceDrops(db));
 every(2 * 60_000, "email", () => pollImap(db)); // sale emails from every marketplace
+every(15 * 60_000, "weekly", () => sendDigest(db)); // Monday-morning summary (once per week)
+every(30 * 60_000, "ebay-labels", () => syncEbayLabelCosts(db)); // exact eBay label costs -> profit

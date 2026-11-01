@@ -11,7 +11,7 @@ interface Expense { id: number; date: string; category: string; amount: number; 
 
 export default function Sales() {
   const [days, setDays] = useState(30);
-  const { data: sales } = useFetch<Sale[]>(`/api/sales?days=${days}`);
+  const { data: sales, reload: reloadSales } = useFetch<Sale[]>(`/api/sales?days=${days}`);
   const { data: expenses, reload: reloadExp } = useFetch<Expense[]>("/api/expenses");
   const { byId } = useMarketplaces();
   const [exp, setExp] = useState({ category: "supplies", amount: "", note: "" });
@@ -41,7 +41,7 @@ export default function Sales() {
       <div className="card overflow-x-auto">
         <table className="w-full text-sm tabular-nums">
           <thead className="border-b border-zinc-800 text-left text-xs text-zinc-500">
-            <tr><th className="p-3 font-medium">Item</th><th className="p-3 font-medium">Where</th><th className="p-3 text-right font-medium">Qty</th><th className="p-3 text-right font-medium">Sale</th><th className="p-3 text-right font-medium">Fees</th><th className="p-3 text-right font-medium">Ship</th><th className="p-3 text-right font-medium">COGS</th><th className="p-3 text-right font-medium">Profit</th><th className="p-3 font-medium">Date</th></tr>
+            <tr><th className="p-3 font-medium">Item</th><th className="p-3 font-medium">Where</th><th className="p-3 text-right font-medium">Qty</th><th className="p-3 text-right font-medium">Sale</th><th className="p-3 text-right font-medium">Fees</th><th className="p-3 text-right font-medium">Ship</th><th className="p-3 text-right font-medium">COGS</th><th className="p-3 text-right font-medium">Profit</th><th className="p-3 font-medium">Date</th><th /></tr>
           </thead>
           <tbody className="divide-y divide-zinc-800/70">
             {s.map((x) => (
@@ -55,9 +55,23 @@ export default function Sales() {
                 <td className="p-3 text-right text-zinc-400">{money(x.cost)}</td>
                 <td className={`p-3 text-right font-medium ${x.profit < 0 ? "text-red-400" : "text-zinc-100"}`}>{money(x.profit)}</td>
                 <td className="p-3 text-xs text-zinc-500">{x.sold_at.slice(0, 10)}</td>
+                <td className="p-3">
+                  <button
+                    className="text-xs text-zinc-500 hover:text-red-400"
+                    title="Cancelled order or return"
+                    onClick={async () => {
+                      const ret = confirm(`Remove this sale of "${x.title}"?\n\nOK = it's coming back to me (return / cancelled before shipping): put it back in stock.\nCancel = keep it out of stock (e.g. an oversold order).`);
+                      await api.post(`/api/sales/${x.id}/cancel`, { restock: ret });
+                      toast(ret ? "Sale removed, item back in stock" : "Sale removed");
+                      reloadSales();
+                    }}
+                  >
+                    Cancel / return
+                  </button>
+                </td>
               </tr>
             ))}
-            {!s.length && <tr><td colSpan={9} className="p-8 text-center text-zinc-500">No sales in this period.</td></tr>}
+            {!s.length && <tr><td colSpan={10} className="p-8 text-center text-zinc-500">No sales in this period.</td></tr>}
           </tbody>
         </table>
       </div>

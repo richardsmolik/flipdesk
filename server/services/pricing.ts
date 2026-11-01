@@ -57,7 +57,7 @@ function demoComps(q: string): Comp[] {
   }));
 }
 
-export async function researchPrice(db: Db, q: string) {
+export async function researchPrice(db: Db, q: string, gtin?: string) {
   let comps: Comp[] = [];
   let demo = false;
 
@@ -71,7 +71,7 @@ export async function researchPrice(db: Db, q: string) {
 
   // 2) eBay active listings (what you're competing against right now).
   try {
-    const live = await ebayBrowseSearch(db, q);
+    const live = await ebayBrowseSearch(db, q, 20, gtin);
     if (live) comps.push(...live.map((c) => ({ ...c, sold: false, source: "ebay-active" })));
   } catch (e) {
     console.warn("[pricing] eBay browse failed:", (e as Error).message);

@@ -215,6 +215,45 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       );
     `);
   },
+  // v3: barcodes, bundles (lots), shipping details, promotions, weekly digests
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS barcode_cache (
+        code TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS bundle_items (
+        bundle_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (bundle_id, item_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bundle_items_item ON bundle_items(item_id);
+      ALTER TABLE sales ADD COLUMN ship_to TEXT;          -- JSON address
+      ALTER TABLE sales ADD COLUMN tracking TEXT;
+      ALTER TABLE sales ADD COLUMN carrier TEXT;
+      ALTER TABLE sales ADD COLUMN label_source TEXT;     -- ebay | pirateship | marketplace | manual
+      ALTER TABLE sales ADD COLUMN shipped_at TEXT;
+      CREATE TABLE IF NOT EXISTS promotions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        marketplace TEXT NOT NULL,
+        external_id TEXT,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,                               -- volume_discount
+        rules TEXT NOT NULL DEFAULT '[]',
+        item_ids TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'running',
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS digests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        week TEXT UNIQUE NOT NULL,                        -- e.g. 2026-W44
+        sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+        body TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 function migrate(db: DatabaseSync) {
