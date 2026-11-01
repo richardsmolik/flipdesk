@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import { uploadUrl } from "./context.js";
 
 export type Db = DatabaseSync;
 
@@ -485,7 +486,7 @@ export function hydrateItem(db: Db, row: ItemRow): Item {
     variations: getVariations(db, row.id),
     specifics: JSON.parse(row.specifics || "{}"),
     keywords: JSON.parse(row.keywords || "[]"),
-    photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : `/uploads/${path.basename(p.path)}`, edited: Boolean(p.original_path) })),
+    photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : uploadUrl(p.path), edited: Boolean(p.original_path) })),
     listings,
   };
 }

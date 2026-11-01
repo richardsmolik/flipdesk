@@ -17,6 +17,7 @@ import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { notify, raiseAlert } from "./alerts.js";
 import { tokens } from "./comps.js";
 import { NeedsVariationError, recordSale } from "./sync.js";
+import { personalEnv } from "../context.js";
 
 const SENDERS: [RegExp, MarketplaceId][] = [
   [/(^|[.@])ebay\.[a-z.]+$/i, "ebay"],
@@ -229,22 +230,22 @@ export function confirmEmail(db: Db, emailId: number, p: { itemId: number; varia
 
 // ---------------- IMAP polling ----------------
 export function imapConfigured() {
-  return Boolean(process.env.IMAP_HOST && process.env.IMAP_USER && process.env.IMAP_PASSWORD);
+  return Boolean(personalEnv("IMAP_HOST") && personalEnv("IMAP_USER") && personalEnv("IMAP_PASSWORD"));
 }
 
 export async function pollImap(db: Db) {
   if (!imapConfigured()) return { checked: 0, sales: 0 };
   const client = new ImapFlow({
-    host: process.env.IMAP_HOST!,
-    port: Number(process.env.IMAP_PORT ?? 993),
-    secure: process.env.IMAP_SECURE !== "false",
-    auth: { user: process.env.IMAP_USER!, pass: process.env.IMAP_PASSWORD! },
+    host: personalEnv("IMAP_HOST")!,
+    port: Number(personalEnv("IMAP_PORT") ?? 993),
+    secure: personalEnv("IMAP_SECURE") !== "false",
+    auth: { user: personalEnv("IMAP_USER")!, pass: personalEnv("IMAP_PASSWORD")! },
     logger: false,
   });
   await client.connect();
   let checked = 0;
   let sales = 0;
-  const lock = await client.getMailboxLock(process.env.IMAP_MAILBOX ?? "INBOX");
+  const lock = await client.getMailboxLock(personalEnv("IMAP_MAILBOX") ?? "INBOX");
   try {
     const lastUid = getSetting<number>(db, "imap.lastUid", 0);
     // First run: only look back 3 days.

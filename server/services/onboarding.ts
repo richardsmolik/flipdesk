@@ -29,6 +29,28 @@ export function saveProfile(db: Db, p: Omit<Profile, "done">) {
   if (!getSetting(db, "shipping", null) && !marketplaces.includes("ebay")) setSetting(db, "shipping", { defaultProvider: "pirateship" });
 }
 
+/** Short "show me how" guides for each checklist step (plain steps; no video needed). */
+export const HOW: Record<string, string[]> = {
+  profile: ["Click this step.", "Pick the sites you sell on, what you sell and how much.", "Click Let's go. You can change any of it later in Settings."],
+  ebay: [
+    "On developer.ebay.com, create a free account and a Production keyset (App ID, Cert ID).",
+    "Add the RuName (sign-in redirect) shown on FlipDesk's Marketplaces page.",
+    "Put the three values in your .env file and restart FlipDesk.",
+    "Marketplaces → Connect eBay → sign in. It comes back on its own.",
+    "Follow the eBay checklist: business policies, choose policies, ship-from location. Full guide: docs/EBAY_SETUP.md.",
+  ],
+  item: ["Click New listing (or press n).", "Drop 3-12 photos. On your phone, use 📱 Use phone or Shoot mode.", "Click ✨ Write it for me. Check the flaws and 'double-check' notes, then Save."],
+  crosslist: ["Open the item.", "Tick the sites (your favorites are already ticked).", "Click Crosslist. Sites with an API list right away; the others go to the Chrome extension."],
+  extension: [
+    "In Chrome, open chrome://extensions and turn on Developer mode.",
+    "Click Load unpacked and choose the extension folder inside FlipDesk.",
+    "Open the extension, paste your server address and the token from the Marketplaces page.",
+    "Log in to Poshmark, Mercari, etc. in the same Chrome. Listings fill in automatically.",
+  ],
+  notify: ["Install the free ntfy app on your phone.", "Subscribe to a long, private topic name (like flipdesk-7k2p9x).", "Settings → Notifications: enter the same name and press Send test."],
+  sale: ["Nothing to do. When anything sells, FlipDesk delists it everywhere else.", "Then open Shipping to print the label and packing slip."],
+};
+
 export function onboarding(db: Db) {
   const profile = getSetting<Profile | null>(db, "profile", null);
   const dismissed = getSetting(db, "onboardingDismissed", false);
@@ -50,7 +72,9 @@ export function onboarding(db: Db) {
     (wantsExtension || !profile) && { key: "extension", label: "Install the Chrome extension", done: extConnected > 0, detail: "For Poshmark, Mercari, Depop, Vinted, Grailed, Facebook and Whatnot (load the extension/ folder, paste your token).", href: "/connections" },
     { key: "notify", label: "Get sale alerts on your phone", done: Boolean(getSetting<NotifySettings>(db, "notify", {}).ntfyTopic), detail: "Free with the ntfy app. Takes 1 minute.", href: "/settings" },
     { key: "sale", label: "Make your first sale", done: n("SELECT COUNT(*) AS n FROM sales") > 0, detail: "When it sells, FlipDesk delists it everywhere else and shows your real profit.", href: "/sales" },
-  ].filter(Boolean) as { key: string; label: string; done: boolean; detail: string; href: string }[];
+  ]
+    .filter(Boolean)
+    .map((s) => ({ ...(s as object), how: HOW[(s as { key: string }).key] ?? [] })) as { key: string; label: string; done: boolean; detail: string; href: string; how: string[] }[];
   const doneCount = steps.filter((s) => s.done).length;
   return {
     showWelcome: !profile?.done && !dismissed,

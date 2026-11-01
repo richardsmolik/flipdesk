@@ -8,6 +8,7 @@
 import { getSetting, type Db, type Item, type ListingRow } from "../db.js";
 import { MARKETPLACES, type MarketplaceId } from "./registry.js";
 import { ebayDelist, ebayIsLive, ebayPublish, ebayUpdatePrice } from "./ebay.js";
+import { personalEnv } from "../context.js";
 
 export interface PublishResult {
   externalId: string;
@@ -27,13 +28,13 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const rid = () => Math.random().toString(36).slice(2, 12);
 
 // ---------------- Etsy (Open API v3) ----------------
-const etsyLive = () => Boolean(process.env.ETSY_API_KEY && process.env.ETSY_ACCESS_TOKEN && process.env.ETSY_SHOP_ID);
+const etsyLive = () => Boolean(personalEnv("ETSY_API_KEY") && personalEnv("ETSY_ACCESS_TOKEN") && personalEnv("ETSY_SHOP_ID"));
 async function etsy<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`https://openapi.etsy.com/v3/application${path}`, {
     method,
     headers: {
-      "x-api-key": process.env.ETSY_API_KEY!,
-      Authorization: `Bearer ${process.env.ETSY_ACCESS_TOKEN}`,
+      "x-api-key": personalEnv("ETSY_API_KEY")!,
+      Authorization: `Bearer ${personalEnv("ETSY_ACCESS_TOKEN")}`,
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -50,7 +51,7 @@ const etsyAdapter: Adapter = {
     if (!etsyLive()) return (await sleep(120), { externalId: rid(), url: `https://www.etsy.com/listing/${Date.now()}` });
     const cfg = getSetting(db, "etsy", {} as { taxonomyId?: number; shippingProfileId?: number; whenMade?: string });
     // Creates a DRAFT listing (Etsy requires images to be uploaded before activation).
-    const r = await etsy<{ listing_id: number; url: string }>("POST", `/shops/${process.env.ETSY_SHOP_ID}/listings`, {
+    const r = await etsy<{ listing_id: number; url: string }>("POST", `/shops/${personalEnv("ETSY_SHOP_ID")}/listings`, {
       quantity: item.quantity,
       title: item.title.slice(0, 140),
       description: item.description,
@@ -65,21 +66,21 @@ const etsyAdapter: Adapter = {
   },
   async delist(_db, _item, listing) {
     if (!etsyLive()) return sleep(80);
-    await etsy("PATCH", `/shops/${process.env.ETSY_SHOP_ID}/listings/${listing.external_id}`, { state: "inactive" });
+    await etsy("PATCH", `/shops/${personalEnv("ETSY_SHOP_ID")}/listings/${listing.external_id}`, { state: "inactive" });
   },
   async updatePrice(_db, _item, listing, price) {
     if (!etsyLive()) return sleep(80);
     // Price lives on the listing inventory for v3; simple listings accept price on update.
-    await etsy("PATCH", `/shops/${process.env.ETSY_SHOP_ID}/listings/${listing.external_id}`, { price });
+    await etsy("PATCH", `/shops/${personalEnv("ETSY_SHOP_ID")}/listings/${listing.external_id}`, { price });
   },
 };
 
 // ---------------- Shopify (Admin GraphQL) ----------------
-const shopifyLive = () => Boolean(process.env.SHOPIFY_STORE_DOMAIN && process.env.SHOPIFY_ADMIN_TOKEN);
+const shopifyLive = () => Boolean(personalEnv("SHOPIFY_STORE_DOMAIN") && personalEnv("SHOPIFY_ADMIN_TOKEN"));
 async function shopify<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const res = await fetch(`https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2025-07/graphql.json`, {
+  const res = await fetch(`https://${personalEnv("SHOPIFY_STORE_DOMAIN")}/admin/api/2025-07/graphql.json`, {
     method: "POST",
-    headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN!, "Content-Type": "application/json" },
+    headers: { "X-Shopify-Access-Token": personalEnv("SHOPIFY_ADMIN_TOKEN")!, "Content-Type": "application/json" },
     body: JSON.stringify({ query, variables }),
   });
   const j = (await res.json()) as { data?: T; errors?: unknown };
@@ -131,7 +132,7 @@ const shopifyAdapter: Adapter = {
     const errs = data.productSet.userErrors;
     if (errs.length || !data.productSet.product) throw new Error(errs.map((e) => e.message).join("; "));
     const p = data.productSet.product;
-    return { externalId: p.id, url: `https://${process.env.SHOPIFY_STORE_DOMAIN}/products/${p.handle}` };
+    return { externalId: p.id, url: `https://${personalEnv("SHOPIFY_STORE_DOMAIN")}/products/${p.handle}` };
   },
   async delist(_db, _item, listing) {
     if (!shopifyLive()) return sleep(80);

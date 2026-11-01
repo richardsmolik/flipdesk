@@ -7,6 +7,7 @@ import sharp from "sharp";
 import fs from "node:fs";
 import type { Db } from "../db.js";
 import { tokens } from "./comps.js";
+import { uploadUrl } from "../context.js";
 
 /** 64-bit difference hash as 16 hex chars. */
 export async function dHash(file: string): Promise<string> {
@@ -85,7 +86,7 @@ export async function findDuplicates(db: Db, itemId: number, limit = 5): Promise
     if (related.has(o.id)) continue;
     let best = 64;
     for (const h of myHashes) for (const g of hashesBy.get(o.id) ?? []) best = Math.min(best, hamming(h, g));
-    const photo = o.photo ? (o.photo.startsWith("http") ? o.photo : `/uploads/${o.photo.split(/[\\/]/).pop()}`) : null;
+    const photo = o.photo ? (o.photo.startsWith("http") ? o.photo : uploadUrl(o.photo)) : null;
     if (best <= 6) {
       hits.push({ itemId: o.id, sku: o.sku, title: o.title, status: o.status, photo, reason: "photo", score: Math.round((1 - best / 64) * 100) / 100 });
       continue;

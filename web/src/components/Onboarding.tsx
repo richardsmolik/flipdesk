@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { MpBadge, toast, useMarketplaces } from "../ui";
+import { switchShop } from "./Account";
 
 export interface OnboardingState {
   showWelcome: boolean;
   dismissed: boolean;
   checklistHidden: boolean;
   defaultMarketplaces: string[];
-  steps: { key: string; label: string; done: boolean; detail: string; href: string }[];
+  steps: { key: string; label: string; done: boolean; detail: string; href: string; how: string[] }[];
   doneCount: number;
   total: number;
   complete: boolean;
@@ -85,6 +86,10 @@ export function Welcome({ onDone }: { onDone: (s: OnboardingState) => void }) {
           </button>
           <button className="btn-ghost" onClick={async () => onDone(await api.post<OnboardingState>("/api/onboarding/dismiss", { dismissed: true }))}>Skip for now</button>
         </div>
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3 text-sm">
+          <b>Just looking?</b> <span className="text-zinc-400">Open a sample shop with 30+ items, sales, an oversell and orders to ship. Try everything, then come back here to set up yours.</span>
+          <button className="btn-ghost mt-2 w-full" onClick={() => switchShop("enter_demo")}>🧪 Open the sample shop</button>
+        </div>
       </div>
     </div>
   );
@@ -93,6 +98,7 @@ export function Welcome({ onDone }: { onDone: (s: OnboardingState) => void }) {
 /** Dashboard checklist; steps tick themselves off from real activity. */
 export function GetStarted({ onWelcome }: { onWelcome: () => void }) {
   const [s, setS] = useState<OnboardingState | null>(null);
+  const [how, setHow] = useState<string | null>(null);
   useEffect(() => void api.get<OnboardingState>("/api/onboarding").then(setS).catch(() => {}), []);
   if (!s || s.complete || s.checklistHidden) return null;
   const next = s.steps.find((x) => !x.done);
@@ -119,6 +125,18 @@ export function GetStarted({ onWelcome }: { onWelcome: () => void }) {
           return (
             <li key={st.key}>
               {st.href === "#welcome" ? <button className={`${cls} w-full text-left`} onClick={onWelcome}>{inner}</button> : <Link to={st.href} className={cls}>{inner}</Link>}
+              {!st.done && st.how?.length > 0 && (
+                <div className="ml-9">
+                  <button className="text-xs text-brand hover:underline" onClick={() => setHow(how === st.key ? null : st.key)} aria-expanded={how === st.key}>
+                    {how === st.key ? "Hide steps" : "Show me how"}
+                  </button>
+                  {how === st.key && (
+                    <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-xs text-zinc-400">
+                      {st.how.map((h) => <li key={h}>{h}</li>)}
+                    </ol>
+                  )}
+                </div>
+              )}
             </li>
           );
         })}

@@ -84,7 +84,7 @@ export default function Inventory() {
             </button>
           ))}
         </div>
-        <input className="input max-w-xs" placeholder="Search title, SKU, brand, bin…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input data-search className="input max-w-xs" placeholder="Search title, SKU, brand, bin…  ( / )" value={q} onChange={(e) => setQ(e.target.value)} />
         <select className="input max-w-[200px]" value={mp} onChange={(e) => setMp(e.target.value)}>
           <option value="">Live on any site</option>
           {marketplaces.map((m) => <option key={m.id} value={m.id}>Live on {m.name}</option>)}

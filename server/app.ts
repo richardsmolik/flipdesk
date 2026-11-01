@@ -22,6 +22,8 @@ import { isImageUpload, normalizeUploads } from "./services/uploads.js";
 import { importInventory, previewInventory } from "./services/inventoryImport.js";
 import { findDuplicates } from "./services/duplicates.js";
 import { onboarding, saveProfile } from "./services/onboarding.js";
+import { goalProgress, saveGoals } from "./services/goals.js";
+import { candidates, skipToday, today } from "./services/today.js";
 import { aiStatus, scheduleAutoWrite } from "./services/autowrite.js";
 import { importSales, previewSales } from "./services/salesImport.js";
 import { checkUploadToken, createUploadToken, MAX_PER_TOKEN, phoneAddresses } from "./services/phone.js";
@@ -37,6 +39,7 @@ import { lookupBarcode, specificKeyFor, normalizeCode } from "./services/barcode
 import { profitReport } from "./services/insights.js";
 import { confirmEmail, imapConfigured, ingestEmail } from "./services/email.js";
 import { simpleParser } from "mailparser";
+import { currentWorkspace, enterWorkspace, personalEnv, uploadUrl, type WorkspaceContext } from "./context.js";
 
 const MarketplaceEnum = z.enum(MARKETPLACE_IDS as [MarketplaceId, ...MarketplaceId[]]);
 
@@ -73,16 +76,17 @@ function nextSku(db: Db) {
 }
 
 export function extensionToken(db: Db) {
-  if (process.env.FLIPDESK_TOKEN && process.env.FLIPDESK_TOKEN !== "change-me") return process.env.FLIPDESK_TOKEN;
+  if (personalEnv("FLIPDESK_TOKEN") && personalEnv("FLIPDESK_TOKEN") !== "change-me") return personalEnv("FLIPDESK_TOKEN")!;
+  const prefix = currentWorkspace()?.tokenPrefix ?? "";
   let t = getSetting<string | null>(db, "extensionToken", null);
-  if (!t) {
-    t = crypto.randomBytes(18).toString("base64url");
+  if (!t || (prefix && !t.startsWith(prefix))) {
+    t = prefix + crypto.randomBytes(18).toString("base64url");
     setSetting(db, "extensionToken", t);
   }
   return t;
 }
 
-export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
+export function createApp(db: Db, opts: { uploadDir?: string; password?: string; workspace?: WorkspaceContext } = {}) {
   const uploadDir = opts.uploadDir ?? "data/uploads";
   fs.mkdirSync(uploadDir, { recursive: true });
   const upload = multer({
@@ -95,6 +99,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   const app = express();
+  // Several shops on one server: every request to this app runs "inside" its shop (see context.ts).
+  if (opts.workspace) app.use(enterWorkspace(opts.workspace));
   app.use(express.json({ limit: "2mb" }));
 
   // CORS only for the Chrome extension endpoints + photos it needs to upload.
@@ -159,7 +165,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   app.use("/api", api);
 
   // ---------------- Optional password (required when reachable from your phone/LAN) ----------------
-  const password = process.env.FLIPDESK_PASSWORD;
+  // Hosted for several people: accounts are checked before a request reaches this shop (see workspaces.ts).
+  const password = opts.password !== undefined ? opts.password : process.env.FLIPDESK_PASSWORD;
   const sessionValue = password ? crypto.createHmac("sha256", password).update("flipdesk-session").digest("base64url") : "";
   const readCookie = (req: Request, name: string) =>
     (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(name + "="))?.slice(name.length + 1);
@@ -196,6 +203,24 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     if (b.checklist !== undefined) setSetting(db, "checklistHidden", b.checklist);
     else setSetting(db, "onboardingDismissed", b.dismissed ?? true);
     res.json(onboarding(db));
+  });
+  api.get("/today", (_req, res) => void res.json(today(db)));
+  api.post("/today/skip", (req, res) => {
+    skipToday(db, z.object({ key: z.string().max(80) }).parse(req.body).key);
+    res.json(today(db));
+  });
+  api.post("/today/do", (req, res) => {
+    const key = z.object({ key: z.string().max(80) }).parse(req.body).key;
+    const t = candidates(db).find((c) => c.key === key);
+    if (!t?.action) return void res.status(400).json({ error: "Nothing to do automatically for this one" });
+    bulkPrice(db, [t.action.itemId], { set: t.action.price }, "today");
+    res.json(today(db));
+  });
+  api.get("/goals", (_req, res) => void res.json(goalProgress(db)));
+  api.put("/goals", (req, res) => {
+    const n = z.number().min(0).max(1e7).optional();
+    saveGoals(db, z.object({ listed: n, sales: n, profit: n }).parse(req.body));
+    res.json(goalProgress(db));
   });
   api.get("/nav-counts", (_req, res) => {
     const n = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
@@ -575,7 +600,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
         ...r,
         ship_to: r.ship_to ? JSON.parse(String(r.ship_to)) : null,
         variation: r.attrs ? Object.entries(JSON.parse(String(r.attrs))).map(([k, v]) => `${k}: ${v}`).join(" / ") : null,
-        photo: r.photo ? (String(r.photo).startsWith("http") ? r.photo : `/uploads/${path.basename(String(r.photo))}`) : null,
+        photo: r.photo ? (String(r.photo).startsWith("http") ? r.photo : uploadUrl(String(r.photo))) : null,
       })),
     });
   });
@@ -795,7 +820,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
         .map((r) => {
           const row = r as Record<string, unknown>;
           const photo = row.photo as string | null;
-          return { ...row, photo: photo ? (photo.startsWith("http") ? photo : `/uploads/${path.basename(photo)}`) : null };
+          return { ...row, photo: photo ? (photo.startsWith("http") ? photo : uploadUrl(photo)) : null };
         }),
     );
   });
@@ -854,6 +879,11 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.json({ ok: true });
   });
 
+  // The sample shop never connects to your real eBay account.
+  api.use("/connections/ebay", (_req, res, next) => {
+    if (opts.workspace?.demo) return void res.status(400).json({ error: "This is the sample shop. Go back to your shop to connect eBay." });
+    next();
+  });
   api.get("/connections/ebay/auth-url", (req, res) => {
     if (!ebayHasAppKeys()) return void res.status(400).json({ error: "Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RU_NAME to .env first." });
     // state = nonce + where this FlipDesk runs, so the relay page can send eBay's answer back here automatically.

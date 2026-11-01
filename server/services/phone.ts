@@ -5,12 +5,13 @@
 import crypto from "node:crypto";
 import os from "node:os";
 import type { Db } from "../db.js";
+import { currentWorkspace } from "../context.js";
 
 export const TOKEN_MINUTES = 30;
 export const MAX_PER_TOKEN = 60;
 
 export function createUploadToken(db: Db, itemId: number) {
-  const token = crypto.randomBytes(18).toString("base64url");
+  const token = (currentWorkspace()?.tokenPrefix ?? "") + crypto.randomBytes(18).toString("base64url");
   db.prepare("DELETE FROM upload_tokens WHERE expires_at < datetime('now')").run();
   db.prepare("INSERT INTO upload_tokens (token, item_id, expires_at) VALUES (?, ?, datetime('now', ?))").run(token, itemId, `+${TOKEN_MINUTES} minutes`);
   const row = db.prepare("SELECT expires_at FROM upload_tokens WHERE token = ?").get(token) as { expires_at: string };

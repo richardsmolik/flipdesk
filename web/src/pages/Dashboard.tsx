@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { money } from "../api";
 import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
 import { GetStarted } from "../components/Onboarding";
+import { GoalsCard, TodayCard } from "../components/Today";
 import { useEffect as useEffect_, useReducer } from "react";
 
 interface Dash {
@@ -107,6 +108,11 @@ export default function Dashboard() {
       </div>
 
       <GetStarted key={gsKey} onWelcome={() => window.dispatchEvent(new Event("fd-open-welcome"))} />
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2"><TodayCard /></div>
+        <GoalsCard />
+      </div>
 
       {d.alerts.filter((a) => a.severity === "critical").map((a) => (
         <Link key={a.id} to="/inbox" className="block rounded-lg border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-100 hover:bg-red-950">

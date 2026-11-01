@@ -6,6 +6,8 @@ import { api } from "./api";
 import { Toaster } from "./ui";
 import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
 import { Welcome, type OnboardingState } from "./components/Onboarding";
+import { Shortcuts } from "./components/Shortcuts";
+import { AuthScreen, DemoBanner, ShopSwitch, useWorkspace } from "./components/Account";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import ItemEditor from "./pages/ItemEditor";
@@ -28,32 +30,6 @@ import Shoot from "./pages/Shoot";
 import Switch from "./pages/Switch";
 
 
-function Login() {
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState("");
-  return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <form
-        className="card w-full max-w-sm space-y-3 p-6"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          try {
-            await api.post("/api/login", { password: pw });
-            location.reload();
-          } catch (x) {
-            setErr((x as Error).message);
-          }
-        }}
-      >
-        <div className="text-lg font-bold">📦 Flip<span className="text-brand">Desk</span></div>
-        <input className="input" type="password" autoFocus placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)} />
-        {err && <div className="text-sm text-red-400">{err}</div>}
-        <button className="btn-primary w-full">Sign in</button>
-      </form>
-    </div>
-  );
-}
-
 function Shell() {
   const [needLogin, setNeedLogin] = useState(false);
   useEffect(() => {
@@ -71,7 +47,8 @@ function Shell() {
     return () => window.removeEventListener("fd-open-welcome", open);
   }, []);
   useEffect(() => void api.get<{ ai: string; ebay: string }>("/api/health").then(setHealth).catch(() => {}), []);
-  if (needLogin) return <Login />;
+  const shop = useWorkspace();
+  if (needLogin) return <AuthScreen />;
   return (
     <div className="flex min-h-screen">
       <Sidebar
@@ -79,13 +56,17 @@ function Shell() {
         footer={
           health && (
             <div className="space-y-1 px-2 text-[11px] text-zinc-500">
+              <ShopSwitch w={shop} />
               <div>AI writer: <span className={health.ai === "live" ? "text-green-400" : "text-amber-400"}>{health.ai}</span></div>
               <div>eBay API: <span className={health.ebay === "live" ? "text-green-400" : "text-amber-400"}>{health.ebay}</span></div>
+              <button className="hidden hover:text-zinc-300 md:block" onClick={() => window.dispatchEvent(new Event("fd-shortcuts"))}>⌨ Shortcuts <kbd className="rounded border border-zinc-700 px-1">?</kbd></button>
             </div>
           )
         }
       />
-      <main className="min-w-0 flex-1 p-4 pb-24 md:p-8">
+      <main className="min-w-0 flex-1 pb-24">
+        <DemoBanner w={shop} />
+        <div className="p-4 md:p-8">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/inventory" element={<Inventory />} />
@@ -108,9 +89,11 @@ function Shell() {
           <Route path="/switch" element={<Switch />} />
           <Route path="/bins/:name" element={<BinDetail />} />
         </Routes>
+        </div>
       </main>
       <MobileBar counts={counts} />
       {welcome && <Welcome onDone={() => (setWelcome(false), window.dispatchEvent(new Event("fd-onboarding-changed")))} />}
+      <Shortcuts />
       <Toaster />
     </div>
   );

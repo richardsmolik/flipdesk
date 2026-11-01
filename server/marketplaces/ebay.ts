@@ -14,6 +14,7 @@
  */
 import type { Db, Item, ListingRow } from "../db.js";
 import { getSetting } from "../db.js";
+import { uploadUrl } from "../context.js";
 
 const ENV = () => (process.env.EBAY_ENV === "production" ? "production" : "sandbox");
 const API = () => (ENV() === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com");
@@ -509,7 +510,7 @@ export async function resolveImageUrls(db: Db, item: Item): Promise<string[]> {
   const out: string[] = [];
   for (const r of rows) {
     if (r.path.startsWith("http")) out.push(r.path);
-    else if (base) out.push(`${base.replace(/\/$/, "")}/uploads/${r.path.split(/[\\/]/).pop()}`);
+    else if (base) out.push(`${base.replace(/\/$/, "")}${uploadUrl(r.path)}`);
     else if (!/\.(jpe?g|png|webp)$/i.test(r.path)) continue; // eBay rejects svg/gif
     else if (r.ebay_url && (!r.ebay_url_expires || Date.parse(r.ebay_url_expires) > Date.now() + 86400_000)) out.push(r.ebay_url);
     else {

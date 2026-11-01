@@ -3,6 +3,7 @@ import { getSetting, type Db } from "../db.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { notify, type NotifySettings } from "./alerts.js";
 import { suggestBundles } from "./bundles.js";
+import { goalLine } from "./goals.js";
 
 const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 
@@ -75,6 +76,9 @@ export function buildDigest(db: Db) {
       `🐢 ${allStale.n} item${allStale.n === 1 ? "" : "s"} stale 30+ days (${money(allStale.tied)} tied up)` +
         (stale.length ? `. Just crossed: ${stale.slice(0, 2).map((s) => `${s.title.slice(0, 28)} (${s.age}d)`).join(", ")}` : ""),
     );
+  // Goals are checked at the moment the summary goes out (Monday morning = how last week ended).
+  const goals = goalLine(db, new Date(Date.now() - 12 * 3600_000));
+  if (goals) lines.push(goals);
   if (bundle) lines.push(`🎁 Bundle idea: ${bundle.reason}, ${bundle.items.length} items for ${money(bundle.bundlePrice)}`);
   const todo: string[] = [];
   if (inbox) todo.push(`clear ${inbox} Inbox item${inbox === 1 ? "" : "s"}`);

@@ -1,6 +1,27 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { toast, useFetch, useMarketplaces } from "../ui";
+import { switchShop, useWorkspace } from "../components/Account";
+
+function SampleShop() {
+  const w = useWorkspace();
+  if (!w) return null;
+  return (
+    <section className="card space-y-2 p-4">
+      <h2 className="font-semibold">🧪 Sample shop</h2>
+      <p className="text-sm text-zinc-400">A separate shop full of fake items, sales and orders, for trying features or showing someone FlipDesk. It never touches your real shop, eBay account, mailbox or label account.</p>
+      <div className="flex flex-wrap gap-2">
+        {w.current === "demo" ? (
+          <button className="btn-primary" onClick={() => switchShop("leave_demo")}>Back to my shop</button>
+        ) : (
+          <button className="btn-primary" onClick={() => switchShop("enter_demo")}>{w.demoExists ? "Open the sample shop" : "Create a sample shop"}</button>
+        )}
+        {w.demoExists && <button className="btn-ghost" onClick={() => confirm("Start the sample shop over with fresh data?") && switchShop("reset_demo")}>Start over</button>}
+        {w.demoExists && <button className="btn-ghost text-red-300" onClick={() => confirm("Delete the sample shop and its photos?") && switchShop("delete_demo")}>Delete it</button>}
+      </div>
+    </section>
+  );
+}
 
 interface S {
   shipFrom: { name?: string; street1?: string; street2?: string; city?: string; state?: string; zip?: string; phone?: string; email?: string } | null;
@@ -86,6 +107,8 @@ export default function Settings() {
           <p className="mt-1 text-xs text-zinc-500">Paste this into the FlipDesk extension popup along with the server URL (http://localhost:8787).</p>
         </div>
       </section>
+
+      <SampleShop />
 
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">📱 Phone notifications</h2>

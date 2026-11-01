@@ -1,8 +1,9 @@
 import express from "express";
 import fs from "node:fs";
 import path from "node:path";
-import { openDb } from "./db.js";
-import { createApp, extensionToken } from "./app.js";
+import { extensionToken } from "./app.js";
+import { runInWorkspace } from "./context.js";
+import { Workspaces } from "./workspaces.js";
 import { processApiJobs } from "./services/jobs.js";
 import { pollEbaySales } from "./services/sync.js";
 import { applyAutoPriceDrops } from "./services/ebayTools.js";
@@ -19,9 +20,11 @@ if (fs.existsSync(".env")) {
   }
 }
 
-const db = openDb();
-const app = createApp(db, { uploadDir: process.env.FLIPDESK_UPLOADS });
+// Your shop + the sample shop (or, with FLIPDESK_MULTIUSER=1, one shop per account). See workspaces.ts.
+const shops = new Workspaces();
+const app = express();
 app.set("trust proxy", 1); // behind Fly/Cloudflare/Render HTTPS proxies
+app.disable("x-powered-by");
 
 if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
   // The service worker must never be cached, or app updates would get stuck.
@@ -32,34 +35,34 @@ if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
   app.use(express.static("dist"));
   app.get(/^\/(?!api|uploads).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
 }
+app.use(shops.handler());
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1"; // local-only by default
-if (!["127.0.0.1", "localhost", "::1"].includes(host) && !process.env.FLIPDESK_PASSWORD) {
+if (!["127.0.0.1", "localhost", "::1"].includes(host) && !process.env.FLIPDESK_PASSWORD && !shops.multiuser) {
   console.error(`Refusing to listen on ${host} without FLIPDESK_PASSWORD - anyone on your network could see your business data.`);
   process.exit(1);
 }
 app.listen(port, host, () => {
   console.log(`FlipDesk API on http://${host}:${port}`);
-  console.log(`Extension token: ${extensionToken(db)}`);
+  if (shops.multiuser) console.log(`Accounts mode: ${shops.signupsOpen() ? "sign-ups open" : "sign-ups closed (set FLIPDESK_INVITE_CODE)"}`);
+  else {
+    const main = shops.get("main")!;
+    console.log(`Extension token: ${runInWorkspace(main, () => extensionToken(main.db))}`);
+  }
 });
 
 // ---------------- Background scheduler ----------------
-const every = (ms: number, name: string, fn: () => Promise<unknown> | unknown) => {
-  const run = async () => {
-    try {
-      await fn();
-    } catch (e) {
-      console.error(`[${name}]`, (e as Error).message);
-    }
-  };
+// Each task runs once per shop, inside that shop. Sample shops only process their sync queue.
+const every = (ms: number, name: string, fn: (db: import("./db.js").Db) => Promise<unknown> | unknown, includeDemo = false) => {
+  const run = () => shops.forEach(name, (db) => fn(db), { includeDemo });
   setInterval(run, ms).unref();
   setTimeout(run, 2000).unref();
 };
-every(30_000, "jobs", () => processApiJobs(db));
-every(5 * 60_000, "ebay-sales", () => pollEbaySales(db)); // sold on eBay -> delist everywhere else
-every(60 * 60_000, "auto-drop", () => applyAutoPriceDrops(db));
-every(2 * 60_000, "email", () => pollImap(db)); // sale emails from every marketplace
-every(15 * 60_000, "weekly", () => sendDigest(db)); // Monday-morning summary (once per week)
-every(30 * 60_000, "ebay-labels", () => syncEbayLabelCosts(db)); // exact eBay label costs -> profit
-every(12 * 60 * 60_000, "ebay-traffic", () => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"
+every(30_000, "jobs", (db) => processApiJobs(db), true);
+every(5 * 60_000, "ebay-sales", (db) => pollEbaySales(db)); // sold on eBay -> delist everywhere else
+every(60 * 60_000, "auto-drop", (db) => applyAutoPriceDrops(db));
+every(2 * 60_000, "email", (db) => pollImap(db)); // sale emails from every marketplace
+every(15 * 60_000, "weekly", (db) => sendDigest(db)); // Monday-morning summary (once per week)
+every(30 * 60_000, "ebay-labels", (db) => syncEbayLabelCosts(db)); // exact eBay label costs -> profit
+every(12 * 60 * 60_000, "ebay-traffic", (db) => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"

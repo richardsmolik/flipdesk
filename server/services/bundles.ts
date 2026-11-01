@@ -9,6 +9,7 @@
 import { getItem, getSetting, logActivity, tx, type Db, type Item } from "../db.js";
 import { ebayCreateVolumeDiscount, ebayEndPromotion } from "../marketplaces/ebay.js";
 import { recommend } from "./fees.js";
+import { uploadUrl } from "../context.js";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -153,7 +154,7 @@ export function suggestBundles(db: Db, discountPct = 15, limit = 8): BundleSugge
     out.push({
       reason: g.reason,
       itemIds: pick.map((p) => p.id),
-      items: pick.map((p) => ({ id: p.id, sku: p.sku, title: p.title, price: p.price, ageDays: p.age, photo: p.photo ? `/uploads/${p.photo.split("/").pop()}` : null })),
+      items: pick.map((p) => ({ id: p.id, sku: p.sku, title: p.title, price: p.price, ageDays: p.age, photo: p.photo ? uploadUrl(p.photo) : null })),
       separatePrice: separate,
       bundlePrice: price,
       bundleProfit: best?.profit ?? 0,

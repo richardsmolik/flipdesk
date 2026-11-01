@@ -12,6 +12,7 @@ import { ebayAddTracking, ebayIsLive, ebayLabelTransactions } from "../marketpla
 import type { MarketplaceId } from "../marketplaces/registry.js";
 import { parseCsv } from "./comps.js";
 import { toCsv } from "./reports.js";
+import { personalEnv } from "../context.js";
 
 export type LabelProvider = "marketplace" | "ebay" | "pirateship" | "shippo" | "manual";
 
@@ -29,7 +30,7 @@ export function providerFor(db: Db, m: MarketplaceId): LabelProvider {
   if (s.perMarketplace?.[m]) return s.perMarketplace[m]!;
   if (PREPAID.includes(m)) return "marketplace";
   if (m === "ebay") return s.defaultProvider === "pirateship" || s.defaultProvider === "shippo" ? s.defaultProvider : "ebay";
-  return s.defaultProvider && s.defaultProvider !== "ebay" ? s.defaultProvider : process.env.SHIPPO_API_KEY ? "shippo" : "pirateship";
+  return s.defaultProvider && s.defaultProvider !== "ebay" ? s.defaultProvider : personalEnv("SHIPPO_API_KEY") ? "shippo" : "pirateship";
 }
 
 export interface Address {

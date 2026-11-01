@@ -87,7 +87,7 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   });
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && !url.startsWith("/api/login")) window.dispatchEvent(new Event("fd-login-required"));
+  if (res.status === 401 && !url.startsWith("/api/login") && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event("fd-login-required"));
   if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `HTTP ${res.status}`, res.status, data as Record<string, unknown>);
   return data as T;
 }

@@ -227,6 +227,18 @@ function EditItem({ id }: { id: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recs, ob]);
 
+  // Cmd/Ctrl+S (see Shortcuts) saves this item.
+  const saveRef = useRef<(() => unknown) | null>(null);
+  useEffect(() => {
+    const onSave = (e: Event) => {
+      if (!saveRef.current) return;
+      e.preventDefault();
+      void saveRef.current();
+    };
+    window.addEventListener("fd-save", onSave);
+    return () => window.removeEventListener("fd-save", onSave);
+  }, []);
+
   if (!item) return <div className="text-zinc-500">Loading…</div>;
   const set = <K extends keyof Item>(k: K, v: Item[K]) => setForm((f) => ({ ...f, [k]: v }));
   const dirty = JSON.stringify(form) !== JSON.stringify(item);
@@ -239,6 +251,7 @@ function EditItem({ id }: { id: number }) {
     toast("Saved");
     return r;
   };
+  saveRef.current = dirty ? save : () => toast("Nothing to save");
 
   const regenerate = async () => {
     setBusy("AI is rewriting…");

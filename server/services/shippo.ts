@@ -5,6 +5,7 @@
 import { getItem, getSetting, logActivity, type Db } from "../db.js";
 import { ebayAddTracking, ebayIsLive } from "../marketplaces/ebay.js";
 import { updateShipping, type Address, type ShippingSettings } from "./shipping.js";
+import { personalEnv } from "../context.js";
 
 export interface ShipFrom {
   name?: string;
@@ -26,12 +27,12 @@ export interface Rate {
   days: number | null;
 }
 
-export const shippoLive = () => Boolean(process.env.SHIPPO_API_KEY);
+export const shippoLive = () => Boolean(personalEnv("SHIPPO_API_KEY"));
 
 async function shippo<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`https://api.goshippo.com${path}`, {
     method: "POST",
-    headers: { Authorization: `ShippoToken ${process.env.SHIPPO_API_KEY}`, "Content-Type": "application/json" },
+    headers: { Authorization: `ShippoToken ${personalEnv("SHIPPO_API_KEY")}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   const j = (await res.json().catch(() => ({}))) as T & { detail?: string };

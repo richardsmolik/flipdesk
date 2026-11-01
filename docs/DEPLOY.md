@@ -100,11 +100,27 @@ Put HTTPS in front (the host's built-in HTTPS, Caddy, or Cloudflare). Mount a pe
 
 In the extension popup, set the server URL to your HTTPS address and paste the extension token from Settings.
 
+## Letting other resellers use it (accounts)
+
+Set two values and redeploy:
+
+```
+FLIPDESK_MULTIUSER=1
+FLIPDESK_INVITE_CODE=pick-a-long-code
+```
+
+- **Sign up first.** The first account becomes the owner. Sign-ups after that need the invite code. Leave the code blank to close sign-ups.
+- **Every account is private.** Each has its own database and photo folder (`data/users/<id>/`) and its own sample shop. Photos have random, public addresses, because eBay and the extension need to fetch them.
+- **Your personal keys stay yours.** Your mailbox (`IMAP_*`), Shippo, Etsy, Shopify and `FLIPDESK_TOKEN` only work in the owner's real shop. Everyone shares the app-level keys: your eBay developer app (each person still clicks Connect eBay with their own eBay login), Anthropic for the AI writer, and the photo AI keys. **You pay for their AI use**, so invite people you trust, or watch your Anthropic usage.
+- **Phones and the extension just work.** Phone links and extension tokens start with the shop's id (like `u3.`), so the server knows where they belong.
+- **Back up `data/`** (the Fly volume). It holds `accounts.db` and every shop.
+
+Still to do before charging money: per-account AI limits, password reset by email, Stripe billing, and moving to Postgres + object storage once you have more than a few dozen sellers.
+
 ## Becoming a product (later)
 
-What changes when other resellers use it:
-- **One eBay developer app for everyone:** customers just click "Connect eBay"; no keys or relay page.
-- **Accounts:** add users and sign-up, and give every table an `account_id`.
-- **Database:** move from SQLite to Postgres; photos move to object storage (S3/R2).
+What changes when lots of resellers use it:
+- **One eBay developer app for everyone:** customers just click "Connect eBay"; no keys or relay page. (Accounts mode already works this way.)
+- **Database:** move from SQLite (one file per shop) to Postgres; photos move to object storage (S3/R2).
 - **Billing:** Stripe subscriptions.
-- **eBay compliance:** keep the account-deletion endpoint running, and follow eBay's API License Agreement data rules.
+- **eBay compliance:** keep the account-deletion endpoint running (in accounts mode it clears buyer data in every shop), and follow eBay's API License Agreement data rules.

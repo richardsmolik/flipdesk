@@ -23,7 +23,7 @@ let mpCache: Marketplace[] | null = null;
 export function useMarketplaces() {
   const [m, setM] = useState<Marketplace[]>(mpCache ?? []);
   const reload = useCallback(() => {
-    api.get<Marketplace[]>("/api/marketplaces").then((d) => ((mpCache = d), setM(d)));
+    api.get<Marketplace[]>("/api/marketplaces").then((d) => ((mpCache = d), setM(d))).catch(() => {});
   }, []);
   useEffect(() => {
     if (!mpCache) reload();
