@@ -114,3 +114,28 @@ export const CONDITIONS: Record<string, string> = {
 };
 
 export interface PhotoCaps { ai: boolean; backgroundRemoval: boolean; aiRetouch: boolean }
+
+/** POST a FormData with upload progress (fetch has no upload progress). Shares the 401 -> login behaviour. */
+export function uploadWithProgress<T>(url: string, form: FormData, onProgress?: (pct: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress?.(Math.round((e.loaded / e.total) * 100));
+    xhr.onload = () => {
+      let data: unknown = {};
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        /* non-JSON */
+      }
+      if (xhr.status === 401) window.dispatchEvent(new Event("fd-login-required"));
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+      else reject(new ApiError((data as { error?: string }).error ?? `HTTP ${xhr.status}`, xhr.status, data as Record<string, unknown>));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed - check your connection"));
+    xhr.send(form);
+  });
+}
+
+/** Browsers (except Safari) can't preview HEIC; show a placeholder tile instead of a broken image. */
+export const canPreview = (f: File) => !/\.(heic|heif)$/i.test(f.name) && !/heic|heif/i.test(f.type);

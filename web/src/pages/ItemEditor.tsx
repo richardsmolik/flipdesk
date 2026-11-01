@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, CONDITIONS, money, type Item } from "../api";
+import { api, CONDITIONS, money, uploadWithProgress, type Item } from "../api";
+import FileThumb from "../components/FileThumb";
 import { Modal, MpBadge, QtyBar, timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import VariationsCard from "../components/Variations";
 import Lightbox from "../components/Lightbox";
@@ -69,7 +70,7 @@ function NewItem() {
       if (files.length) {
         const fd = new FormData();
         files.forEach((f) => fd.append("photos", f));
-        await api.post(`/api/items/${item.id}/photos`, fd);
+        await uploadWithProgress(`/api/items/${item.id}/photos`, fd, (pct) => setBusy(`Uploading photos ${pct}%`));
       }
       if (useAi) {
         setBusy("AI is writing your listing…");
@@ -101,16 +102,36 @@ function NewItem() {
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
-          setFiles((f) => [...f, ...Array.from(e.dataTransfer.files).filter((x) => x.type.startsWith("image/"))]);
+          setFiles((f) => [...f, ...Array.from(e.dataTransfer.files).filter((x) => x.type.startsWith("image/") || /\.(heic|heif)$/i.test(x.name))]);
         }}
       >
-        <input ref={input} type="file" accept="image/*" multiple hidden onChange={(e) => setFiles((f) => [...f, ...Array.from(e.target.files ?? [])])} />
+        <input ref={input} type="file" accept="image/*,.heic,.heif" multiple hidden onChange={(e) => setFiles((f) => [...f, ...Array.from(e.target.files ?? [])])} />
         {files.length ? (
           <div className="grid grid-cols-4 gap-2">
             {files.map((f, i) => (
-              <div key={i} className="relative">
-                <img src={URL.createObjectURL(f)} alt="" className="h-24 w-24 rounded-md object-cover" />
+              <div
+                key={`${f.name}-${f.size}-${i}`}
+                className="group relative cursor-grab"
+                draggable
+                onClick={(e) => e.stopPropagation()}
+                onDragStart={(e) => (e.stopPropagation(), e.dataTransfer.setData("text/fd-photo", String(i)))}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  const from = Number(e.dataTransfer.getData("text/fd-photo"));
+                  if (Number.isNaN(from) || e.dataTransfer.files.length) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setFiles((fs) => {
+                    const next = [...fs];
+                    const [m] = next.splice(from, 1);
+                    next.splice(i, 0, m);
+                    return next;
+                  });
+                }}
+              >
+                <FileThumb file={f} className="h-24 w-24" />
                 {i === 0 && <span className="absolute left-1 top-1 rounded bg-black/70 px-1 text-[10px]">Cover</span>}
+                <button className="absolute right-1 top-1 hidden rounded bg-black/70 px-1 text-xs group-hover:block" aria-label={`Remove ${f.name}`} onClick={(e) => (e.stopPropagation(), setFiles((fs) => fs.filter((_, k) => k !== i)))}>✕</button>
               </div>
             ))}
           </div>
@@ -118,7 +139,7 @@ function NewItem() {
           <>
             <div className="text-4xl">📸</div>
             <div className="text-sm text-zinc-300">Drag photos here or click to choose</div>
-            <div className="text-xs text-zinc-500">Front, back, tags/labels, flaws. Up to 8 are read by the AI.</div>
+            <div className="text-xs text-zinc-500">Front, back, tags/labels, flaws. Up to 8 are read by the AI. iPhone photos are fine.</div>
           </>
         )}
       </div>
@@ -167,6 +188,8 @@ function EditItem({ id }: { id: number }) {
   const photoInput = useRef<HTMLInputElement>(null);
   const [viewPhoto, setViewPhoto] = useState<number | null>(null);
   const [editPhoto, setEditPhoto] = useState<number | null>(null);
+  const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
   const { data: priceAdvice } = useFetch<{ action: string; pct: number; newPrice: number | null; reason: string; confidence: string; basis: string }>(item?.status === "active" ? `/api/items/${id}/price-advice` : null, [item?.price, item?.status]);
   const { data: lotParts } = useFetch<{ itemId: number; quantity: number; sku: string; title: string; price: number; available: number }[]>(`/api/items/${id}/bundle`, [item?.quantity]);
 
@@ -257,18 +280,50 @@ function EditItem({ id }: { id: number }) {
                 ref={photoInput}
                 type="file"
                 multiple
-                accept="image/*"
+                accept="image/*,.heic,.heif"
                 hidden
                 onChange={async (e) => {
                   const fd = new FormData();
                   Array.from(e.target.files ?? []).forEach((f) => fd.append("photos", f));
-                  setData(await api.post<Item>(`/api/items/${id}/photos`, fd));
+                  e.target.value = "";
+                  try {
+                    setUploadPct(0);
+                    const r = await uploadWithProgress<Item & { skippedUploads?: string[] }>(`/api/items/${id}/photos`, fd, setUploadPct);
+                    setData(r);
+                    if (r.skippedUploads?.length) toast(`Skipped (not a readable photo): ${r.skippedUploads.join(", ")}`, "err");
+                  } catch (x) {
+                    toast((x as Error).message, "err");
+                  } finally {
+                    setUploadPct(null);
+                  }
                 }}
               />
             </div>
             <div className="flex flex-wrap gap-2">
+              {uploadPct !== null && (
+                <div className="w-full">
+                  <div className="mb-1 text-xs text-zinc-400">Uploading… {uploadPct}%{uploadPct === 100 ? " (processing)" : ""}</div>
+                  <div className="h-1 rounded bg-zinc-800"><div className="h-1 rounded bg-brand transition-all" style={{ width: `${uploadPct}%` }} /></div>
+                </div>
+              )}
               {item.photos.map((p, i) => (
-                <div key={p.id} className="group relative">
+                <div
+                  key={p.id}
+                  className={`group relative ${dragFrom === i ? "opacity-40" : ""}`}
+                  draggable
+                  onDragStart={() => setDragFrom(i)}
+                  onDragEnd={() => setDragFrom(null)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={async () => {
+                    if (dragFrom === null || dragFrom === i) return;
+                    const ids = item.photos.map((x) => x.id);
+                    const [m] = ids.splice(dragFrom, 1);
+                    ids.splice(i, 0, m);
+                    setDragFrom(null);
+                    setData(await api.post<Item>(`/api/items/${id}/photos/order`, { ids }));
+                  }}
+                  title="Drag to reorder - the first photo is the cover"
+                >
                   <button onClick={() => setViewPhoto(i)} aria-label={`View photo ${i + 1}`}>
                     <img src={p.url} alt="" className="h-24 w-24 rounded-md object-cover" />
                   </button>

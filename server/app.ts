@@ -18,6 +18,8 @@ import { dashboard, toCsv } from "./services/reports.js";
 import { notify } from "./services/alerts.js";
 import { compsLibrary, importComps } from "./services/comps.js";
 import { checkItem } from "./services/sourcing.js";
+import { isImageUpload, normalizeUploads } from "./services/uploads.js";
+import { importInventory, previewInventory } from "./services/inventoryImport.js";
 import { advise, learn, recordPriceChange } from "./services/priceAdvice.js";
 import { diagnose, importTrafficCsv, latestTraffic, syncEbayTraffic } from "./services/traffic.js";
 import { adviceToOps, aiAdvice, capabilities as photoCaps, editPhoto, retouchPhoto, revertPhoto, type EditOp } from "./services/photos.js";
@@ -83,8 +85,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
       destination: uploadDir,
       filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}${path.extname(file.originalname).toLowerCase() || ".jpg"}`),
     }),
-    limits: { fileSize: 15 * 1024 * 1024, files: 24 },
-    fileFilter: (_req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
+    limits: { fileSize: 30 * 1024 * 1024, files: 60 },
+    fileFilter: (_req, file, cb) => cb(null, isImageUpload(file)), // HEIC often arrives as application/octet-stream
   });
 
   const app = express();
@@ -265,13 +267,14 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.status(204).end();
   });
 
-  api.post("/items/:id/photos", upload.array("photos", 24), (req, res) => {
+  api.post("/items/:id/photos", upload.array("photos", 24), normalizeUploads, (req, res) => {
     const id = Number(req.params.id);
     if (!getItem(db, id)) return void res.status(404).json({ error: "Not found" });
     const files = (req.files as Express.Multer.File[]) ?? [];
     const start = (db.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM photos WHERE item_id = ?").get(id) as { p: number }).p;
     files.forEach((f, i) => db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(id, f.path, start + i));
-    res.json(getItem(db, id));
+    const skipped = (req as typeof req & { skippedUploads?: string[] }).skippedUploads ?? [];
+    res.json({ ...getItem(db, id), skippedUploads: skipped });
   });
 
   api.post("/items/:id/photos/order", (req, res) => {
@@ -330,7 +333,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- AI + pricing ----------------
-  api.post("/ai/generate", upload.array("photos", 8), async (req, res) => {
+  api.post("/ai/generate", upload.array("photos", 8), normalizeUploads, async (req, res) => {
     const itemId = req.body.itemId ? Number(req.body.itemId) : undefined;
     let photoPaths = ((req.files as Express.Multer.File[]) ?? []).map((f) => f.path);
     if (!photoPaths.length && itemId) {
@@ -572,7 +575,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- Sourcing mode ----------------
-  api.post("/source/check", upload.single("photo"), async (req, res) => {
+  api.post("/source/check", upload.single("photo"), normalizeUploads, async (req, res) => {
     const askPrice = req.body.askPrice !== undefined && req.body.askPrice !== "" ? Number(req.body.askPrice) : undefined;
     const query = typeof req.body.q === "string" ? req.body.q.trim() : undefined;
     const photo = (req.file as Express.Multer.File | undefined)?.path;
@@ -620,6 +623,17 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     }
     logActivity(db, "sourced", `Bought ${b.quantity > 1 ? b.quantity + "x " : ""}${b.name} for $${b.cost.toFixed(2)}${b.source ? ` at ${b.source}` : ""}`, id);
     res.status(201).json(getItem(db, id));
+  });
+
+  // ---------------- Inventory spreadsheet import ----------------
+  const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+  api.post("/import/inventory/preview", csvUpload.single("file"), (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
+    res.json(previewInventory(db, req.file.buffer.toString("utf8")));
+  });
+  api.post("/import/inventory", csvUpload.single("file"), async (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
+    res.json(await importInventory(db, req.file.buffer.toString("utf8"), { uploadDir, downloadPhotos: req.body.photos !== "0" }));
   });
 
   // ---------------- Sold comps library (Terapeak etc) ----------------

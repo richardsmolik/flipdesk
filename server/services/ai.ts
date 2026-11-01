@@ -115,7 +115,9 @@ export async function generateListing(input: GenerateInput): Promise<{ draft: Li
 
 /** Offline demo: plausible draft built from the hint/filename so the UI flow works without a key. */
 export function demoDraft(input: GenerateInput): ListingDraft {
-  const raw = (input.hint || path.basename(input.photoPaths[0] ?? "item").replace(/\.[a-z]+$/i, "")).replace(/[_-]+/g, " ").trim();
+  // Stored uploads have random names (timestamp-hex); don't turn those into a title.
+  const fromFile = path.basename(input.photoPaths[0] ?? "").replace(/\.[a-z]+$/i, "").replace(/\b(\d{8,}|[0-9a-f]{6,}|ed|img)\b/gi, " ");
+  const raw = (input.hint || fromFile).replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim() || "Untitled item";
   const words = raw.split(/\s+/).filter(Boolean);
   const brand = words[0] ? words[0][0].toUpperCase() + words[0].slice(1) : "Unbranded";
   const title = raw.replace(/\b\w/g, (c) => c.toUpperCase()).slice(0, 80) || "Item";

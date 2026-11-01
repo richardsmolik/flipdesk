@@ -20,11 +20,13 @@ import Shipping from "./pages/Shipping";
 import { Labels, PackingSlips, PickList } from "./pages/Print";
 import { BinDetail, BinList } from "./pages/Bins";
 import Mileage from "./pages/Mileage";
+import Bulk from "./pages/Bulk";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
   ["/inbox", "Inbox", "🔔"],
   ["/items/new", "New listing", "✨"],
+  ["/bulk", "Bulk upload", "🗂️"],
   ["/source", "Sourcing mode", "🛒"],
   ["/inventory", "Inventory", "📦"],
   ["/bins", "Bins", "🗄️"],
@@ -132,6 +134,7 @@ function Shell() {
           <Route path="/shipping" element={<Shipping />} />
           <Route path="/bins" element={<BinList />} />
           <Route path="/mileage" element={<Mileage />} />
+          <Route path="/bulk" element={<Bulk />} />
           <Route path="/bins/:name" element={<BinDetail />} />
         </Routes>
       </main>

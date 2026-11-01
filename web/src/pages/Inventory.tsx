@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, toast, useFetch, useMarketplaces } from "../ui";
 import Lightbox from "../components/Lightbox";
+import ImportInventory from "../components/ImportInventory";
 
 const VIEWS = [
   { key: "inventory", label: "Inventory", hint: "Everything in stock" },
@@ -27,6 +28,7 @@ export default function Inventory() {
   const [mp, setMp] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [bulk, setBulk] = useState<null | "crosslist" | "price">(null);
+  const [importing, setImporting] = useState(false);
   const url = `/api/items?view=${view}&q=${encodeURIComponent(q)}${mp ? `&marketplace=${mp}` : ""}`;
   const { data: items, reload } = useFetch<Item[]>(url);
   const { marketplaces, byId } = useMarketplaces();
@@ -54,6 +56,8 @@ export default function Inventory() {
           </p>
         </div>
         <div className="flex gap-2">
+          <button className="btn-ghost" onClick={() => setImporting(true)}>⬆ Import</button>
+          <Link className="btn-ghost" to="/bulk">🗂️ Bulk upload</Link>
           <a className="btn-ghost" href="/api/export/inventory.csv">⬇ CSV</a>
           <Link className="btn-primary" to="/items/new">✨ New listing</Link>
         </div>
@@ -210,6 +214,7 @@ export default function Inventory() {
         />
       )}
 
+      <ImportInventory open={importing} onClose={() => setImporting(false)} onDone={() => (setImporting(false), reload())} />
       <BulkCrosslist open={bulk === "crosslist"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), setSel(new Set()), reload())} />
       <BulkPrice open={bulk === "price"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), reload())} />
     </div>
