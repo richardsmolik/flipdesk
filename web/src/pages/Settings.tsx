@@ -3,6 +3,9 @@ import { api } from "../api";
 import { toast, useFetch, useMarketplaces } from "../ui";
 
 interface S {
+  notify: { ntfyTopic?: string; onSale?: boolean; onOversell?: boolean; onEmailReview?: boolean } | null;
+  minutesPerItem: number | null;
+  sourcing: { minProfit: number; minRoiPct: number } | null;
   feeOverrides: Record<string, { pct?: number; fixed?: number }> | null;
   defaultShippingCost: number | null;
   skuPrefix: string | null;
@@ -11,6 +14,28 @@ interface S {
   descriptionFooter: string | null;
   extensionToken: string;
   status: { ai: boolean; ebayKeys: boolean; ebayLive: boolean };
+}
+
+function EmailTester() {
+  const [from, setFrom] = useState("support@poshmark.com");
+  const [subject, setSubject] = useState("Congratulations! You just made a sale");
+  const [text, setText] = useState("");
+  const [out, setOut] = useState<string | null>(null);
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">📬 Sale emails</h2>
+      <p className="text-xs text-zinc-500">
+        FlipDesk watches your inbox (IMAP settings in <code>.env</code>) or accepts forwarded emails at <code>POST /api/ext/email</code>. Paste an email below to see what it would do. Nothing gets recorded.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <input className="input" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="From" />
+        <input className="input" value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" />
+      </div>
+      <textarea className="input min-h-24" placeholder="Paste the email body" value={text} onChange={(e) => setText(e.target.value)} />
+      <button className="btn-ghost" onClick={async () => setOut(JSON.stringify(await api.post("/api/emails/test", { from, subject, text }), null, 2))}>Test</button>
+      {out && <pre className="max-h-64 overflow-auto rounded bg-zinc-950 p-2 text-xs text-zinc-300">{out}</pre>}
+    </section>
+  );
 }
 
 export default function Settings() {
@@ -23,8 +48,10 @@ export default function Settings() {
   const autoDrop = s.autoDrop ?? { enabled: false, afterDays: 21, everyDays: 7, dropPct: 5 };
   const ebay = s.ebay ?? {};
   const fees = s.feeOverrides ?? {};
+  const sourcing = s.sourcing ?? { minProfit: 10, minRoiPct: 100 };
+  const notifyS = s.notify ?? { onSale: true, onOversell: true, onEmailReview: true };
   const save = async () => {
-    await api.put("/api/settings", { feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
+    await api.put("/api/settings", { notify: notifyS, sourcing, minutesPerItem: s.minutesPerItem ?? 20, feeOverrides: s.feeOverrides ?? {}, defaultShippingCost: s.defaultShippingCost ?? 0, skuPrefix: s.skuPrefix || "FD", autoDrop, ebay, descriptionFooter: s.descriptionFooter ?? "" });
     toast("Settings saved");
   };
 
@@ -49,12 +76,38 @@ export default function Settings() {
       </section>
 
       <section className="card space-y-3 p-4">
+        <h2 className="font-semibold">📱 Phone notifications</h2>
+        <p className="text-xs text-zinc-500">
+          Free via <a className="text-brand hover:underline" href="https://ntfy.sh" target="_blank" rel="noreferrer">ntfy</a>: install the ntfy app, subscribe to a hard-to-guess topic name (e.g. flipdesk-7f3k9q), and enter the same name here.
+        </p>
+        <div className="flex gap-2">
+          <input className="input" placeholder="your-private-topic" value={notifyS.ntfyTopic ?? ""} onChange={(e) => setS({ ...s, notify: { ...notifyS, ntfyTopic: e.target.value } })} />
+          <button className="btn-ghost shrink-0" onClick={async () => { await save(); try { await api.post("/api/notify/test"); toast("Test sent - check your phone"); } catch (e) { toast((e as Error).message, "err"); } }}>Send test</button>
+        </div>
+        <div className="flex flex-wrap gap-4 text-sm">
+          {([["onSale", "Every sale"], ["onOversell", "Oversells (urgent)"], ["onEmailReview", "Sale emails to confirm"]] as const).map(([k, label]) => (
+            <label key={k} className="flex items-center gap-2"><input type="checkbox" checked={notifyS[k] !== false} onChange={(e) => setS({ ...s, notify: { ...notifyS, [k]: e.target.checked } })} /> {label}</label>
+          ))}
+        </div>
+      </section>
+
+      <section className="card space-y-3 p-4">
         <h2 className="font-semibold">Listing defaults</h2>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="label">SKU prefix</label><input className="input" value={s.skuPrefix ?? "FD"} onChange={(e) => setS({ ...s, skuPrefix: e.target.value })} /></div>
           <div><label className="label">Typical shipping label cost ($)</label><input className="input" type="number" step="0.01" value={s.defaultShippingCost ?? 0} onChange={(e) => setS({ ...s, defaultShippingCost: Number(e.target.value) })} /></div>
         </div>
         <div><label className="label">Description footer (added on extension sites)</label><textarea className="input min-h-20" value={s.descriptionFooter ?? ""} placeholder="Ships within 1 business day · Smoke-free home · Bundle to save!" onChange={(e) => setS({ ...s, descriptionFooter: e.target.value })} /></div>
+      </section>
+
+      <section className="card space-y-3 p-4">
+        <h2 className="font-semibold">🛒 Sourcing targets and your time</h2>
+        <div className="grid grid-cols-3 gap-3 text-sm">
+          <div><label className="label">Min profit per item ($)</label><input className="input" type="number" value={sourcing.minProfit} onChange={(e) => setS({ ...s, sourcing: { ...sourcing, minProfit: Number(e.target.value) } })} /></div>
+          <div><label className="label">Min return on cost (%)</label><input className="input" type="number" value={sourcing.minRoiPct} onChange={(e) => setS({ ...s, sourcing: { ...sourcing, minRoiPct: Number(e.target.value) } })} /></div>
+          <div><label className="label">Minutes per item</label><input className="input" type="number" value={s.minutesPerItem ?? 20} onChange={(e) => setS({ ...s, minutesPerItem: Number(e.target.value) })} /></div>
+        </div>
+        <p className="text-xs text-zinc-500">Sourcing mode's "pay at most" price must meet both the profit and return targets. Minutes per item (sourcing, photos, listing, shipping) is used for profit per hour in Reports.</p>
       </section>
 
       <section className="card space-y-3 p-4">
@@ -90,6 +143,8 @@ export default function Settings() {
         </div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!ebay.bestOffer} onChange={(e) => setS({ ...s, ebay: { ...ebay, bestOffer: e.target.checked } })} /> Enable Best Offer (auto-decline below each item's floor)</label>
       </section>
+
+      <EmailTester />
 
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">Fee overrides</h2>

@@ -12,21 +12,60 @@ import Tools from "./pages/Tools";
 import Queue from "./pages/Queue";
 import Connections from "./pages/Connections";
 import Settings from "./pages/Settings";
+import Inbox from "./pages/Inbox";
+import Source from "./pages/Source";
+import Reports from "./pages/Reports";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
+  ["/inbox", "Inbox", "🔔"],
   ["/items/new", "New listing", "✨"],
+  ["/source", "Sourcing mode", "🛒"],
   ["/inventory", "Inventory", "📦"],
   ["/sales", "Sales & profit", "💵"],
-  ["/tools", "eBay power tools", "⚡"],
+  ["/reports", "Reports", "📈"],
+  ["/tools", "Power tools", "⚡"],
   ["/queue", "Sync queue", "🔄"],
   ["/connections", "Marketplaces", "🔌"],
   ["/settings", "Settings", "⚙️"],
 ] as const;
 
+function Login() {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  return (
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <form
+        className="card w-full max-w-sm space-y-3 p-6"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          try {
+            await api.post("/api/login", { password: pw });
+            location.reload();
+          } catch (x) {
+            setErr((x as Error).message);
+          }
+        }}
+      >
+        <div className="text-lg font-bold">📦 Flip<span className="text-brand">Desk</span></div>
+        <input className="input" type="password" autoFocus placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)} />
+        {err && <div className="text-sm text-red-400">{err}</div>}
+        <button className="btn-primary w-full">Sign in</button>
+      </form>
+    </div>
+  );
+}
+
 function Shell() {
+  const [needLogin, setNeedLogin] = useState(false);
+  useEffect(() => {
+    const f = () => setNeedLogin(true);
+    window.addEventListener("fd-login-required", f);
+    return () => window.removeEventListener("fd-login-required", f);
+  }, []);
   const [health, setHealth] = useState<{ ai: string; ebay: string } | null>(null);
   useEffect(() => void api.get<{ ai: string; ebay: string }>("/api/health").then(setHealth).catch(() => {}), []);
+  if (needLogin) return <Login />;
   return (
     <div className="flex min-h-screen">
       <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 p-3 md:flex">
@@ -77,6 +116,9 @@ function Shell() {
           <Route path="/queue" element={<Queue />} />
           <Route path="/connections" element={<Connections />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/inbox" element={<Inbox />} />
+          <Route path="/source" element={<Source />} />
+          <Route path="/reports" element={<Reports />} />
         </Routes>
       </main>
       <Toaster />

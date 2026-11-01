@@ -122,11 +122,121 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, marketplace);
 CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales(sold_at);
 `;
 
+/**
+ * Versioned migrations (PRAGMA user_version). SCHEMA above is version 1.
+ * Append new migrations; never edit old ones.
+ */
+const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
+  // v2: variations, alerts, sold comps (Terapeak etc), sale emails
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS variations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        sku TEXT UNIQUE NOT NULL,
+        attrs TEXT NOT NULL DEFAULT '{}',          -- JSON e.g. {"Size":"M","Color":"Black"}
+        quantity INTEGER NOT NULL DEFAULT 0,       -- units left
+        quantity_purchased INTEGER NOT NULL DEFAULT 0,
+        price REAL,                                -- optional override of item price
+        position INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_variations_item ON variations(item_id);
+
+      -- Rebuild listings: add variation_id and widen the uniqueness rule.
+      CREATE TABLE listings_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        variation_id INTEGER REFERENCES variations(id) ON DELETE CASCADE,
+        marketplace TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        external_id TEXT,
+        url TEXT,
+        price REAL NOT NULL DEFAULT 0,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        views INTEGER NOT NULL DEFAULT 0,
+        watchers INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        listed_at TEXT,
+        ended_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO listings_new (id, item_id, marketplace, status, external_id, url, price, quantity, views, watchers, error, listed_at, ended_at, created_at)
+        SELECT id, item_id, marketplace, status, external_id, url, price, quantity, views, watchers, error, listed_at, ended_at, created_at FROM listings;
+      DROP TABLE listings;
+      ALTER TABLE listings_new RENAME TO listings;
+      CREATE UNIQUE INDEX ux_listings ON listings(item_id, marketplace, IFNULL(variation_id, 0));
+      CREATE INDEX IF NOT EXISTS idx_listings_item ON listings(item_id);
+
+      ALTER TABLE sales ADD COLUMN variation_id INTEGER REFERENCES variations(id) ON DELETE SET NULL;
+
+      CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL DEFAULT (datetime('now')),
+        kind TEXT NOT NULL,                        -- oversell | email_review | sync_error
+        severity TEXT NOT NULL DEFAULT 'warning',  -- info | warning | critical
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        item_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
+        sale_id INTEGER REFERENCES sales(id) ON DELETE CASCADE,
+        data TEXT NOT NULL DEFAULT '{}',
+        resolved_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS sold_comps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,                      -- terapeak | csv | manual
+        title TEXT NOT NULL,
+        title_norm TEXT NOT NULL,
+        price REAL NOT NULL,                       -- average sold price per unit
+        quantity INTEGER NOT NULL DEFAULT 1,       -- units sold in this row
+        shipping REAL,
+        condition TEXT,
+        sold_at TEXT,
+        url TEXT,
+        imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+        batch TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_sold_comps_norm ON sold_comps(title_norm);
+
+      CREATE TABLE IF NOT EXISTS sale_emails (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT UNIQUE,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sender TEXT NOT NULL DEFAULT '',
+        subject TEXT NOT NULL DEFAULT '',
+        marketplace TEXT,
+        parsed TEXT NOT NULL DEFAULT '{}',         -- JSON: title, price, orderId, quantity, size
+        status TEXT NOT NULL DEFAULT 'review',     -- recorded | review | ignored | duplicate
+        item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+        variation_id INTEGER REFERENCES variations(id) ON DELETE SET NULL,
+        sale_id INTEGER REFERENCES sales(id) ON DELETE SET NULL,
+        confidence REAL,
+        note TEXT
+      );
+    `);
+  },
+];
+
+function migrate(db: DatabaseSync) {
+  const current = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version || 1;
+  for (let v = current + 1; v <= MIGRATIONS.length + 1; v++) {
+    db.exec("PRAGMA foreign_keys = OFF; BEGIN");
+    try {
+      MIGRATIONS[v - 2](db);
+      db.exec(`PRAGMA user_version = ${v}; COMMIT; PRAGMA foreign_keys = ON;`);
+    } catch (e) {
+      db.exec("ROLLBACK; PRAGMA foreign_keys = ON;");
+      throw new Error(`Migration to v${v} failed: ${(e as Error).message}`);
+    }
+  }
+}
+
 export function openDb(file = process.env.FLIPDESK_DB ?? "data/flipdesk.db"): Db {
   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
@@ -190,6 +300,7 @@ export interface ItemRow {
 export interface ListingRow {
   id: number;
   item_id: number;
+  variation_id: number | null;
   marketplace: string;
   status: string;
   external_id: string | null;
@@ -214,8 +325,22 @@ export interface JobRow {
   result: string | null;
 }
 
+export interface Variation {
+  id: number;
+  item_id: number;
+  sku: string;
+  attrs: Record<string, string>;
+  name: string; // "Size: M / Color: Black"
+  quantity: number;
+  quantity_purchased: number;
+  quantity_sold: number;
+  price: number | null;
+  position: number;
+}
+
 export interface Item extends Omit<ItemRow, "specifics" | "keywords"> {
   quantity_sold: number;
+  variations: Variation[];
   specifics: Record<string, string>;
   keywords: string[];
   photos: { id: number; url: string }[];
@@ -231,11 +356,45 @@ export function hydrateItem(db: Db, row: ItemRow): Item {
   return {
     ...row,
     quantity_sold: Number(sold.n),
+    variations: getVariations(db, row.id),
     specifics: JSON.parse(row.specifics || "{}"),
     keywords: JSON.parse(row.keywords || "[]"),
     photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : `/uploads/${path.basename(p.path)}` })),
     listings,
   };
+}
+
+export function variationName(attrs: Record<string, string>) {
+  return Object.entries(attrs)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(" / ");
+}
+
+export function getVariations(db: Db, itemId: number): Variation[] {
+  const rows = db
+    .prepare(
+      `SELECT v.*, (SELECT COALESCE(SUM(s.quantity), 0) FROM sales s WHERE s.variation_id = v.id) AS quantity_sold
+       FROM variations v WHERE v.item_id = ? ORDER BY v.position, v.id`,
+    )
+    .all(itemId) as unknown as (Omit<Variation, "attrs" | "name"> & { attrs: string })[];
+  return rows.map((r) => {
+    const attrs = JSON.parse(r.attrs || "{}");
+    return { ...r, quantity_sold: Number(r.quantity_sold), attrs, name: variationName(attrs) };
+  });
+}
+
+/** Keep item totals = sum of its variations (no-op for items without variations). */
+export function recomputeItemTotals(db: Db, itemId: number) {
+  const t = db
+    .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(quantity),0) AS q, COALESCE(SUM(quantity_purchased),0) AS p FROM variations WHERE item_id = ?")
+    .get(itemId) as { n: number; q: number; p: number };
+  if (!t.n) return;
+  db.prepare(
+    `UPDATE items SET quantity = ?, quantity_purchased = ?,
+       status = CASE WHEN ? = 0 AND status = 'active' THEN 'sold' WHEN ? > 0 AND status = 'sold' THEN 'active' ELSE status END,
+       updated_at = datetime('now') WHERE id = ?`,
+  ).run(t.q, t.p, t.q, t.q, itemId);
 }
 
 export function getItem(db: Db, id: number): Item | undefined {

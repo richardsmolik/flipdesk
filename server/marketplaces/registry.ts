@@ -60,6 +60,8 @@ export interface MarketplaceDef {
   supportsOffers: boolean;
   /** Can one listing carry quantity > 1? If not, FlipDesk lists 1 unit and auto-relists after each sale. */
   multiQty: boolean;
+  /** One listing can hold several variations (sizes/colors). If not, FlipDesk lists each variation separately. */
+  variations: boolean;
   notes: string;
 }
 
@@ -77,6 +79,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["electronics", "collectibles", "parts", "auto", "media", "cards", "tools", "vintage", "everything"],
     supportsOffers: true,
     multiQty: true,
+    variations: true,
     notes: "Sell Inventory, Fulfillment, Negotiation & Taxonomy APIs.",
   },
   poshmark: {
@@ -92,6 +95,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["clothing", "womens", "shoes", "handbags", "accessories", "beauty", "home"],
     supportsOffers: true,
     multiQty: true,
+    variations: false,
     notes: "No public API. Extension fills the create-listing form; sharing stays manual by design.",
   },
   mercari: {
@@ -107,6 +111,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["electronics", "toys", "games", "home", "collectibles", "clothing"],
     supportsOffers: true,
     multiQty: false,
+    variations: false,
     notes: "No public API. Verify current seller fee - Mercari has changed it several times.",
   },
   depop: {
@@ -122,6 +127,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["clothing", "streetwear", "vintage", "y2k", "womens", "accessories"],
     supportsOffers: true,
     multiQty: true,
+    variations: false,
     notes: "US sellers: 0% selling fee + payment processing.",
   },
   vinted: {
@@ -137,6 +143,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["clothing", "womens", "kids", "shoes", "accessories"],
     supportsOffers: true,
     multiQty: false,
+    variations: false,
     notes: "Buyer pays fees; seller keeps 100%.",
   },
   grailed: {
@@ -152,6 +159,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["mens", "streetwear", "designer", "sneakers", "clothing"],
     supportsOffers: true,
     multiQty: false,
+    variations: false,
     notes: "Menswear/designer focused.",
   },
   facebook: {
@@ -167,6 +175,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["furniture", "home", "large", "local", "electronics", "tools", "baby"],
     supportsOffers: true,
     multiQty: false,
+    variations: false,
     notes: "Fee applies to shipped orders; local pickup is free (set fee to 0 if you only do local).",
   },
   etsy: {
@@ -182,6 +191,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["vintage", "handmade", "craft", "jewelry", "art", "home"],
     supportsOffers: false,
     multiQty: true,
+    variations: false,
     notes: "Open API v3. Vintage items must be 20+ years old.",
   },
   shopify: {
@@ -197,6 +207,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["everything", "brand", "direct"],
     supportsOffers: false,
     multiQty: true,
+    variations: true,
     notes: "Your own store via Admin GraphQL API. Plan fee not included.",
   },
   amazon: {
@@ -212,6 +223,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["books", "media", "electronics", "new", "toys"],
     supportsOffers: false,
     multiQty: true,
+    variations: false,
     notes: "SP-API (requires approved developer profile). Many categories are gated; used clothing is restricted.",
   },
   whatnot: {
@@ -227,6 +239,7 @@ export const MARKETPLACES: Record<MarketplaceId, MarketplaceDef> = {
     strengths: ["cards", "collectibles", "toys", "sneakers", "comics", "live"],
     supportsOffers: true,
     multiQty: true,
+    variations: false,
     notes: "Live-selling + Buy It Now. Seller API is invite-only, so the extension is used.",
   },
 };

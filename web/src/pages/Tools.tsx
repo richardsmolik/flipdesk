@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, money } from "../api";
 import { MpBadge, toast, useFetch, useMarketplaces } from "../ui";
+import SoldDataCard from "../components/SoldData";
 
 interface Stale {
   listingId: number; itemId: number; sku: string; title: string; marketplace: string; price: number; minPrice: number | null;
@@ -44,7 +45,7 @@ export default function Tools() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">eBay power tools</h1>
+          <h1 className="text-2xl font-semibold">Power tools</h1>
           <p className="text-sm text-zinc-400">Stale-listing radar with a recommended fix for each listing, offers to watchers, relists and bulk repricing.</p>
         </div>
         <div className="flex items-center gap-2 text-sm">
@@ -52,6 +53,8 @@ export default function Tools() {
           <select className="input w-auto" value={days} onChange={(e) => setDays(Number(e.target.value))}>{[14, 30, 45, 60, 90].map((d) => <option key={d} value={d}>{d} days</option>)}</select>
         </div>
       </div>
+
+      <SoldDataCard />
 
       <div className="card flex flex-wrap items-center gap-3 p-4 text-sm">
         <div className="flex-1">

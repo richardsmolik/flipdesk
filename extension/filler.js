@@ -76,6 +76,7 @@
     set("price", ["price", "listing price"], (work.listing?.price ?? item.price).toFixed(0));
     set("brand", ["brand", "designer"], item.brand);
     set("quantity", ["quantity"], work.listing?.quantity);
+    if (work.variation) set("size", ["size"], item.size);
     const nPhotos = attachPhotos(find(site.photos, []) || document.querySelector('input[type="file"]'), photos);
 
     // SPA forms often render late: retry a few times if nothing matched yet.
@@ -85,6 +86,7 @@
     panel(
       `Filled <b>${filled.join(", ") || "nothing yet"}</b>${nPhotos ? ` + ${nPhotos} photo(s)` : ""} for <b>${item.sku}</b>.<br>` +
         (missing.length ? `<span style="color:#fab219">Please fill: ${missing.join(", ")}</span><br>` : "") +
+        (work.variation ? `Option: <b>${work.variation.name}</b><br>` : "") +
         `Pick category / size / condition, then click the site's <b>List</b> button. FlipDesk will detect the new listing automatically.`,
       [
         ["Refill", () => fill(work)],

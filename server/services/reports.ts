@@ -86,6 +86,8 @@ export function dashboard(db: Db) {
     topBrands: topSellers,
     queue: { pending: n(jobs.pending), failed: n(jobs.failed) },
     staleCount: n(stale.c),
+    alerts: db.prepare("SELECT id, kind, severity, title, item_id FROM alerts WHERE resolved_at IS NULL ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END, id DESC LIMIT 5").all(),
+    alertCount: n((db.prepare("SELECT COUNT(*) AS c FROM alerts WHERE resolved_at IS NULL").get() as { c: number }).c),
     recent: db.prepare("SELECT * FROM activity ORDER BY id DESC LIMIT 12").all(),
   };
 }

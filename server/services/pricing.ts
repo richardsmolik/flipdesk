@@ -5,6 +5,7 @@
  */
 import type { Db } from "../db.js";
 import { ebayBrowseSearch } from "../marketplaces/ebay.js";
+import { findLocalComps } from "./comps.js";
 
 export interface Comp {
   title: string;
@@ -59,22 +60,44 @@ function demoComps(q: string): Comp[] {
 export async function researchPrice(db: Db, q: string) {
   let comps: Comp[] = [];
   let demo = false;
+
+  // 1) Your sold-data library (Terapeak / CSV imports): real SOLD prices.
+  const local = findLocalComps(db, q);
+  const soldWeighted: number[] = [];
+  for (const c of local) {
+    comps.push({ title: c.title, price: c.price, sold: true, condition: c.condition ?? undefined, url: c.url ?? undefined, source: "sold-library" });
+    for (let i = 0; i < Math.min(c.quantity, 20); i++) soldWeighted.push(c.price); // weight by units sold
+  }
+
+  // 2) eBay active listings (what you're competing against right now).
   try {
     const live = await ebayBrowseSearch(db, q);
-    if (live) comps = live.map((c) => ({ ...c, sold: false, source: "ebay-active" }));
+    if (live) comps.push(...live.map((c) => ({ ...c, sold: false, source: "ebay-active" })));
   } catch (e) {
     console.warn("[pricing] eBay browse failed:", (e as Error).message);
   }
+
+  // 3) Nothing real? Demo data so the UI is explorable.
   if (!comps.length) {
     comps = demoComps(q);
     demo = true;
   }
-  const sold = comps.filter((c) => c.sold).map((c) => c.price);
+  const sold = soldWeighted.length ? soldWeighted : comps.filter((c) => c.sold).map((c) => c.price);
   const active = comps.filter((c) => !c.sold).map((c) => c.price);
   const s = stats(sold.length >= 3 ? sold : comps.map((c) => c.price));
-  // Price a touch under the median of sold (or active) comps; quick sale near p25.
   const suggestion = s
     ? { recommended: Math.max(1, Math.round(s.median) - 0.01), quickSale: Math.max(1, Math.round(s.p25) - 0.01), stretch: Math.round(s.p75) - 0.01 }
     : null;
-  return { query: q, demo, comps, soldStats: stats(sold), activeStats: stats(active), suggestion };
+  const units = local.reduce((a, c) => a + c.quantity, 0);
+  return {
+    query: q,
+    demo,
+    comps,
+    soldStats: stats(sold),
+    activeStats: stats(active),
+    suggestion,
+    // Sell-through signal: sold units vs active listings (higher = sells faster).
+    demand: local.length ? { soldUnits: units, activeListings: active.length, sellThrough: active.length ? Math.round((units / (units + active.length)) * 100) : null } : null,
+    sources: [...new Set(comps.map((c) => c.source))],
+  };
 }

@@ -14,6 +14,8 @@ interface Dash {
   daily: { day: string; revenue: number; profit: number; sales: number }[];
   queue: { pending: number; failed: number };
   staleCount: number;
+  alerts: { id: number; kind: string; severity: string; title: string; item_id: number | null }[];
+  alertCount: number;
   recent: { id: number; at: string; kind: string; message: string; item_id: number | null }[];
 }
 
@@ -96,6 +98,14 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {d.alerts.filter((a) => a.severity === "critical").map((a) => (
+        <Link key={a.id} to="/inbox" className="block rounded-lg border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-100 hover:bg-red-950">
+          🚨 <b>{a.title}</b> - open the Inbox for a ready-to-send buyer message
+        </Link>
+      ))}
+      {d.alertCount > d.alerts.filter((a) => a.severity === "critical").length && (
+        <Link to="/inbox" className="inline-block rounded-md border border-amber-900 bg-amber-950/40 px-3 py-1.5 text-sm text-amber-200">🔔 {d.alertCount} item(s) in your Inbox</Link>
+      )}
       {(d.queue.failed > 0 || d.staleCount > 0 || d.queue.pending > 0) && (
         <div className="flex flex-wrap gap-2 text-sm">
           {d.queue.failed > 0 && <Link to="/queue" className="rounded-md border border-red-900 bg-red-950/60 px-3 py-1.5 text-red-200">⚠ {d.queue.failed} sync job(s) failed - review</Link>}

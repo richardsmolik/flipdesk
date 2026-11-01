@@ -6,6 +6,7 @@ import { createApp, extensionToken } from "./app.js";
 import { processApiJobs } from "./services/jobs.js";
 import { pollEbaySales } from "./services/sync.js";
 import { applyAutoPriceDrops } from "./services/ebayTools.js";
+import { pollImap } from "./services/email.js";
 
 // Minimal .env loader (no dependency).
 if (fs.existsSync(".env")) {
@@ -25,6 +26,10 @@ if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1"; // local-only by default
+if (!["127.0.0.1", "localhost", "::1"].includes(host) && !process.env.FLIPDESK_PASSWORD) {
+  console.error(`Refusing to listen on ${host} without FLIPDESK_PASSWORD - anyone on your network could see your business data.`);
+  process.exit(1);
+}
 app.listen(port, host, () => {
   console.log(`FlipDesk API on http://${host}:${port}`);
   console.log(`Extension token: ${extensionToken(db)}`);
@@ -45,3 +50,4 @@ const every = (ms: number, name: string, fn: () => Promise<unknown> | unknown) =
 every(30_000, "jobs", () => processApiJobs(db));
 every(5 * 60_000, "ebay-sales", () => pollEbaySales(db)); // sold on eBay -> delist everywhere else
 every(60 * 60_000, "auto-drop", () => applyAutoPriceDrops(db));
+every(2 * 60_000, "email", () => pollImap(db)); // sale emails from every marketplace

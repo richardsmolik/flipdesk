@@ -87,6 +87,24 @@ async function shopify<T>(query: string, variables: Record<string, unknown>): Pr
   return j.data as T;
 }
 
+function shopifyOptions(item: Item, price: number) {
+  if (!item.variations.length) {
+    return {
+      productOptions: [{ name: "Title", values: [{ name: "Default Title" }] }],
+      variants: [{ optionValues: [{ optionName: "Title", name: "Default Title" }], price: price.toFixed(2), sku: item.sku }],
+    };
+  }
+  const dims = [...new Set(item.variations.flatMap((v) => Object.keys(v.attrs)))];
+  return {
+    productOptions: dims.map((d) => ({ name: d, values: [...new Set(item.variations.map((v) => v.attrs[d]).filter(Boolean))].map((name) => ({ name })) })),
+    variants: item.variations.map((v) => ({
+      optionValues: dims.map((d) => ({ optionName: d, name: v.attrs[d] ?? "" })),
+      price: (v.price ?? price).toFixed(2),
+      sku: v.sku,
+    })),
+  };
+}
+
 const shopifyAdapter: Adapter = {
   id: "shopify",
   isLive: shopifyLive,
@@ -106,8 +124,7 @@ const shopifyAdapter: Adapter = {
           productType: item.category || undefined,
           status: "ACTIVE",
           tags: item.keywords,
-          productOptions: [{ name: "Title", values: [{ name: "Default Title" }] }],
-          variants: [{ optionValues: [{ optionName: "Title", name: "Default Title" }], price: price.toFixed(2), sku: item.sku }],
+          ...shopifyOptions(item, price),
         },
       },
     );

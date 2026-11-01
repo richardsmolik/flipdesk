@@ -4,6 +4,10 @@ import path from "node:path";
 import { openDb } from "./db.js";
 import type { MarketplaceId } from "./marketplaces/registry.js";
 import { breakdown } from "./services/fees.js";
+import { crosslist, processApiJobs, claimExtensionJob, completeJob } from "./services/jobs.js";
+import { recordSale, saveVariations } from "./services/sync.js";
+import { importComps } from "./services/comps.js";
+import { ingestEmail } from "./services/email.js";
 
 const DB = process.env.FLIPDESK_DB ?? "data/flipdesk.db";
 for (const f of [DB, `${DB}-wal`, `${DB}-shm`]) fs.rmSync(f, { force: true });
@@ -137,4 +141,51 @@ for (const m of ["ebay", "poshmark", "mercari", "depop", "grailed", "etsy", "fac
   db.prepare("INSERT INTO connections (marketplace, status, username, connected_at) VALUES (?, 'connected', 'demo_seller', datetime('now'))").run(m);
 }
 db.prepare("INSERT INTO activity (kind, message) VALUES ('info', 'Demo data loaded - connect real accounts on the Connections page')").run();
-console.log(`Seeded ${ITEMS.length + 3} items into ${DB}`);
+// ---- Variations demo: a tee in 4 sizes, live on eBay (one listing) + Mercari (one per size) ----
+const teeId = Number(
+  db.prepare("INSERT INTO items (sku, title, description, brand, category, condition, cost, price, min_price, quantity, quantity_purchased, source, status) VALUES ('FD-TEE01', 'Nirvana In Utero Band Tee Black', 'Officially licensed reprint. Soft, no flaws.', 'Nirvana', 'Clothing > Men > T-Shirts', 'new_without_tags', 6, 32, 24, 0, 0, 'Wholesale lot', 'draft')").run().lastInsertRowid,
+);
+db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, 0)").run(teeId, photo("Nirvana In Utero Tee", "🎸", photoIdx++));
+saveVariations(db, teeId, [
+  { attrs: { Size: "S" }, quantity: 2 },
+  { attrs: { Size: "M" }, quantity: 4 },
+  { attrs: { Size: "L" }, quantity: 3 },
+  { attrs: { Size: "XL" }, quantity: 1, price: 34 },
+]);
+crosslist(db, teeId, ["ebay", "mercari", "poshmark"]);
+await processApiJobs(db);
+for (let j; (j = claimExtensionJob(db, ["mercari", "poshmark"])); ) completeJob(db, j.job.id, true, { externalId: `x${j.job.id}` });
+const tee = (await import("./db.js")).getItem(db, teeId)!;
+recordSale(db, { itemId: teeId, marketplace: "ebay", salePrice: 32, variationId: tee.variations[1].id, shippingCost: 4.5 });
+
+// ---- Terapeak-style sold data ----
+importComps(
+  db,
+  `Listing title,Avg sold price,Total sold,Date last sold
+Patagonia Better Sweater 1/4 Zip Mens L,$61.20,14,Oct 25 2026
+Patagonia Synchilla Snap-T Fleece Mens M,$54.00,22,Oct 29 2026
+Nike Air Jordan 1 Mid Chicago Toe 10.5,$112.00,31,Oct 30 2026
+Pyrex Primary Colors Mixing Bowls Set of 4,$88.00,9,Oct 18 2026
+Le Creuset 5.5 qt Dutch Oven,$165.00,17,Oct 27 2026
+Carhartt Detroit Jacket J97 Blanket Lined XL,$139.00,12,Oct 20 2026
+Lululemon Align Leggings 25 Size 6,$41.00,48,Oct 31 2026`,
+  "terapeak",
+  "Terapeak sample (demo)",
+);
+
+// ---- Inbox demos: an oversell + a sale email needing confirmation ----
+const coach = db.prepare("SELECT id FROM items WHERE sku = 'FD-00006'").get() as { id: number };
+const coachItem = (await import("./db.js")).getItem(db, coach.id)!;
+if (coachItem.quantity === 0) recordSale(db, { itemId: coach.id, marketplace: "ebay", salePrice: 180, buyer: "bagcollector88" });
+else {
+  recordSale(db, { itemId: coach.id, marketplace: "poshmark", salePrice: 185 });
+  recordSale(db, { itemId: coach.id, marketplace: "ebay", salePrice: 180, buyer: "bagcollector88" });
+}
+ingestEmail(db, {
+  messageId: "<demo-1@mercari.com>",
+  from: "Mercari <no-reply@mercari.com>",
+  subject: "Your item sold!",
+  text: "Great news! Your Stanley Quencher tumbler sold. Price: $38.00. Ship by Nov 4.",
+});
+
+console.log(`Seeded ${ITEMS.length + 4} items into ${DB}`);

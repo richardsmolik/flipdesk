@@ -89,7 +89,7 @@ export default function Inventory() {
                     {i.photos[0] ? <img src={i.photos[0].url} alt="" className="h-11 w-11 rounded-md object-cover" /> : <div className="h-11 w-11 rounded-md bg-zinc-800" />}
                     <div className="min-w-0">
                       <div className="max-w-md truncate font-medium text-zinc-100">{i.title || <span className="text-zinc-500">Untitled draft</span>}</div>
-                      <div className="text-xs text-zinc-500">{i.sku}{i.brand ? ` · ${i.brand}` : ""}</div>
+                      <div className="text-xs text-zinc-500">{i.sku}{i.brand ? ` · ${i.brand}` : ""}{i.variations.length ? <span className="ml-1 rounded bg-zinc-800 px-1 text-[10px] text-zinc-300">{i.variations.length} options</span> : null}</div>
                     </div>
                   </div>
                 </td>
@@ -98,7 +98,7 @@ export default function Inventory() {
                 <td className="p-3 text-right tabular-nums text-zinc-400">{money(i.cost)}</td>
                 <td className="p-3">
                   <div className="flex max-w-xs flex-wrap gap-1">
-                    {i.listings.filter((l) => l.status !== "ended").map((l) => <MpBadge key={l.id} small id={l.marketplace} status={l.status} mp={byId[l.marketplace]} />)}
+                    {[...new Map(i.listings.filter((l) => l.status !== "ended").map((l) => [l.marketplace, l])).values()].map((l) => <MpBadge key={l.id} small id={l.marketplace} status={l.status} mp={byId[l.marketplace]} />)}
                     {!i.listings.length && <span className="text-xs text-zinc-600">not listed</span>}
                   </div>
                 </td>

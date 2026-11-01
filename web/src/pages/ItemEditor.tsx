@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, CONDITIONS, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, timeAgo, toast, useFetch, useMarketplaces } from "../ui";
+import VariationsCard from "../components/Variations";
 
 interface Draft {
   title: string;
@@ -352,21 +353,26 @@ function EditItem({ id }: { id: number }) {
         <div className="space-y-5">
           <div className="card space-y-3 p-4">
             <h2 className="text-sm font-semibold">Quantity</h2>
-            <QtyBar purchased={form.quantity_purchased ?? 0} sold={item.quantity_sold} left={form.quantity ?? 0} />
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="label">Purchased</label>
-                <input className="input" type="number" min={0} value={form.quantity_purchased ?? 0} onChange={(e) => set("quantity_purchased", Number(e.target.value))} />
-              </div>
-              <div>
-                <label className="label">Sold</label>
-                <input className="input opacity-70" value={item.quantity_sold} readOnly title="Counted from recorded sales" />
-              </div>
-              <div>
-                <label className="label">Left</label>
-                <input className="input" type="number" min={0} value={form.quantity ?? 0} onChange={(e) => set("quantity", Number(e.target.value))} />
-              </div>
-            </div>
+            {item.variations.length === 0 && (
+              <>
+                <QtyBar purchased={form.quantity_purchased ?? 0} sold={item.quantity_sold} left={form.quantity ?? 0} />
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="label">Purchased</label>
+                    <input className="input" type="number" min={0} value={form.quantity_purchased ?? 0} onChange={(e) => set("quantity_purchased", Number(e.target.value))} />
+                  </div>
+                  <div>
+                    <label className="label">Sold</label>
+                    <input className="input opacity-70" value={item.quantity_sold} readOnly title="Counted from recorded sales" />
+                  </div>
+                  <div>
+                    <label className="label">Left</label>
+                    <input className="input" type="number" min={0} value={form.quantity ?? 0} onChange={(e) => set("quantity", Number(e.target.value))} />
+                  </div>
+                </div>
+              </>
+            )}
+            <VariationsCard item={item} onSaved={setData} />
             <button className="btn-ghost w-full" onClick={() => setModal("restock")}>📦 Restock (bought more)</button>
             <p className="text-[11px] text-zinc-500">When a unit sells, the new count syncs to every site. Sites that only allow quantity 1 (Mercari, Vinted, Grailed, Facebook) get relisted automatically while units remain.</p>
           </div>
@@ -394,8 +400,10 @@ function EditItem({ id }: { id: number }) {
             </div>
             <ul className="divide-y divide-zinc-800">
               {recs?.map((r, i) => {
-                const l = listingFor(r.marketplace);
-                const live = l && ["active", "queued", "ending"].includes(l.status);
+                const all = item.listings.filter((x) => x.marketplace === r.marketplace);
+                const liveAll = all.filter((x) => ["active", "queued", "ending"].includes(x.status));
+                const l = liveAll[0] ?? listingFor(r.marketplace);
+                const live = liveAll.length > 0;
                 return (
                   <li key={r.marketplace} className="flex items-center gap-2 py-2 text-sm">
                     <input
@@ -409,6 +417,7 @@ function EditItem({ id }: { id: number }) {
                       <div className="flex items-center gap-1.5">
                         <MpBadge id={r.marketplace} mp={byId[r.marketplace]} status={l?.status} />
                         {i < 3 && !live && <span className="text-[10px] text-blue-300">top pick</span>}
+                        {liveAll.length > 1 && <span className="text-[10px] text-zinc-400">{liveAll.length} listings (1 per option)</span>}
                       </div>
                       <div className="truncate text-[11px] text-zinc-500" title={r.reason}>{l?.error ? <span className="text-red-400">{l.error}</span> : r.reason}</div>
                     </div>
@@ -419,7 +428,16 @@ function EditItem({ id }: { id: number }) {
                     {live && l && (
                       <div className="flex flex-col items-end gap-0.5">
                         {l.url && <a href={l.url} target="_blank" rel="noreferrer" className="text-[11px] text-brand hover:underline">view</a>}
-                        <button className="text-[11px] text-zinc-500 hover:text-red-400" onClick={async () => setData(await api.post<Item>(`/api/listings/${l.id}/delist`))}>end</button>
+                        <button
+                          className="text-[11px] text-zinc-500 hover:text-red-400"
+                          onClick={async () => {
+                            let last: Item | null = null;
+                            for (const x of liveAll) last = await api.post<Item>(`/api/listings/${x.id}/delist`);
+                            if (last) setData(last);
+                          }}
+                        >
+                          end{liveAll.length > 1 ? " all" : ""}
+                        </button>
                       </div>
                     )}
                   </li>
@@ -449,6 +467,8 @@ function SoldModal({ open, item, onClose, onDone }: { open: boolean; item: Item;
   const live = item.listings.filter((l) => l.status === "active").map((l) => l.marketplace);
   const [m, setM] = useState(live[0] ?? "ebay");
   const [qty, setQty] = useState(1);
+  const inStock = item.variations.filter((v) => v.quantity > 0);
+  const [variationId, setVariationId] = useState<number | undefined>(inStock[0]?.id);
   const [price, setPrice] = useState(item.price);
   const [shipCharged, setShipCharged] = useState(0);
   const [shipCost, setShipCost] = useState(0);
@@ -461,6 +481,14 @@ function SoldModal({ open, item, onClose, onDone }: { open: boolean; item: Item;
             {marketplaces.map((x) => <option key={x.id} value={x.id}>{x.name}{live.includes(x.id) ? " (listed)" : ""}</option>)}
           </select>
         </div>
+        {item.variations.length > 0 && (
+          <div className="col-span-2">
+            <label className="label">Which one sold?</label>
+            <select className="input" value={variationId} onChange={(e) => setVariationId(Number(e.target.value))}>
+              {item.variations.map((v) => <option key={v.id} value={v.id}>{v.name} - {v.quantity} left</option>)}
+            </select>
+          </div>
+        )}
         <div><label className="label">Units sold</label><input className="input" type="number" min={1} max={item.quantity} value={qty} onChange={(e) => (setQty(Number(e.target.value)), setPrice(item.price * Number(e.target.value)))} /></div>
         <div><label className="label">Total sale price</label><input className="input" type="number" step="0.01" value={price} onChange={(e) => setPrice(Number(e.target.value))} /></div>
         <div><label className="label">Shipping buyer paid</label><input className="input" type="number" step="0.01" value={shipCharged} onChange={(e) => setShipCharged(Number(e.target.value))} /></div>
@@ -473,8 +501,9 @@ function SoldModal({ open, item, onClose, onDone }: { open: boolean; item: Item;
         className="btn-primary mt-4 w-full"
         onClick={async () => {
           try {
-            const r = await api.post<{ profit: number; item: Item; delisted: string[] }>(`/api/items/${item.id}/sold`, { marketplace: m, salePrice: price, quantity: qty, shippingCharged: shipCharged, shippingCost: shipCost });
-            toast(`Sale recorded - profit ${money(r.profit)}${r.delisted?.length ? `; delisting from ${r.delisted.length} site(s)` : ""}`);
+            const r = await api.post<{ profit: number; item: Item; delisted: string[]; oversold?: boolean }>(`/api/items/${item.id}/sold`, { marketplace: m, salePrice: price, quantity: qty, variationId, shippingCharged: shipCharged, shippingCost: shipCost });
+            if (r.oversold) toast("Oversold! See the alert on the dashboard - a buyer message is drafted for you.", "err");
+            else toast(`Sale recorded - profit ${money(r.profit)}${r.delisted?.length ? `; delisting from ${r.delisted.length} site(s)` : ""}`);
             onDone(r.item);
           } catch (e) {
             toast((e as Error).message, "err");
@@ -490,9 +519,18 @@ function SoldModal({ open, item, onClose, onDone }: { open: boolean; item: Item;
 function RestockModal({ open, item, onClose, onDone }: { open: boolean; item: Item; onClose: () => void; onDone: (i: Item) => void }) {
   const [units, setUnits] = useState(1);
   const [unitCost, setUnitCost] = useState(item.cost);
+  const [variationId, setVariationId] = useState<number | undefined>(item.variations[0]?.id);
   const avg = (item.cost * item.quantity + unitCost * units) / Math.max(1, item.quantity + units);
   return (
     <Modal open={open} onClose={onClose} title="Restock">
+      {item.variations.length > 0 && (
+        <div className="mb-3">
+          <label className="label">Which option?</label>
+          <select className="input" value={variationId} onChange={(e) => setVariationId(Number(e.target.value))}>
+            {item.variations.map((v) => <option key={v.id} value={v.id}>{v.name} - {v.quantity} left</option>)}
+          </select>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <div><label className="label">Units bought</label><input className="input" type="number" min={1} value={units} onChange={(e) => setUnits(Number(e.target.value))} /></div>
         <div><label className="label">Cost per unit</label><input className="input" type="number" step="0.01" value={unitCost} onChange={(e) => setUnitCost(Number(e.target.value))} /></div>
@@ -500,7 +538,7 @@ function RestockModal({ open, item, onClose, onDone }: { open: boolean; item: It
       <p className="mt-3 text-sm text-zinc-400">
         {item.quantity} → <span className="text-zinc-100">{item.quantity + units}</span> left · average cost becomes <span className="text-zinc-100">{money(Math.round(avg * 100) / 100)}</span>/unit
       </p>
-      <button className="btn-primary mt-4 w-full" onClick={async () => { const i = await api.post<Item>(`/api/items/${item.id}/restock`, { units, unitCost }); toast(`Restocked +${units}`); onDone(i); }}>
+      <button className="btn-primary mt-4 w-full" onClick={async () => { const i = await api.post<Item>(`/api/items/${item.id}/restock`, { units, unitCost, variationId }); toast(`Restocked +${units}`); onDone(i); }}>
         Add {units} unit(s)
       </button>
     </Modal>
@@ -509,6 +547,8 @@ function RestockModal({ open, item, onClose, onDone }: { open: boolean; item: It
 
 interface PriceResearch {
   demo: boolean;
+  sources: string[];
+  demand: { soldUnits: number; activeListings: number; sellThrough: number | null } | null;
   comps: { title: string; price: number; sold: boolean; url?: string; source: string }[];
   soldStats: { median: number; p25: number; p75: number; count: number } | null;
   activeStats: { median: number; count: number } | null;
@@ -533,7 +573,8 @@ function CompsModal({ open, query, onClose, onUse }: { open: boolean; query: str
       </form>
       {r && (
         <div className="mt-3 space-y-3 text-sm">
-          {r.demo && <div className="rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">Demo comps - add eBay API keys for live data.</div>}
+          {r.demo && <div className="rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">Demo comps. Import Terapeak data (Power tools page) or add eBay API keys for real prices.</div>}
+          {!r.demo && <div className="text-xs text-zinc-500">Sources: {r.sources.map((x) => (x === "sold-library" ? "your sold data" : x === "ebay-active" ? "eBay active listings" : x)).join(" + ")}{r.demand ? ` · ${r.demand.soldUnits} sold${r.demand.sellThrough !== null ? ` · ${r.demand.sellThrough}% sell-through` : ""}` : ""}</div>}
           {r.suggestion && (
             <div className="grid grid-cols-3 gap-2 text-center">
               {([["Quick sale", r.suggestion.quickSale], ["Recommended", r.suggestion.recommended], ["Stretch", r.suggestion.stretch]] as const).map(([l, v]) => (

@@ -1,4 +1,4 @@
-import { getItem, logActivity, tx, type Db, type JobRow, type ListingRow } from "../db.js";
+import { getItem, logActivity, tx, type Db, type Item, type JobRow, type ListingRow } from "../db.js";
 import { adapterFor, isExtensionMarketplace } from "../marketplaces/adapters.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 
@@ -8,10 +8,12 @@ export function listingQty(m: MarketplaceId, remaining: number) {
 }
 
 export function enqueue(db: Db, marketplace: MarketplaceId, type: JobRow["type"], itemId: number, listingId: number | null) {
-  // De-dupe: don't stack identical pending jobs.
+  // De-dupe: don't stack identical pending jobs for the same listing.
   const existing = db
-    .prepare("SELECT id FROM jobs WHERE marketplace = ? AND type = ? AND item_id = ? AND status IN ('pending','claimed')")
-    .get(marketplace, type, itemId) as { id: number } | undefined;
+    .prepare(
+      "SELECT id FROM jobs WHERE marketplace = ? AND type = ? AND item_id = ? AND IFNULL(listing_id, 0) = IFNULL(?, 0) AND status IN ('pending','claimed')",
+    )
+    .get(marketplace, type, itemId, listingId) as { id: number } | undefined;
   if (existing) return existing.id;
   const r = db
     .prepare("INSERT INTO jobs (marketplace, type, item_id, listing_id) VALUES (?, ?, ?, ?)")
@@ -19,34 +21,73 @@ export function enqueue(db: Db, marketplace: MarketplaceId, type: JobRow["type"]
   return Number(r.lastInsertRowid);
 }
 
-/** Create (or re-activate) listing rows and queue publish jobs. */
+/**
+ * What a marketplace should see for one listing. For a per-variation listing
+ * (sites without variation support) this is the item narrowed to that
+ * variation: its SKU, quantity, price, size/color in specifics and title.
+ */
+export function listingView(item: Item, listing: Pick<ListingRow, "variation_id" | "quantity" | "price">): Item {
+  const v = listing.variation_id ? item.variations.find((x) => x.id === listing.variation_id) : undefined;
+  if (!v) return item;
+  const suffix = Object.values(v.attrs).filter(Boolean).join(" ");
+  return {
+    ...item,
+    sku: v.sku,
+    title: suffix && !item.title.toLowerCase().includes(suffix.toLowerCase()) ? `${item.title} ${suffix}`.trim() : item.title,
+    size: v.attrs["Size"] ?? item.size,
+    color: v.attrs["Color"] ?? item.color,
+    specifics: { ...item.specifics, ...v.attrs },
+    quantity: v.quantity,
+    price: v.price ?? item.price,
+    variations: [],
+  };
+}
+
+type Slot = { variationId: number | null; qty: number; price: number };
+
+/** Which listings an item needs on a marketplace: one combined listing, or one per in-stock variation. */
+export function slotsFor(item: Item, m: MarketplaceId, basePrice: number): Slot[] {
+  if (!item.variations.length) return [{ variationId: null, qty: listingQty(m, item.quantity), price: basePrice }];
+  if (MARKETPLACES[m].variations) return [{ variationId: null, qty: Math.max(1, item.quantity), price: basePrice }];
+  return item.variations
+    .filter((v) => v.quantity > 0)
+    .map((v) => ({ variationId: v.id, qty: listingQty(m, v.quantity), price: v.price ?? basePrice }));
+}
+
+/** Create (or re-activate) listing rows and queue publish jobs. Skips listings already live. */
 export function crosslist(db: Db, itemId: number, marketplaces: MarketplaceId[], prices: Partial<Record<MarketplaceId, number>> = {}) {
   const item = getItem(db, itemId);
   if (!item) throw new Error("Item not found");
   if (item.quantity < 1) throw new Error("No units left - restock this item before listing it.");
   return tx(db, () => {
-    const out: { marketplace: MarketplaceId; listingId: number; jobId: number }[] = [];
+    const out: { marketplace: MarketplaceId; listingId: number; jobId: number; variationId: number | null }[] = [];
     for (const m of marketplaces) {
-      const price = prices[m] ?? item.price;
-      const qty = listingQty(m, item.quantity);
-      const existing = db.prepare("SELECT * FROM listings WHERE item_id = ? AND marketplace = ?").get(itemId, m) as
-        | ListingRow
-        | undefined;
-      if (existing && ["active", "queued"].includes(existing.status)) continue;
-      let listingId: number;
-      if (existing) {
-        db.prepare("UPDATE listings SET status = 'queued', price = ?, quantity = ?, error = NULL, ended_at = NULL WHERE id = ?").run(price, qty, existing.id);
-        listingId = existing.id;
-      } else {
-        listingId = Number(
-          db.prepare("INSERT INTO listings (item_id, marketplace, price, quantity, status) VALUES (?, ?, ?, ?, 'queued')").run(itemId, m, price, qty)
-            .lastInsertRowid,
-        );
+      for (const slot of slotsFor(item, m, prices[m] ?? item.price)) {
+        const existing = db
+          .prepare("SELECT * FROM listings WHERE item_id = ? AND marketplace = ? AND IFNULL(variation_id, 0) = IFNULL(?, 0)")
+          .get(itemId, m, slot.variationId) as ListingRow | undefined;
+        if (existing && ["active", "queued", "ending"].includes(existing.status)) continue;
+        let listingId: number;
+        if (existing) {
+          db.prepare(
+            "UPDATE listings SET status = 'queued', price = ?, quantity = ?, error = NULL, ended_at = NULL, external_id = NULL, url = NULL WHERE id = ?",
+          ).run(slot.price, slot.qty, existing.id);
+          listingId = existing.id;
+        } else {
+          listingId = Number(
+            db
+              .prepare("INSERT INTO listings (item_id, variation_id, marketplace, price, quantity, status) VALUES (?, ?, ?, ?, ?, 'queued')")
+              .run(itemId, slot.variationId, m, slot.price, slot.qty).lastInsertRowid,
+          );
+        }
+        out.push({ marketplace: m, listingId, variationId: slot.variationId, jobId: enqueue(db, m, "publish", itemId, listingId) });
       }
-      out.push({ marketplace: m, listingId, jobId: enqueue(db, m, "publish", itemId, listingId) });
     }
     if (item.status === "draft" && out.length) db.prepare("UPDATE items SET status = 'active', updated_at = datetime('now') WHERE id = ?").run(itemId);
-    if (out.length) logActivity(db, "crosslist", `Queued ${item.sku} to ${out.map((o) => MARKETPLACES[o.marketplace].name).join(", ")}`, itemId);
+    if (out.length) {
+      const names = [...new Set(out.map((o) => MARKETPLACES[o.marketplace].name))];
+      logActivity(db, "crosslist", `Queued ${item.sku} to ${names.join(", ")}${out.length > names.length ? ` (${out.length} listings incl. variations)` : ""}`, itemId);
+    }
     return out;
   });
 }
@@ -116,16 +157,17 @@ export async function processApiJobs(db: Db, limit = 20) {
       continue;
     }
     const adapter = adapterFor(m);
+    const view = listingView(item, listing);
     try {
       if (job.type === "publish") {
-        const r = await adapter.publish(db, item, listing.price);
+        const r = await adapter.publish(db, view, listing.price);
         if ("deferred" in r) continue;
         completeJob(db, job.id, true, r);
       } else if (job.type === "delist") {
-        await adapter.delist(db, item, listing);
+        await adapter.delist(db, view, listing);
         completeJob(db, job.id, true);
       } else {
-        await adapter.updatePrice(db, item, listing, listing.price);
+        await adapter.updatePrice(db, view, listing, listing.price);
         completeJob(db, job.id, true);
       }
     } catch (e) {
@@ -157,7 +199,9 @@ export function claimExtensionJob(db: Db, marketplaces: MarketplaceId[]) {
   db.prepare(
     "UPDATE jobs SET status = 'pending' WHERE status = 'claimed' AND updated_at < datetime('now', '-15 minutes') AND attempts < 3",
   ).run();
-  const item = getItem(db, job.item_id);
-  const listing = job.listing_id ? db.prepare("SELECT * FROM listings WHERE id = ?").get(job.listing_id) : null;
-  return { job, item, listing, marketplace: MARKETPLACES[job.marketplace as MarketplaceId] };
+  const full = getItem(db, job.item_id);
+  const listing = job.listing_id ? (db.prepare("SELECT * FROM listings WHERE id = ?").get(job.listing_id) as ListingRow | undefined) : undefined;
+  const item = full && listing ? listingView(full, listing) : full;
+  const variation = full && listing?.variation_id ? full.variations.find((v) => v.id === listing.variation_id) : undefined;
+  return { job, item, listing: listing ?? null, variation: variation ?? null, marketplace: MARKETPLACES[job.marketplace as MarketplaceId] };
 }

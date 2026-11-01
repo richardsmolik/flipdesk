@@ -12,9 +12,15 @@ import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
 import { claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, requestDelist } from "./services/jobs.js";
 import { researchPrice } from "./services/pricing.js";
-import { recordSale, restock } from "./services/sync.js";
+import { NeedsVariationError, recordSale, restock, saveVariations } from "./services/sync.js";
 import { bulkPrice, relist, sendOffersToWatchers, staleListings } from "./services/ebayTools.js";
 import { dashboard, toCsv } from "./services/reports.js";
+import { notify } from "./services/alerts.js";
+import { compsLibrary, importComps } from "./services/comps.js";
+import { checkItem } from "./services/sourcing.js";
+import { profitReport } from "./services/insights.js";
+import { confirmEmail, imapConfigured, ingestEmail } from "./services/email.js";
+import { simpleParser } from "mailparser";
 
 const MarketplaceEnum = z.enum(MARKETPLACE_IDS as [MarketplaceId, ...MarketplaceId[]]);
 
@@ -91,11 +97,31 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   const api = express.Router();
   app.use("/api", api);
 
+  // ---------------- Optional password (required when reachable from your phone/LAN) ----------------
+  const password = process.env.FLIPDESK_PASSWORD;
+  const sessionValue = password ? crypto.createHmac("sha256", password).update("flipdesk-session").digest("base64url") : "";
+  const readCookie = (req: Request, name: string) =>
+    (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(name + "="))?.slice(name.length + 1);
+  api.post("/login", (req, res) => {
+    if (!password) return void res.json({ ok: true });
+    const given = String(req.body?.password ?? "");
+    const ok = given.length === password.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(password));
+    if (!ok) return void res.status(401).json({ error: "Wrong password" });
+    res.setHeader("Set-Cookie", `fd_session=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}`);
+    res.json({ ok: true });
+  });
+  api.use((req, res, next) => {
+    if (!password || req.path.startsWith("/ext/") || req.path === "/health") return next();
+    if (readCookie(req, "fd_session") === sessionValue) return next();
+    res.status(401).json({ error: "login required" });
+  });
+
   api.get("/health", (_req, res) => {
-    res.json({ ok: true, ai: aiIsLive() ? "live" : "demo", ebay: ebayIsLive(db) ? "live" : ebayHasAppKeys() ? "keys-only" : "demo" });
+    res.json({ ok: true, imap: imapConfigured(), ai: aiIsLive() ? "live" : "demo", ebay: ebayIsLive(db) ? "live" : ebayHasAppKeys() ? "keys-only" : "demo" });
   });
 
   api.get("/dashboard", (_req, res) => void res.json(dashboard(db)));
+  api.get("/reports", (req, res) => void res.json(profitReport(db, Number(req.query.days ?? 365))));
 
   // ---------------- Items ----------------
   api.get("/items", (req, res) => {
@@ -283,6 +309,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
         shippingCost: z.number().min(0).optional(),
         fees: z.number().min(0).optional(),
         quantity: z.number().int().min(1).optional(),
+        variationId: z.number().int().optional(),
+        listingId: z.number().int().optional(),
         buyer: z.string().optional(),
         orderId: z.string().optional(),
       })
@@ -293,10 +321,130 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   api.post("/items/:id/restock", async (req, res) => {
-    const b = z.object({ units: z.number().int().min(1), unitCost: z.number().min(0).optional() }).parse(req.body);
-    const item = restock(db, Number(req.params.id), b.units, b.unitCost);
+    const b = z.object({ units: z.number().int().min(1), unitCost: z.number().min(0).optional(), variationId: z.number().int().optional() }).parse(req.body);
+    const item = restock(db, Number(req.params.id), b.units, b.unitCost, b.variationId);
     await processApiJobs(db);
     res.json(item);
+  });
+
+  api.put("/items/:id/variations", async (req, res) => {
+    const { variations } = z
+      .object({
+        variations: z.array(
+          z.object({
+            id: z.number().int().optional(),
+            attrs: z.record(z.string(), z.string()),
+            quantity: z.number().int().min(0),
+            quantity_purchased: z.number().int().min(0).optional(),
+            price: z.number().min(0).nullable().optional(),
+          }),
+        ),
+      })
+      .parse(req.body);
+    const item = saveVariations(db, Number(req.params.id), variations);
+    await processApiJobs(db);
+    res.json(item);
+  });
+
+  // ---------------- Sourcing mode ----------------
+  api.post("/source/check", upload.single("photo"), async (req, res) => {
+    const askPrice = req.body.askPrice !== undefined && req.body.askPrice !== "" ? Number(req.body.askPrice) : undefined;
+    const query = typeof req.body.q === "string" ? req.body.q.trim() : undefined;
+    const photo = (req.file as Express.Multer.File | undefined)?.path;
+    if (!photo && !query) return void res.status(400).json({ error: "Snap a photo or type what it is." });
+    const r = await checkItem(db, { photoPath: photo, query, askPrice });
+    res.json({ ...r, photo: photo ? path.basename(photo) : null });
+  });
+
+  api.post("/source/buy", async (req, res) => {
+    const b = z
+      .object({
+        name: z.string().min(1),
+        brand: z.string().optional(),
+        category: z.string().optional(),
+        cost: z.number().min(0),
+        quantity: z.number().int().min(1).default(1),
+        price: z.number().min(0).optional(),
+        source: z.string().optional(),
+        photo: z.string().nullable().optional(),
+        notes: z.string().optional(),
+      })
+      .parse(req.body);
+    const id = Number(
+      db
+        .prepare(
+          `INSERT INTO items (sku, title, brand, category, cost, price, quantity, quantity_purchased, source, sourced_at, status, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), 'draft', ?)`,
+        )
+        .run(nextSku(db), b.name, b.brand ?? "", b.category ?? "", b.cost, b.price ?? 0, b.quantity, b.quantity, b.source ?? "", b.notes ?? "")
+        .lastInsertRowid,
+    );
+    if (b.photo) {
+      const file = path.join(uploadDir, path.basename(b.photo)); // basename: no path traversal
+      if (fs.existsSync(file)) db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, 0)").run(id, file);
+    }
+    logActivity(db, "sourced", `Bought ${b.quantity > 1 ? b.quantity + "x " : ""}${b.name} for $${b.cost.toFixed(2)}${b.source ? ` at ${b.source}` : ""}`, id);
+    res.status(201).json(getItem(db, id));
+  });
+
+  // ---------------- Sold comps library (Terapeak etc) ----------------
+  const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+  api.post("/comps/import", memUpload.single("file"), (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
+    const source = typeof req.body.source === "string" && req.body.source ? req.body.source : "terapeak";
+    const label = typeof req.body.batch === "string" && req.body.batch ? req.body.batch : `${req.file.originalname} ${new Date().toISOString().slice(0, 10)}`;
+    const r = importComps(db, req.file.buffer.toString("utf8"), source, label);
+    logActivity(db, "import", `Imported ${r.imported} sold comps (${label})`);
+    res.json(r);
+  });
+  api.get("/comps", (_req, res) => void res.json(compsLibrary(db)));
+  api.delete("/comps/batch", (req, res) => {
+    db.prepare("DELETE FROM sold_comps WHERE batch = ?").run(String(req.query.batch ?? ""));
+    res.status(204).end();
+  });
+
+  // ---------------- Sale emails ----------------
+  api.get("/emails", (req, res) => {
+    const status = String(req.query.status ?? "review");
+    const rows = db
+      .prepare(`SELECT * FROM sale_emails ${status === "all" ? "" : "WHERE status = ?"} ORDER BY id DESC LIMIT 100`)
+      .all(...(status === "all" ? [] : [status])) as Record<string, unknown>[];
+    res.json({ imap: imapConfigured(), emails: rows.map((r) => ({ ...r, parsed: JSON.parse(String(r.parsed || "{}")) })) });
+  });
+  api.post("/emails/:id/confirm", async (req, res) => {
+    const b = z.object({ itemId: z.number().int(), variationId: z.number().int().optional(), salePrice: z.number().positive(), quantity: z.number().int().min(1).optional() }).parse(req.body);
+    const r = confirmEmail(db, Number(req.params.id), b);
+    await processApiJobs(db);
+    res.json(r);
+  });
+  api.post("/emails/:id/ignore", (req, res) => {
+    db.prepare("UPDATE sale_emails SET status = 'ignored' WHERE id = ?").run(Number(req.params.id));
+    db.prepare("UPDATE alerts SET resolved_at = datetime('now') WHERE kind = 'email_review' AND json_extract(data, '$.emailId') = ? AND resolved_at IS NULL").run(Number(req.params.id));
+    res.json({ ok: true });
+  });
+  // Paste an email to see what FlipDesk would do (records nothing).
+  api.post("/emails/test", (req, res) => {
+    const b = z.object({ from: z.string(), subject: z.string().default(""), text: z.string().default("") }).parse(req.body);
+    res.json(ingestEmail(db, b, { dryRun: true }));
+  });
+
+  // ---------------- Alerts ----------------
+  api.get("/alerts", (req, res) => {
+    const all = req.query.all === "1";
+    res.json(
+      db
+        .prepare(`SELECT a.*, i.sku, i.title AS item_title FROM alerts a LEFT JOIN items i ON i.id = a.item_id ${all ? "" : "WHERE a.resolved_at IS NULL"} ORDER BY a.id DESC LIMIT 200`)
+        .all()
+        .map((r) => ({ ...(r as Record<string, unknown>), data: JSON.parse(((r as Record<string, unknown>).data as string) || "{}") })),
+    );
+  });
+  api.post("/alerts/:id/resolve", (req, res) => {
+    db.prepare("UPDATE alerts SET resolved_at = datetime('now') WHERE id = ?").run(Number(req.params.id));
+    res.json({ ok: true });
+  });
+  api.post("/notify/test", async (_req, res) => {
+    const ok = await notify(db, "sale", "FlipDesk test", "Push notifications are working!");
+    res.status(ok ? 200 : 400).json({ ok, error: ok ? undefined : "Set an ntfy topic in Settings first (or the push failed)." });
   });
 
   api.get("/sales", (req, res) => {
@@ -412,7 +560,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   // ---------------- Settings ----------------
-  const SETTING_KEYS = ["feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
+  const SETTING_KEYS = ["notify", "minutesPerItem", "sourcing", "feeOverrides", "defaultShippingCost", "skuPrefix", "autoDrop", "ebay", "etsy", "defaultMarketplaces", "descriptionFooter"];
   api.get("/settings", (_req, res) => {
     res.json({
       ...Object.fromEntries(SETTING_KEYS.map((k) => [k, getSetting(db, k, null)])),
@@ -484,6 +632,26 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     completeJob(db, Number(req.params.id), b.ok, b);
     res.json({ ok: true });
   });
+  // Forwarded sale emails (mail rules, Zapier, Cloudflare Email Workers...): raw RFC822 or JSON.
+  ext.post("/email", express.text({ type: ["text/plain", "message/rfc822"], limit: "5mb" }), async (req, res) => {
+    let input: { messageId?: string | null; from: string; subject: string; text: string; date?: string | null };
+    if (typeof req.body === "string") {
+      const mail = await simpleParser(req.body);
+      input = {
+        messageId: mail.messageId ?? null,
+        from: mail.from?.value?.[0]?.address ?? "",
+        subject: mail.subject ?? "",
+        text: mail.text ?? (typeof mail.html === "string" ? mail.html.replace(/<[^>]+>/g, " ") : ""),
+        date: mail.date ? mail.date.toISOString().replace("T", " ").slice(0, 19) : null,
+      };
+    } else {
+      input = z.object({ messageId: z.string().nullable().optional(), from: z.string(), subject: z.string().default(""), text: z.string().default(""), date: z.string().nullable().optional() }).parse(req.body);
+    }
+    const r = ingestEmail(db, input);
+    await processApiJobs(db);
+    res.json(r);
+  });
+
   // Extension reports a sale it saw on a marketplace (sold page / notification).
   ext.post("/sold", async (req, res) => {
     const b = z.object({ marketplace: MarketplaceEnum, externalId: z.string().optional(), sku: z.string().optional(), salePrice: z.number().positive(), quantity: z.number().int().min(1).optional(), orderId: z.string().optional() }).parse(req.body);
@@ -491,7 +659,10 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
       ? (db.prepare("SELECT item_id AS id FROM listings WHERE marketplace = ? AND external_id = ?").get(b.marketplace, b.externalId) as { id: number } | undefined)
       : (db.prepare("SELECT id FROM items WHERE sku = ?").get(b.sku ?? "") as { id: number } | undefined);
     if (!row) return void res.status(404).json({ error: "No matching item" });
-    const r = recordSale(db, { itemId: row.id, marketplace: b.marketplace, salePrice: b.salePrice, quantity: b.quantity, orderId: b.orderId });
+    const listing = b.externalId
+      ? (db.prepare("SELECT id FROM listings WHERE marketplace = ? AND external_id = ?").get(b.marketplace, b.externalId) as { id: number } | undefined)
+      : undefined;
+    const r = recordSale(db, { itemId: row.id, listingId: listing?.id, marketplace: b.marketplace, salePrice: b.salePrice, quantity: b.quantity, orderId: b.orderId });
     await processApiJobs(db);
     res.json(r);
   });
@@ -499,6 +670,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   // ---------------- Errors ----------------
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof z.ZodError) return void res.status(400).json({ error: "Invalid input", issues: err.issues });
+    if (err instanceof NeedsVariationError) return void res.status(409).json({ error: err.message, variations: err.options });
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api]", message);
     res.status(500).json({ error: message });

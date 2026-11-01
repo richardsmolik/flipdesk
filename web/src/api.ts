@@ -1,6 +1,7 @@
 export interface Listing {
   id: number;
   item_id: number;
+  variation_id: number | null;
   marketplace: string;
   status: string;
   external_id: string | null;
@@ -11,6 +12,17 @@ export interface Listing {
   watchers: number;
   error: string | null;
   listed_at: string | null;
+}
+
+export interface Variation {
+  id: number;
+  sku: string;
+  attrs: Record<string, string>;
+  name: string;
+  quantity: number;
+  quantity_purchased: number;
+  quantity_sold: number;
+  price: number | null;
 }
 
 export interface Item {
@@ -40,6 +52,7 @@ export interface Item {
   updated_at: string;
   photos: { id: number; url: string }[];
   listings: Listing[];
+  variations: Variation[];
 }
 
 export interface Marketplace {
@@ -59,6 +72,12 @@ export interface Marketplace {
   activeListings: number;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public data: Record<string, unknown>) {
+    super(message);
+  }
+}
+
 async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const isForm = body instanceof FormData;
   const res = await fetch(url, {
@@ -68,7 +87,8 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   });
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
+  if (res.status === 401 && !url.startsWith("/api/login")) window.dispatchEvent(new Event("fd-login-required"));
+  if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `HTTP ${res.status}`, res.status, data as Record<string, unknown>);
   return data as T;
 }
 

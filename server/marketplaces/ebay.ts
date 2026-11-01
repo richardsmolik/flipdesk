@@ -224,6 +224,7 @@ export async function ebayPublish(db: Db, item: Item, price: number): Promise<{ 
   if (!cfg.fulfillmentPolicyId || !cfg.paymentPolicyId || !cfg.returnPolicyId || !cfg.merchantLocationKey) {
     throw new Error("Set your eBay business policies and location in Settings -> eBay first.");
   }
+  if (item.variations.length) return ebayPublishGroup(db, item, price, cfg);
   const sku = item.sku;
   await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, toInventoryItem(item));
 
@@ -262,6 +263,10 @@ async function offerIdForSku(db: Db, sku: string): Promise<string | undefined> {
 
 export async function ebayDelist(db: Db, item: Item, _listing: ListingRow) {
   if (!ebayIsLive(db)) return sleep(100);
+  if (item.variations.length) {
+    await call(db, "POST", `/sell/inventory/v1/offer/withdraw_by_inventory_item_group`, { inventoryItemGroupKey: item.sku, marketplaceId: MARKETPLACE_ID() });
+    return;
+  }
   const offerId = await offerIdForSku(db, item.sku);
   if (offerId) await call(db, "POST", `/sell/inventory/v1/offer/${offerId}/withdraw`);
 }
@@ -269,6 +274,19 @@ export async function ebayDelist(db: Db, item: Item, _listing: ListingRow) {
 /** Syncs both price and available quantity for the listing. */
 export async function ebayUpdatePrice(db: Db, item: Item, listing: ListingRow, price: number) {
   if (!ebayIsLive(db)) return sleep(80);
+  if (item.variations.length) {
+    // Per-variant stock + price (max 25 per request).
+    const reqs = [];
+    for (const v of item.variations) {
+      reqs.push({
+        sku: v.sku,
+        shipToLocationAvailability: { quantity: v.quantity },
+        offers: [{ offerId: await offerIdForSku(db, v.sku), availableQuantity: v.quantity, price: { value: (v.price ?? price).toFixed(2), currency: "USD" } }],
+      });
+    }
+    for (let i = 0; i < reqs.length; i += 25) await call(db, "POST", `/sell/inventory/v1/bulk_update_price_quantity`, { requests: reqs.slice(i, i + 25) });
+    return;
+  }
   const offerId = await offerIdForSku(db, item.sku);
   await call(db, "POST", `/sell/inventory/v1/bulk_update_price_quantity`, {
     requests: [
@@ -322,4 +340,53 @@ export async function ebayBrowseSearch(db: Db, q: string, limit = 20) {
   return (r.itemSummaries ?? [])
     .filter((x) => x.price)
     .map((x) => ({ title: x.title, price: Number(x.price!.value), condition: x.condition, url: x.itemWebUrl, image: x.image?.imageUrl }));
+}
+
+type EbayCfg = { fulfillmentPolicyId?: string; paymentPolicyId?: string; returnPolicyId?: string; merchantLocationKey?: string };
+
+/**
+ * Multi-variation listing: one inventory item per variation SKU, grouped by the
+ * parent SKU, then published together (Inventory API "inventory item group").
+ */
+async function ebayPublishGroup(db: Db, item: Item, price: number, cfg: EbayCfg) {
+  const dims = [...new Set(item.variations.flatMap((v) => Object.keys(v.attrs)))];
+  for (const v of item.variations) {
+    const inv = toInventoryItem({ ...item, quantity: v.quantity });
+    for (const [k, val] of Object.entries(v.attrs)) inv.product.aspects[k] = [val];
+    await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(v.sku)}`, inv);
+  }
+  const common = toInventoryItem(item).product;
+  for (const d of dims) delete common.aspects[d];
+  await call(db, "PUT", `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(item.sku)}`, {
+    title: common.title,
+    description: common.description,
+    imageUrls: common.imageUrls,
+    aspects: common.aspects,
+    variantSKUs: item.variations.map((v) => v.sku),
+    variesBy: {
+      specifications: dims.map((d) => ({ name: d, values: [...new Set(item.variations.map((v) => v.attrs[d]).filter(Boolean))] })),
+    },
+  });
+  const categoryId = item.specifics["_ebayCategoryId"] || (await suggestCategory(db, `${item.title} ${item.category}`))[0]?.id;
+  if (!categoryId) throw new Error("Could not determine an eBay category for this item.");
+  for (const v of item.variations) {
+    const existing = await offerIdForSku(db, v.sku).catch(() => undefined);
+    if (existing) continue;
+    await call(db, "POST", `/sell/inventory/v1/offer`, {
+      sku: v.sku,
+      marketplaceId: MARKETPLACE_ID(),
+      format: "FIXED_PRICE",
+      availableQuantity: v.quantity,
+      categoryId,
+      merchantLocationKey: cfg.merchantLocationKey,
+      pricingSummary: { price: { value: (v.price ?? price).toFixed(2), currency: "USD" } },
+      listingPolicies: { fulfillmentPolicyId: cfg.fulfillmentPolicyId, paymentPolicyId: cfg.paymentPolicyId, returnPolicyId: cfg.returnPolicyId },
+    });
+  }
+  const pub = await call<{ listingId: string }>(db, "POST", `/sell/inventory/v1/offer/publish_by_inventory_item_group`, {
+    inventoryItemGroupKey: item.sku,
+    marketplaceId: MARKETPLACE_ID(),
+  });
+  const host = ENV() === "production" ? "www.ebay.com" : "sandbox.ebay.com";
+  return { externalId: pub.listingId, url: `https://${host}/itm/${pub.listingId}` };
 }
