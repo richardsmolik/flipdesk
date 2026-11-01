@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  FlipDesk eBay sign-in relay.
+  eBay only redirects to HTTPS addresses. Host this one file on any free HTTPS host
+  (GitHub Pages, Cloudflare Pages, Netlify) and set its address as your RuName's
+  "Auth accepted URL". It forwards eBay's answer straight back to FlipDesk on your
+  computer, so connecting eBay is one click. It stores nothing and sends nothing anywhere else.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connecting eBay to FlipDesk…</title>
+<style>body{font:16px system-ui;background:#09090b;color:#e4e4e7;display:grid;place-items:center;height:100vh;margin:0}a{color:#3987e5}</style></head>
+<body>
+<div id="msg">Connecting your eBay account to FlipDesk…</div>
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var state = q.get("state") || "";
+  var code = q.get("code");
+  var msg = document.getElementById("msg");
+  if (!code) { msg.textContent = "eBay didn't send a sign-in code (you may have clicked Decline). Close this tab and try again from FlipDesk."; return; }
+  // state = "<nonce>.<base64url of where FlipDesk is running>"
+  var dot = state.indexOf(".");
+  var back = "http://localhost:8787";
+  try {
+    if (dot > 0) back = atob(state.slice(dot + 1).replace(/-/g, "+").replace(/_/g, "/"));
+  } catch (e) {}
+  // Only hand the code back to a FlipDesk address (http(s) URL), never anywhere else.
+  if (!/^https?:\/\/[^\/]+$/.test(back)) { msg.textContent = "Invalid return address."; return; }
+  var target = back + "/api/connections/ebay/callback?" + new URLSearchParams({ code: code, state: state }).toString();
+  msg.innerHTML = 'Almost done… if nothing happens, <a href="' + target.replace(/"/g, "&quot;") + '">click here</a>.';
+  location.replace(target);
+})();
+</script>
+</body>
+</html>

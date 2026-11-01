@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { api } from "../api";
 import { MpBadge, toast, useMarketplaces } from "../ui";
+import EbaySetup from "../components/EbaySetup";
 
 const ENV_HINT: Record<string, string> = {
   ebay: "EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_RU_NAME",
@@ -20,6 +22,12 @@ const pctText = (f: Record<string, number | boolean>) => {
 
 export default function Connections() {
   const { marketplaces, reload } = useMarketplaces();
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("ebay") === "connected") {
+      toast("eBay connected 🎉");
+      history.replaceState(null, "", "/connections");
+    }
+  }, []);
   return (
     <div className="space-y-5">
       <div>
@@ -28,6 +36,7 @@ export default function Connections() {
           <b className="text-zinc-200">API</b> sites connect directly and sync automatically. <b className="text-zinc-200">Extension</b> sites have no public seller API, so the FlipDesk Chrome extension fills in their listing forms in your logged-in browser. Your passwords never leave your browser.
         </p>
       </div>
+      <EbaySetup />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {marketplaces.map((m) => {
           const connected = m.connection.status === "connected";
@@ -55,7 +64,7 @@ export default function Connections() {
                     className="btn-primary flex-1"
                     onClick={async () => {
                       try {
-                        const r = await api.get<{ url: string }>("/api/connections/ebay/auth-url");
+                        const r = await api.get<{ url: string }>(`/api/connections/ebay/auth-url?return=${encodeURIComponent(location.origin)}`);
                         location.href = r.url;
                       } catch (e) {
                         toast((e as Error).message, "err");

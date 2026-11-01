@@ -50,7 +50,7 @@ export interface Item {
   notes: string;
   created_at: string;
   updated_at: string;
-  photos: { id: number; url: string }[];
+  photos: { id: number; url: string; edited?: boolean }[];
   listings: Listing[];
   variations: Variation[];
 }
@@ -112,3 +112,5 @@ export const CONDITIONS: Record<string, string> = {
   used_fair: "Used - fair",
   for_parts: "For parts / not working",
 };
+
+export interface PhotoCaps { ai: boolean; backgroundRemoval: boolean; aiRetouch: boolean }

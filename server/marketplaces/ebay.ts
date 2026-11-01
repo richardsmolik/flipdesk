@@ -129,7 +129,7 @@ async function call<T>(db: Db, method: string, path: string, body?: unknown, use
   });
   if (res.status === 204) return undefined as T;
   const text = await res.text();
-  if (!res.ok) throw new Error(`eBay ${method} ${path} -> ${res.status}: ${text.slice(0, 500)}`);
+  if (!res.ok) throw new Error(friendlyEbayError(res.status, text, `${method} ${path}`));
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
@@ -153,7 +153,7 @@ function photoUrls(item: Item): string[] {
     .slice(0, 24);
 }
 
-export function toInventoryItem(item: Item) {
+export function toInventoryItem(item: Item, imageUrls?: string[]) {
   const aspects: Record<string, string[]> = {};
   for (const [k, v] of Object.entries(item.specifics)) if (v) aspects[k] = [v];
   if (item.brand) aspects["Brand"] ??= [item.brand];
@@ -166,7 +166,7 @@ export function toInventoryItem(item: Item) {
       title: item.title.slice(0, 80),
       description: item.description,
       aspects,
-      imageUrls: photoUrls(item),
+      imageUrls: imageUrls ?? photoUrls(item),
       brand: item.brand || undefined,
       ...(item.specifics["UPC"] ? { upc: [item.specifics["UPC"]] } : {}),
       ...(item.specifics["ISBN"] ? { isbn: [item.specifics["ISBN"]] } : {}),
@@ -228,9 +228,11 @@ export async function ebayPublish(db: Db, item: Item, price: number): Promise<{ 
   if (!cfg.fulfillmentPolicyId || !cfg.paymentPolicyId || !cfg.returnPolicyId || !cfg.merchantLocationKey) {
     throw new Error("Set your eBay business policies and location in Settings -> eBay first.");
   }
-  if (item.variations.length) return ebayPublishGroup(db, item, price, cfg);
+  const images = await resolveImageUrls(db, item);
+  if (!images.length) throw new Error("eBay needs at least one photo. Add a photo to this item first.");
+  if (item.variations.length) return ebayPublishGroup(db, item, price, cfg, images);
   const sku = item.sku;
-  await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, toInventoryItem(item));
+  await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, toInventoryItem(item, images));
 
   const categoryId =
     item.specifics["_ebayCategoryId"] || (await suggestCategory(db, `${item.title} ${item.category}`))[0]?.id;
@@ -361,14 +363,14 @@ type EbayCfg = { fulfillmentPolicyId?: string; paymentPolicyId?: string; returnP
  * Multi-variation listing: one inventory item per variation SKU, grouped by the
  * parent SKU, then published together (Inventory API "inventory item group").
  */
-async function ebayPublishGroup(db: Db, item: Item, price: number, cfg: EbayCfg) {
+async function ebayPublishGroup(db: Db, item: Item, price: number, cfg: EbayCfg, images: string[]) {
   const dims = [...new Set(item.variations.flatMap((v) => Object.keys(v.attrs)))];
   for (const v of item.variations) {
-    const inv = toInventoryItem({ ...item, quantity: v.quantity });
+    const inv = toInventoryItem({ ...item, quantity: v.quantity }, images);
     for (const [k, val] of Object.entries(v.attrs)) inv.product.aspects[k] = [val];
     await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(v.sku)}`, inv);
   }
-  const common = toInventoryItem(item).product;
+  const common = toInventoryItem(item, images).product;
   for (const d of dims) delete common.aspects[d];
   await call(db, "PUT", `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(item.sku)}`, {
     title: common.title,
@@ -466,4 +468,161 @@ export async function ebayAddTracking(db: Db, orderId: string, lineItemId: strin
     shippingCarrierCode: carrier.toUpperCase(),
     trackingNumber: tracking.replace(/\s+/g, ""),
   });
+}
+
+// ---------------- Photos via eBay Picture Services (Media API) ----------------
+// eBay must download listing photos from a public URL. Photos on your computer aren't public,
+// so unless PUBLIC_BASE_URL is set (hosted / tunnel), we upload each photo to eBay's own image
+// hosting and reuse the returned URL until it expires.
+const MEDIA_API = () => (ENV() === "production" ? "https://apim.ebay.com" : "https://apim.sandbox.ebay.com");
+
+export async function ebayUploadImage(db: Db, filePath: string): Promise<{ url: string; expires: string | null }> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const token = await userToken(db);
+  const form = new FormData();
+  const ext = path.extname(filePath).toLowerCase();
+  const type = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+  form.append("image", new Blob([fs.readFileSync(filePath)], { type }), path.basename(filePath));
+  const res = await fetch(`${MEDIA_API()}/commerce/media/v1_beta/image/create_image_from_file`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) throw new Error(`eBay photo upload failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  let body = (await res.json().catch(() => ({}))) as { imageUrl?: string; expirationDate?: string };
+  if (!body.imageUrl) {
+    const loc = res.headers.get("location");
+    if (!loc) throw new Error("eBay photo upload returned no image URL");
+    const g = await fetch(loc, { headers: { Authorization: `Bearer ${token}` } });
+    body = (await g.json()) as { imageUrl?: string; expirationDate?: string };
+  }
+  if (!body.imageUrl) throw new Error("eBay photo upload returned no image URL");
+  return { url: body.imageUrl, expires: body.expirationDate ?? null };
+}
+
+export async function resolveImageUrls(db: Db, item: Item): Promise<string[]> {
+  const base = process.env.PUBLIC_BASE_URL;
+  const rows = db
+    .prepare("SELECT id, path, ebay_url, ebay_url_expires FROM photos WHERE item_id = ? ORDER BY position, id LIMIT 24")
+    .all(item.id) as { id: number; path: string; ebay_url: string | null; ebay_url_expires: string | null }[];
+  const out: string[] = [];
+  for (const r of rows) {
+    if (r.path.startsWith("http")) out.push(r.path);
+    else if (base) out.push(`${base.replace(/\/$/, "")}/uploads/${r.path.split(/[\\/]/).pop()}`);
+    else if (!/\.(jpe?g|png|webp)$/i.test(r.path)) continue; // eBay rejects svg/gif
+    else if (r.ebay_url && (!r.ebay_url_expires || Date.parse(r.ebay_url_expires) > Date.now() + 86400_000)) out.push(r.ebay_url);
+    else {
+      const up = await ebayUploadImage(db, r.path);
+      db.prepare("UPDATE photos SET ebay_url = ?, ebay_url_expires = ? WHERE id = ?").run(up.url, up.expires, r.id);
+      out.push(up.url);
+    }
+  }
+  return out;
+}
+
+// ---------------- One-time account setup helpers ----------------
+export async function ebayOptedInPrograms(db: Db): Promise<string[]> {
+  const r = await call<{ programs?: { programType: string }[] }>(db, "GET", `/sell/account/v1/program/get_opted_in_programs`);
+  return (r.programs ?? []).map((p) => p.programType);
+}
+
+/** Business policies (shipping/payment/returns as reusable policies) are required by the Inventory API. */
+export async function ebayOptInBusinessPolicies(db: Db) {
+  await call(db, "POST", `/sell/account/v1/program/opt_in`, { programType: "SELLING_POLICY_MANAGEMENT" });
+}
+
+export async function ebayLocations(db: Db): Promise<{ key: string; name?: string }[]> {
+  const r = await call<{ locations?: { merchantLocationKey: string; name?: string }[] }>(db, "GET", `/sell/inventory/v1/location?limit=100`);
+  return (r.locations ?? []).map((l) => ({ key: l.merchantLocationKey, name: l.name }));
+}
+
+export async function ebayCreateLocation(
+  db: Db,
+  key: string,
+  a: { name?: string; street1?: string; street2?: string; city?: string; state?: string; zip?: string; country?: string },
+) {
+  if (!a.street1 || !a.city || !a.state || !a.zip) throw new Error("Fill in your ship-from address in Settings first.");
+  await call(db, "POST", `/sell/inventory/v1/location/${encodeURIComponent(key)}`, {
+    name: a.name || "Main",
+    merchantLocationStatus: "ENABLED",
+    locationTypes: ["WAREHOUSE"],
+    location: { address: { addressLine1: a.street1, addressLine2: a.street2 || undefined, city: a.city, stateOrProvince: a.state, postalCode: a.zip, country: a.country || "US" } },
+  });
+}
+
+/** Exchange a pasted redirect URL ("...?code=...&state=...") when the app can't receive eBay's redirect itself. */
+export function parseEbayRedirect(url: string) {
+  const u = new URL(url.trim());
+  const code = u.searchParams.get("code");
+  if (!code) throw new Error("That address has no code= in it. Copy the full address from your browser after you click Agree on eBay.");
+  return { code, state: u.searchParams.get("state") };
+}
+
+export function ebayEnvironment() {
+  return ENV();
+}
+
+/** Turn eBay's error JSON into something a seller can act on. */
+export function friendlyEbayError(status: number, text: string, where = "") {
+  try {
+    const j = JSON.parse(text) as { errors?: { errorId?: number; message?: string; longMessage?: string; parameters?: { name: string; value: string }[] }[] };
+    const msgs = (j.errors ?? []).map((e) => {
+      const m = e.longMessage || e.message || "";
+      const param = e.parameters?.find((p) => /aspect|name|field/i.test(p.name))?.value;
+      if (/item specific|aspect/i.test(m) && param) return `eBay requires the item specific "${param}" for this category. Add it under Item specifics.`;
+      if (e.errorId === 1100 || /access denied|insufficient permissions/i.test(m)) return "eBay denied access. Reconnect eBay (Marketplaces page) so FlipDesk gets the newest permissions.";
+      if (/business polic/i.test(m)) return "Turn on eBay business policies and choose your shipping, payment and return policies (Marketplaces, eBay setup).";
+      if (/location/i.test(m) && /invalid|not found|missing/i.test(m)) return "Register your ship-from location (Marketplaces, eBay setup).";
+      return m;
+    }).filter(Boolean);
+    if (msgs.length) return `eBay: ${[...new Set(msgs)].join(" ")}`;
+  } catch {
+    /* not JSON */
+  }
+  return `eBay ${where} -> ${status}: ${text.slice(0, 300)}`;
+}
+
+/** Required item specifics for a category that this item doesn't have yet (checked before listing). */
+export async function ebayRequiredAspects(db: Db, categoryId: string) {
+  if (!ebayHasAppKeys()) return [];
+  const r = await call<{
+    aspects?: { localizedAspectName: string; aspectConstraint?: { aspectRequired?: boolean; aspectUsage?: string }; aspectValues?: { localizedValue: string }[] }[];
+  }>(db, "GET", `/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`, undefined, true);
+  return (r.aspects ?? [])
+    .filter((a) => a.aspectConstraint?.aspectRequired)
+    .map((a) => ({ name: a.localizedAspectName, values: (a.aspectValues ?? []).slice(0, 12).map((v) => v.localizedValue) }));
+}
+
+/** Marketplace Account Deletion: eBay's required notification endpoint for production keysets. */
+export async function accountDeletionChallenge(challengeCode: string) {
+  const crypto = await import("node:crypto");
+  const endpoint = `${(process.env.PUBLIC_BASE_URL ?? "").replace(/\/$/, "")}/api/ebay/account-deletion`;
+  const token = process.env.EBAY_VERIFICATION_TOKEN ?? "";
+  return crypto.createHash("sha256").update(challengeCode + token + endpoint).digest("hex");
+}
+
+/** Listing traffic for the last N days (Analytics API, sell.analytics.readonly). */
+export async function ebayTrafficReport(db: Db, days = 30) {
+  if (!ebayIsLive(db)) return null;
+  const ymd = (d: Date) => d.toISOString().slice(0, 10).replace(/-/g, "");
+  const end = new Date(Date.now() - 86400_000); // eBay wants a completed day
+  const start = new Date(end.getTime() - (days - 1) * 86400_000);
+  const metrics = ["LISTING_IMPRESSION_TOTAL", "LISTING_VIEWS_TOTAL", "CLICK_THROUGH_RATE", "SALES_CONVERSION_RATE", "TRANSACTION"];
+  const filter = encodeURIComponent(`marketplace_ids:{${MARKETPLACE_ID()}},date_range:[${ymd(start)}..${ymd(end)}]`);
+  const r = await call<{
+    header?: { metrics?: { key: string }[] };
+    records?: { dimensionValues: { value: string }[]; metricValues: { value: number | string | null }[] }[];
+  }>(db, "GET", `/sell/analytics/v1/traffic_report?dimension=LISTING&metric=${metrics.join(",")}&filter=${filter}`);
+  const keys = (r.header?.metrics ?? []).map((m) => m.key);
+  const get = (rec: { metricValues: { value: number | string | null }[] }, k: string) => Number(rec.metricValues[keys.indexOf(k)]?.value ?? 0) || 0;
+  return (r.records ?? []).map((rec) => ({
+    externalId: rec.dimensionValues[0]?.value,
+    impressions: get(rec, "LISTING_IMPRESSION_TOTAL"),
+    views: get(rec, "LISTING_VIEWS_TOTAL"),
+    ctr: get(rec, "CLICK_THROUGH_RATE") * (get(rec, "CLICK_THROUGH_RATE") <= 1 ? 100 : 1),
+    conversion: get(rec, "SALES_CONVERSION_RATE") * (get(rec, "SALES_CONVERSION_RATE") <= 1 ? 100 : 1),
+    sold: get(rec, "TRANSACTION"),
+    periodDays: days,
+  }));
 }

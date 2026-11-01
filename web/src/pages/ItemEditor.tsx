@@ -4,6 +4,8 @@ import { api, CONDITIONS, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import VariationsCard from "../components/Variations";
 import Lightbox from "../components/Lightbox";
+import EbayCheck from "../components/EbayCheck";
+import PhotoEditor from "../components/PhotoEditor";
 
 interface Draft {
   title: string;
@@ -164,6 +166,8 @@ function EditItem({ id }: { id: number }) {
   const [picked, setPicked] = useState<string[]>([]);
   const photoInput = useRef<HTMLInputElement>(null);
   const [viewPhoto, setViewPhoto] = useState<number | null>(null);
+  const [editPhoto, setEditPhoto] = useState<number | null>(null);
+  const { data: priceAdvice } = useFetch<{ action: string; pct: number; newPrice: number | null; reason: string; confidence: string; basis: string }>(item?.status === "active" ? `/api/items/${id}/price-advice` : null, [item?.price, item?.status]);
   const { data: lotParts } = useFetch<{ itemId: number; quantity: number; sku: string; title: string; price: number; available: number }[]>(`/api/items/${id}/bundle`, [item?.quantity]);
 
   useEffect(() => {
@@ -269,6 +273,7 @@ function EditItem({ id }: { id: number }) {
                     <img src={p.url} alt="" className="h-24 w-24 rounded-md object-cover" />
                   </button>
                   {i === 0 && <span className="absolute left-1 top-1 rounded bg-black/70 px-1 text-[10px]">Cover</span>}
+                  <button className="absolute bottom-1 right-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] hover:bg-brand" onClick={() => setEditPhoto(p.id)} aria-label={`Edit photo ${i + 1}`}>✏️ Edit</button>
                   <button className="absolute right-1 top-1 hidden rounded bg-black/70 px-1 text-xs group-hover:block" onClick={async () => (await api.del(`/api/photos/${p.id}`), reload())} aria-label="Remove photo">✕</button>
                   {i > 0 && (
                     <button
@@ -407,6 +412,17 @@ function EditItem({ id }: { id: number }) {
               <div><label className="label">Floor</label><input className="input" type="number" step="0.01" value={form.min_price ?? ""} placeholder="min" onChange={(e) => set("min_price", e.target.value === "" ? null : Number(e.target.value))} /></div>
               <div><label className="label">Cost/unit</label><input className="input" type="number" step="0.01" value={form.cost ?? 0} onChange={(e) => set("cost", Number(e.target.value))} /></div>
             </div>
+            {priceAdvice && (
+              <div className="rounded-md border border-zinc-800 bg-zinc-950 p-2 text-xs" title={`Based on ${priceAdvice.basis} · confidence ${priceAdvice.confidence}`}>
+                <div className="text-zinc-300">💡 {priceAdvice.reason}</div>
+                <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-500">
+                  <span>From {priceAdvice.basis}</span>
+                  {priceAdvice.newPrice && (priceAdvice.action === "drop" || priceAdvice.action === "small_drop") && (
+                    <button className="text-brand hover:underline" onClick={() => set("price", priceAdvice.newPrice!)}>Use {money(priceAdvice.newPrice)}</button>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2">
               <div><label className="label">Bin / location</label><input className="input" value={form.location ?? ""} onChange={(e) => set("location", e.target.value)} /></div>
               <div><label className="label">Weight (oz)</label><input className="input" type="number" value={form.weight_oz ?? ""} onChange={(e) => set("weight_oz", e.target.value === "" ? null : Number(e.target.value))} /></div>
@@ -464,6 +480,11 @@ function EditItem({ id }: { id: number }) {
                 );
               })}
             </ul>
+            {picked.includes("ebay") && (
+              <div className="mt-3">
+                <EbayCheck itemId={id} specifics={form.specifics ?? {}} refreshKey={item.updated_at} onSet={(k, v) => set("specifics", { ...form.specifics, [k]: v })} />
+              </div>
+            )}
             <button className="btn-primary mt-3 w-full" disabled={!picked.length || !!busy || item.quantity < 1} onClick={doCrosslist}>
               {item.quantity < 1 ? "No units left - restock first" : busy === "Crosslisting…" ? busy : `🔁 Crosslist to ${picked.length} site${picked.length === 1 ? "" : "s"}`}
             </button>
@@ -475,6 +496,7 @@ function EditItem({ id }: { id: number }) {
         </div>
       </div>
 
+      {editPhoto !== null && item.photos.some((p) => p.id === editPhoto) && <PhotoEditor item={item} photoId={editPhoto} onClose={() => setEditPhoto(null)} onSaved={setData} />}
       {viewPhoto !== null && <Lightbox item={item} start={viewPhoto} onClose={() => setViewPhoto(null)} />}
       <SoldModal open={modal === "sold"} item={item} onClose={() => setModal(null)} onDone={(i) => (setData(i), setModal(null))} />
       <RestockModal open={modal === "restock"} item={item} onClose={() => setModal(null)} onDone={(i) => (setData(i), setModal(null))} />

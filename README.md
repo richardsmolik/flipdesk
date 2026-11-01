@@ -24,6 +24,10 @@ A reseller command center. Create a listing once, post it to **11 marketplaces**
 | **Returns tracking** | Returns, cancellations and partial refunds recorded with reason, refund, return label and fees kept. Return rate by site and category, top reasons, and alerts when one site's returns run high. |
 | **Mileage** | Save stores with round-trip miles and log trips with one tap (also from sourcing mode). Each trip becomes a mileage expense at your rate, with an IRS-ready log (date, destination, purpose, miles) as CSV. Reports show profit per store after gas money. |
 | **Buy labels in FlipDesk** | Shippo: compare USPS/UPS/FedEx rates, buy a 4x6 label, save the cost and tracking, and send tracking to eBay. Demo rates without a key. |
+| **Photo editor** | ✨ AI auto-enhance (Claude decides rotation, straightening, crop, light, color and background; FlipDesk applies it). Paint to **remove items** or **fix wrinkles** (Clipdrop AI, or a basic built-in version). Remove background (Photoroom / remove.bg / Clipdrop). Crop (free, 1:1, 4:5), rotate, flip, straighten, brightness, contrast, saturation, warmth, sharpen, square on white. Originals are always kept, so you can revert. |
+| **Smart price advice** | Learns from your sales, per category, how long items take to sell and how far below their first price they sell. Each unsold item gets "wait", "small nudge" or "drop X% to $Y". Smart automatic drops can use it. |
+| **eBay traffic diagnosis** | Impressions, click-through and views per eBay listing (Analytics API, or the Seller Hub traffic CSV), turned into a clear fix: not seen (title/specifics), seen but not clicked (cover photo), or clicked but not bought (price/shipping/details). |
+| **eBay setup checklist** | Step-by-step with buttons: connect (sign-in comes back automatically via a free relay page), turn on business policies, choose policies, register a ship-from location. Before listing it shows any missing required item specifics, and eBay errors appear in plain words. Photos go to eBay's own photo hosting. See `docs/EBAY_SETUP.md`. |
 | **Cancellations and returns** | Remove a cancelled or oversold sale, or put a returned item back in stock, so profit stays honest |
 | **Profit-first** | Per-site fee math (with your own overrides), a "where you keep the most" ranking for every item, true profit after fees, shipping and cost of goods |
 | **eBay power tools** | Stale-listing radar with a recommended fix for each listing, offers to watchers, relisting, bulk repricing, automatic price drops that never go below your floor price |
@@ -47,6 +51,7 @@ Everything works in **demo mode** without any keys. Add keys to `.env` (copy `.e
 | Shopify | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_ADMIN_TOKEN` |
 | Sale emails | `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` (Gmail: an app password from myaccount.google.com/apppasswords) |
 | Phone access (sourcing) | `HOST=0.0.0.0` and `FLIPDESK_PASSWORD`, then `npm run build && npm start` and open `http://<computer-LAN-IP>:8787` on your phone. The server refuses to start on your network without a password. |
+| Photo editor AI | `CLIPDROP_API_KEY` (remove items, fix wrinkles, backgrounds) and/or `PHOTOROOM_API_KEY` / `REMOVEBG_API_KEY` (backgrounds). AI auto-enhance uses your `ANTHROPIC_API_KEY`. |
 | Labels in FlipDesk | `SHIPPO_API_KEY` (free test keys start with `shippo_test_`), plus your ship-from address in Settings |
 | Phone notifications | Install the ntfy app, subscribe to a private topic name, and enter the same name in Settings |
 
@@ -82,7 +87,8 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 ## Status and known gaps
 
-- **Tested:** `npm test` runs 62 tests, including the inventory views, bins and packing-slip data, returns and partial refunds, the mileage log and after-gas profit, and Shippo label buying (demo mode). Of the earlier tests, 56, including barcodes, lots (both directions and restock), bundle suggestions, multi-buy, weekly summary scheduling, the Pirate Ship round trip and cancellations/returns. The earlier 39 tests cover covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
+- **Put it online:** see `docs/DEPLOY.md` (Cloudflare Tunnel from your computer, Fly.io, or any Docker host).
+- **Tested:** `npm test` runs 76 tests, including photo edits (rotate/crop/square/brightness, revert, object removal changing only the painted area), eBay helpers (redirect parsing, friendly errors, account-deletion challenge, sign-in return address), smart price advice and traffic diagnosis. Earlier: 62 tests, including the inventory views, bins and packing-slip data, returns and partial refunds, the mileage log and after-gas profit, and Shippo label buying (demo mode). Of the earlier tests, 56, including barcodes, lots (both directions and restock), bundle suggestions, multi-buy, weekly summary scheduling, the Pirate Ship round trip and cancellations/returns. The earlier 39 tests cover covering fee math, crosslisting, auto-delist, multi-quantity, variations (per-option listings, sell-out delist, restock relist), oversell alerts, Terapeak import and pricing, sourcing verdicts, reports, email parsing/matching/confirmation, the password gate and the HTTP API. The database migration was checked on an existing database with no data lost, and the extension was tested end to end against a mock listing form.
 - **Barcode lookups** (Open Library, UPCitemdb) couldn't be reached from the build sandbox, so they're tested with stand-in services. Live camera scanning needs HTTPS (or localhost); over plain home Wi-Fi the scanner reads a photo of the barcode instead.
 - **Pirate Ship has no public API.** The integration uses its spreadsheet import and shipment-history export. Exported orders carry an "Order ID" of `FD-<sale>` so labels match back exactly.
 - **eBay label costs** come from the Finances API (`sell.finances` scope). If you connected eBay before this update, reconnect once.
@@ -97,5 +103,6 @@ Background schedule: API jobs every 30s, eBay order polling every 5 min (a sale 
 
 - Sold-comps pricing through eBay's Marketplace Insights API (needs partner approval)
 - Multi-size listings filled by the extension on Poshmark and Depop
+- Live tests of Clipdrop / Photoroom / remove.bg and the eBay Media + Analytics APIs (coded to their documented APIs; this build had no keys)
 - Live Shippo test against a real key (the code follows Shippo's documented shipments/transactions API, but this build ran in demo mode)
 - Product mode: users, Postgres, Stripe billing, hosted image CDN

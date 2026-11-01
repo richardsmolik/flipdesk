@@ -2,6 +2,7 @@ import { getItem, getSetting, logActivity, tx, type Db, type ListingRow } from "
 import { ebaySendOffer } from "../marketplaces/ebay.js";
 import type { MarketplaceId } from "../marketplaces/registry.js";
 import { enqueue, requestDelist } from "./jobs.js";
+import { advise, learn, recordPriceChange } from "./priceAdvice.js";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -68,7 +69,7 @@ export function staleListings(db: Db, minDays = 30): StaleRow[] {
 }
 
 /** Change prices across items; respects each item's floor (min_price). Queues update jobs for live listings. */
-export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amount?: number; set?: number }) {
+export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amount?: number; set?: number }, reason = "bulk") {
   return tx(db, () => {
     const results: { itemId: number; from: number; to: number }[] = [];
     for (const id of itemIds) {
@@ -79,6 +80,7 @@ export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amo
       if (change.amount) to = item.price + change.amount;
       to = r2(Math.max(item.min_price ?? 0.99, to));
       if (to === item.price) continue;
+      recordPriceChange(db, id, item.price, to, reason);
       db.prepare("UPDATE items SET price = ?, updated_at = datetime('now') WHERE id = ?").run(to, id);
       for (const l of item.listings.filter((x) => x.status === "active")) {
         db.prepare("UPDATE listings SET price = ? WHERE id = ?").run(to, l.id);
@@ -124,6 +126,7 @@ export function relist(db: Db, listingIds: number[]) {
 
 export interface AutoDropRule {
   enabled: boolean;
+  smart?: boolean; // use advice learned from your sales instead of a fixed %
   afterDays: number; // start dropping after N days listed
   everyDays: number; // then every N days
   dropPct: number; // by this %
@@ -150,7 +153,18 @@ export function applyAutoPriceDrops(db: Db) {
     })
     .filter((d) => d.min_price === null || d.price > d.min_price)
     .map((d) => d.id);
-  const res = bulkPrice(db, ids, { pct: -Math.abs(rule.dropPct) });
+  let res: { itemId: number; from: number; to: number }[] = [];
+  if (rule.smart) {
+    const model = learn(db);
+    for (const id of ids) {
+      const item = getItem(db, id);
+      if (!item) continue;
+      const a = advise(db, item, model);
+      if ((a.action === "drop" || a.action === "small_drop") && a.newPrice) res.push(...bulkPrice(db, [id], { set: a.newPrice }, "smart_drop"));
+    }
+  } else {
+    res = bulkPrice(db, ids, { pct: -Math.abs(rule.dropPct) }, "auto_drop");
+  }
   for (const r of res) last[r.itemId] = new Date().toISOString();
   db.prepare("INSERT INTO settings (key, value) VALUES ('autoDrop.last', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(
     JSON.stringify(last),

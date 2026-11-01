@@ -7,7 +7,7 @@ import { z } from "zod/v4";
 import { getItem, getSetting, hydrateItem, logActivity, setSetting, tx, type Db, type ItemRow, type ListingRow } from "./db.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
-import { ebayConsentUrl, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, fetchPolicies } from "./marketplaces/ebay.js";
+import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
 import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
 import { claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, requestDelist } from "./services/jobs.js";
@@ -18,6 +18,9 @@ import { dashboard, toCsv } from "./services/reports.js";
 import { notify } from "./services/alerts.js";
 import { compsLibrary, importComps } from "./services/comps.js";
 import { checkItem } from "./services/sourcing.js";
+import { advise, learn, recordPriceChange } from "./services/priceAdvice.js";
+import { diagnose, importTrafficCsv, latestTraffic, syncEbayTraffic } from "./services/traffic.js";
+import { adviceToOps, aiAdvice, capabilities as photoCaps, editPhoto, retouchPhoto, revertPhoto, type EditOp } from "./services/photos.js";
 import { buyLabel, getRates, shippoLive } from "./services/shippo.js";
 import { deleteTrip, logTrip, mileageSummary, savePlace } from "./services/mileage.js";
 import { parseAddress, pirateShipExport, pirateShipImport, providerFor, syncEbayLabelCosts, toShip, updateShipping } from "./services/shipping.js";
@@ -100,6 +103,22 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
   app.use("/uploads", express.static(uploadDir, { maxAge: "7d" }));
 
+  // eBay Marketplace Account Deletion notifications (required for production keysets when hosted). No login: eBay calls it.
+  app.get("/api/ebay/account-deletion", async (req, res) => {
+    const code = String(req.query.challenge_code ?? "");
+    if (!code) return void res.status(400).end();
+    res.json({ challengeResponse: await accountDeletionChallenge(code) });
+  });
+  app.post("/api/ebay/account-deletion", (req, res) => {
+    const username = (req.body as { notification?: { data?: { username?: string } } })?.notification?.data?.username;
+    if (username) {
+      // Forget that eBay user's personal data: buyer name and shipping address on their orders.
+      db.prepare("UPDATE sales SET buyer = NULL, ship_to = NULL WHERE marketplace = 'ebay' AND buyer = ?").run(username);
+      logActivity(db, "privacy", "Removed an eBay buyer's personal data at eBay's request");
+    }
+    res.status(200).end();
+  });
+
   const api = express.Router();
   app.use("/api", api);
 
@@ -113,7 +132,8 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     const given = String(req.body?.password ?? "");
     const ok = given.length === password.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(password));
     if (!ok) return void res.status(401).json({ error: "Wrong password" });
-    res.setHeader("Set-Cookie", `fd_session=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}`);
+    const secure = req.secure || req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+    res.setHeader("Set-Cookie", `fd_session=${sessionValue}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`);
     res.json({ ok: true });
   });
   api.use((req, res, next) => {
@@ -224,6 +244,7 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
       sets.push(`${k} = ?`);
       args.push(k === "specifics" || k === "keywords" ? JSON.stringify(v) : (v as string | number | null));
     }
+    if (body.price !== undefined && body.price !== item.price && item.price > 0) recordPriceChange(db, id, item.price, body.price, "manual");
     if (sets.length) db.prepare(`UPDATE items SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`).run(...args, id);
     if (body.quantity !== undefined && body.quantity !== item.quantity) {
       for (const l of item.listings.filter((x) => x.status === "active")) {
@@ -259,9 +280,51 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.json(getItem(db, Number(req.params.id)));
   });
 
+  // ---------------- Photo editor ----------------
+  api.get("/photos/capabilities", (_req, res) => void res.json(photoCaps()));
+  const Op = z.discriminatedUnion("type", [
+    z.object({ type: z.literal("rotate"), deg: z.number().min(-360).max(360) }),
+    z.object({ type: z.literal("flip"), axis: z.enum(["h", "v"]) }),
+    z.object({ type: z.literal("crop"), x: z.number(), y: z.number(), w: z.number(), h: z.number() }),
+    z.object({ type: z.literal("adjust"), brightness: z.number().optional(), contrast: z.number().optional(), saturation: z.number().optional(), warmth: z.number().optional(), sharpen: z.boolean().optional() }),
+    z.object({ type: z.literal("auto") }),
+    z.object({ type: z.literal("square"), size: z.number().optional() }),
+    z.object({ type: z.literal("removeBackground") }),
+  ]);
+  api.post("/photos/:id/edit", async (req, res) => {
+    const { ops } = z.object({ ops: z.array(Op).min(1).max(20) }).parse(req.body);
+    await editPhoto(db, Number(req.params.id), ops as EditOp[], uploadDir);
+    const p = db.prepare("SELECT item_id FROM photos WHERE id = ?").get(Number(req.params.id)) as { item_id: number };
+    res.json(getItem(db, p.item_id));
+  });
+  const maskUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+  api.post("/photos/:id/retouch", maskUpload.single("mask"), async (req, res) => {
+    const tool = z.enum(["removeObject", "fixWrinkles"]).parse(req.body.tool);
+    if (!req.file) return void res.status(400).json({ error: "Paint over the area first." });
+    const r = await retouchPhoto(db, Number(req.params.id), tool, req.file.buffer, uploadDir);
+    const p = db.prepare("SELECT item_id FROM photos WHERE id = ?").get(Number(req.params.id)) as { item_id: number };
+    res.json({ ...r, item: getItem(db, p.item_id) });
+  });
+  api.post("/photos/:id/ai-enhance", async (req, res) => {
+    const { allowBackground } = z.object({ allowBackground: z.boolean().default(true) }).parse(req.body ?? {});
+    const id = Number(req.params.id);
+    const { advice, demo } = await aiAdvice(db, id);
+    const caps = photoCaps();
+    const ops = demo ? ([{ type: "auto" }] as EditOp[]) : adviceToOps(advice, allowBackground && caps.backgroundRemoval);
+    await editPhoto(db, id, ops, uploadDir);
+    const p = db.prepare("SELECT item_id FROM photos WHERE id = ?").get(id) as { item_id: number };
+    res.json({ advice, demo, applied: ops.map((o) => o.type), backgroundSkipped: advice.remove_background && !caps.backgroundRemoval, item: getItem(db, p.item_id) });
+  });
+  api.post("/photos/:id/revert", (req, res) => {
+    revertPhoto(db, Number(req.params.id));
+    const p = db.prepare("SELECT item_id FROM photos WHERE id = ?").get(Number(req.params.id)) as { item_id: number };
+    res.json(getItem(db, p.item_id));
+  });
+
   api.delete("/photos/:id", (req, res) => {
-    const p = db.prepare("SELECT * FROM photos WHERE id = ?").get(Number(req.params.id)) as { path: string } | undefined;
+    const p = db.prepare("SELECT * FROM photos WHERE id = ?").get(Number(req.params.id)) as { path: string; original_path: string | null } | undefined;
     if (p && !p.path.startsWith("http")) fs.rmSync(p.path, { force: true });
+    if (p?.original_path) fs.rmSync(p.original_path, { force: true });
     db.prepare("DELETE FROM photos WHERE id = ?").run(Number(req.params.id));
     res.status(204).end();
   });
@@ -693,9 +756,12 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.json({ ok: true });
   });
 
-  api.get("/connections/ebay/auth-url", (_req, res) => {
+  api.get("/connections/ebay/auth-url", (req, res) => {
     if (!ebayHasAppKeys()) return void res.status(400).json({ error: "Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RU_NAME to .env first." });
-    const state = crypto.randomBytes(12).toString("hex");
+    // state = nonce + where this FlipDesk runs, so the relay page can send eBay's answer back here automatically.
+    const ret = String(req.query.return ?? process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 8787}`).replace(/\/$/, "");
+    if (!/^https?:\/\/[^/]+$/.test(ret)) return void res.status(400).json({ error: "Bad return address" });
+    const state = `${crypto.randomBytes(12).toString("hex")}.${Buffer.from(ret).toString("base64url")}`;
     setSetting(db, "ebay.oauthState", state);
     res.json({ url: ebayConsentUrl(state) });
   });
@@ -709,13 +775,109 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     res.redirect("/connections?ebay=connected");
   });
 
+  // No public HTTPS address? Paste the URL eBay redirected you to after you clicked "Agree".
+  api.post("/connections/ebay/paste", async (req, res) => {
+    const { url } = z.object({ url: z.string().min(10) }).parse(req.body);
+    const { code, state } = parseEbayRedirect(url);
+    if (state && state !== getSetting(db, "ebay.oauthState", "")) return void res.status(400).json({ error: "That link is from an older attempt. Click Connect eBay again and paste the new address." });
+    await ebayExchangeCode(db, code);
+    logActivity(db, "connected", "Connected eBay account");
+    res.json({ ok: true });
+  });
+
+  /** One-time eBay setup checklist: what's done, what's missing, and how to fix it. */
+  api.get("/ebay/setup", async (_req, res) => {
+    const cfg = getSetting(db, "ebay", {} as { fulfillmentPolicyId?: string; paymentPolicyId?: string; returnPolicyId?: string; merchantLocationKey?: string });
+    const steps: { key: string; label: string; done: boolean; detail: string; action?: string }[] = [];
+    const keys = ebayHasAppKeys();
+    steps.push({ key: "keys", label: "eBay developer keys", done: keys, detail: keys ? `Using ${ebayEnvironment()} keys` : "Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_RU_NAME and EBAY_ENV=production to .env, then restart" });
+    const live = ebayIsLive(db);
+    steps.push({ key: "connect", label: "Connect your eBay seller account", done: live, detail: live ? "Connected" : "Click Connect eBay, sign in, click Agree", action: keys && !live ? "connect" : undefined });
+    let opted = false;
+    let locations: { key: string }[] = [];
+    let err: string | null = null;
+    if (live) {
+      try {
+        opted = (await ebayOptedInPrograms(db)).includes("SELLING_POLICY_MANAGEMENT");
+        locations = await ebayLocations(db);
+      } catch (e) {
+        err = (e as Error).message;
+      }
+    }
+    steps.push({ key: "optin", label: "Turn on eBay business policies", done: opted, detail: opted ? "On" : "Required for listing through the API. One click (eBay can take a few minutes to apply it)", action: live && !opted ? "optin" : undefined });
+    const pol = Boolean(cfg.fulfillmentPolicyId && cfg.paymentPolicyId && cfg.returnPolicyId);
+    steps.push({ key: "policies", label: "Choose shipping, payment and return policies", done: pol, detail: pol ? "Chosen" : "Settings, eBay listing policies: Load from eBay, then pick one of each (create them in Seller Hub, Account, Business policies, if you have none)", action: live && opted && !pol ? "policies" : undefined });
+    const loc = Boolean(cfg.merchantLocationKey && (!live || locations.some((l) => l.key === cfg.merchantLocationKey)));
+    steps.push({ key: "location", label: "Register where items ship from", done: loc, detail: loc ? `Location "${cfg.merchantLocationKey}"` : "Uses your ship-from address in Settings", action: live && !loc ? "location" : undefined });
+    const pub = Boolean(process.env.PUBLIC_BASE_URL);
+    steps.push({ key: "photos", label: "Photos reachable by eBay", done: true, detail: pub ? `Served from ${process.env.PUBLIC_BASE_URL}` : "Uploaded to eBay's photo hosting automatically when you list (JPG/PNG/WebP)" });
+    res.json({ environment: ebayEnvironment(), ready: steps.every((x) => x.done), steps, error: err });
+  });
+  // Before listing: category + required item specifics this item is missing.
+  api.get("/items/:id/ebay-check", async (req, res) => {
+    const item = getItem(db, Number(req.params.id));
+    if (!item) return void res.status(404).json({ error: "Not found" });
+    if (!ebayHasAppKeys()) return void res.json({ demo: true, missing: [], category: null });
+    const cat = item.specifics["_ebayCategoryId"]
+      ? { id: item.specifics["_ebayCategoryId"], name: "(chosen)" }
+      : (await suggestCategory(db, `${item.title} ${item.category}`))[0];
+    if (!cat) return void res.json({ missing: [], category: null, warning: "eBay couldn't suggest a category - add a category to the item." });
+    const req_ = await ebayRequiredAspects(db, cat.id);
+    const have = new Set(Object.keys(item.specifics).map((k) => k.toLowerCase()).concat(item.brand ? ["brand"] : [], item.color ? ["color"] : [], item.size ? ["size"] : []));
+    res.json({ category: cat, missing: req_.filter((a) => !have.has(a.name.toLowerCase())) });
+  });
+
+  api.post("/ebay/optin", async (_req, res) => {
+    await ebayOptInBusinessPolicies(db);
+    res.json({ ok: true });
+  });
+  api.post("/ebay/location", async (_req, res) => {
+    const key = "flipdesk-main";
+    const from = getSetting(db, "shipFrom", {} as Record<string, string>);
+    try {
+      await ebayCreateLocation(db, key, from);
+    } catch (e) {
+      // Already exists is fine; anything else bubbles up.
+      if (!/already exists|25803|duplicate/i.test((e as Error).message)) throw e;
+    }
+    setSetting(db, "ebay", { ...getSetting(db, "ebay", {}), merchantLocationKey: key });
+    res.json({ ok: true, key });
+  });
+
   api.get("/ebay/policies", async (_req, res) => {
     if (!ebayIsLive(db)) return void res.status(400).json({ error: "Connect eBay first." });
     res.json(await fetchPolicies(db));
   });
 
   // ---------------- eBay power tools ----------------
-  api.get("/tools/stale", (req, res) => void res.json(staleListings(db, Number(req.query.days ?? 30))));
+  api.get("/tools/stale", (req, res) => {
+    const rows = staleListings(db, Number(req.query.days ?? 30));
+    const model = learn(db);
+    const traffic = latestTraffic(db);
+    res.json(
+      rows.map((r) => {
+        const item = getItem(db, r.itemId);
+        const t = r.marketplace === "ebay" ? traffic.get(r.listingId) : undefined;
+        return { ...r, advice: item ? advise(db, item, model, t) : null, traffic: t ?? null, diagnosis: t ? diagnose(t, r.daysListed) : null };
+      }),
+    );
+  });
+  api.get("/items/:id/price-advice", (req, res) => {
+    const item = getItem(db, Number(req.params.id));
+    if (!item) return void res.status(404).json({ error: "Not found" });
+    const ebay = item.listings.find((l) => l.marketplace === "ebay" && l.status === "active");
+    res.json(advise(db, item, learn(db), ebay ? latestTraffic(db).get(ebay.id) : undefined));
+  });
+  api.get("/price-model", (_req, res) => void res.json(learn(db)));
+  api.post("/traffic/import", memUploadShip.single("file"), (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose the traffic report CSV." });
+    res.json(importTrafficCsv(db, req.file.buffer.toString("utf8")));
+  });
+  api.post("/traffic/sync", async (_req, res) => void res.json({ updated: await syncEbayTraffic(db) }));
+  api.get("/traffic/summary", (_req, res) => {
+    const t = db.prepare("SELECT COUNT(DISTINCT external_id) AS listings, MAX(imported_at) AS last FROM listing_traffic").get() as { listings: number; last: string | null };
+    res.json({ ...t, ebayLive: ebayIsLive(db) });
+  });
   api.post("/tools/bulk-price", (req, res) => {
     const b = z.object({ itemIds: z.array(z.number()).min(1), pct: z.number().optional(), amount: z.number().optional(), set: z.number().optional() }).parse(req.body);
     const r = bulkPrice(db, b.itemIds, b);

@@ -84,6 +84,7 @@ export function crosslist(db: Db, itemId: number, marketplaces: MarketplaceId[],
       }
     }
     if (item.status === "draft" && out.length) db.prepare("UPDATE items SET status = 'active', updated_at = datetime('now') WHERE id = ?").run(itemId);
+    if (out.length) db.prepare("UPDATE items SET original_price = COALESCE(original_price, price) WHERE id = ? AND price > 0").run(itemId);
     if (out.length) {
       const names = [...new Set(out.map((o) => MARKETPLACES[o.marketplace].name))];
       logActivity(db, "crosslist", `Queued ${item.sku} to ${names.join(", ")}${out.length > names.length ? ` (${out.length} listings incl. variations)` : ""}`, itemId);

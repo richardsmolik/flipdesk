@@ -9,6 +9,7 @@ import { applyAutoPriceDrops } from "./services/ebayTools.js";
 import { pollImap } from "./services/email.js";
 import { sendDigest } from "./services/digest.js";
 import { syncEbayLabelCosts } from "./services/shipping.js";
+import { syncEbayTraffic } from "./services/traffic.js";
 
 // Minimal .env loader (no dependency).
 if (fs.existsSync(".env")) {
@@ -19,7 +20,8 @@ if (fs.existsSync(".env")) {
 }
 
 const db = openDb();
-const app = createApp(db);
+const app = createApp(db, { uploadDir: process.env.FLIPDESK_UPLOADS });
+app.set("trust proxy", 1); // behind Fly/Cloudflare/Render HTTPS proxies
 
 if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
   app.use(express.static("dist"));
@@ -55,3 +57,4 @@ every(60 * 60_000, "auto-drop", () => applyAutoPriceDrops(db));
 every(2 * 60_000, "email", () => pollImap(db)); // sale emails from every marketplace
 every(15 * 60_000, "weekly", () => sendDigest(db)); // Monday-morning summary (once per week)
 every(30 * 60_000, "ebay-labels", () => syncEbayLabelCosts(db)); // exact eBay label costs -> profit
+every(12 * 60 * 60_000, "ebay-traffic", () => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"

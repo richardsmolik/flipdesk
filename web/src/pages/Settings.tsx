@@ -199,6 +199,7 @@ export default function Settings() {
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">Automatic price drops</h2>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoDrop.enabled} onChange={(e) => setS({ ...s, autoDrop: { ...autoDrop, enabled: e.target.checked } })} /> Enabled (never below each item's floor price)</label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!(autoDrop as { smart?: boolean }).smart} onChange={(e) => setS({ ...s, autoDrop: { ...autoDrop, smart: e.target.checked } as typeof autoDrop })} /> 💡 Smart: learn from my sales when and how much to drop, per category (falls back to the fixed % below until there's enough history)</label>
         <div className="grid grid-cols-3 gap-3 text-sm">
           <div><label className="label">Start after (days)</label><input className="input" type="number" value={autoDrop.afterDays} onChange={(e) => setS({ ...s, autoDrop: { ...autoDrop, afterDays: Number(e.target.value) } })} /></div>
           <div><label className="label">Repeat every (days)</label><input className="input" type="number" value={autoDrop.everyDays} onChange={(e) => setS({ ...s, autoDrop: { ...autoDrop, everyDays: Number(e.target.value) } })} /></div>
@@ -208,7 +209,7 @@ export default function Settings() {
 
       <section className="card space-y-3 p-4">
         <div className="flex items-center justify-between">
-          <h2 className="font-semibold">eBay listing policies</h2>
+          <h2 id="ebay" className="font-semibold">eBay listing policies</h2>
           <button className="btn-ghost text-xs" disabled={!s.status.ebayLive} onClick={async () => { try { setPolicies(await api.get("/api/ebay/policies")); } catch (e) { toast((e as Error).message, "err"); } }}>Load from eBay</button>
         </div>
         <div className="grid grid-cols-2 gap-3">

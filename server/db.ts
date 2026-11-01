@@ -294,6 +294,39 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       ALTER TABLE sales ADD COLUMN label_url TEXT;
     `);
   },
+  // v5: photo cleanup (originals), eBay-hosted photo URLs, price history, eBay traffic
+  (db) => {
+    db.exec(`
+      ALTER TABLE photos ADD COLUMN original_path TEXT;
+      ALTER TABLE photos ADD COLUMN ebay_url TEXT;
+      ALTER TABLE photos ADD COLUMN ebay_url_expires TEXT;
+      ALTER TABLE items ADD COLUMN original_price REAL;
+      UPDATE items SET original_price = price WHERE price > 0;
+      CREATE TABLE IF NOT EXISTS price_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        old_price REAL NOT NULL,
+        new_price REAL NOT NULL,
+        reason TEXT NOT NULL DEFAULT 'manual',   -- manual | bulk | auto_drop | smart_drop
+        at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_price_changes_item ON price_changes(item_id);
+      CREATE TABLE IF NOT EXISTS listing_traffic (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        external_id TEXT NOT NULL,                -- eBay item ID
+        listing_id INTEGER REFERENCES listings(id) ON DELETE SET NULL,
+        impressions INTEGER NOT NULL DEFAULT 0,
+        views INTEGER NOT NULL DEFAULT 0,
+        ctr REAL,                                 -- % of impressions that became views
+        sold INTEGER NOT NULL DEFAULT 0,
+        conversion REAL,                          -- % of views that became sales
+        period_days INTEGER,
+        source TEXT NOT NULL DEFAULT 'csv',       -- csv | api
+        imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_traffic_ext ON listing_traffic(external_id);
+    `);
+  },
 ];
 
 function migrate(db: DatabaseSync) {
@@ -364,6 +397,7 @@ export interface ItemRow {
   cost: number;
   price: number;
   min_price: number | null;
+  original_price?: number | null;
   quantity: number;
   quantity_purchased: number;
   weight_oz: number | null;
@@ -422,14 +456,14 @@ export interface Item extends Omit<ItemRow, "specifics" | "keywords"> {
   variations: Variation[];
   specifics: Record<string, string>;
   keywords: string[];
-  photos: { id: number; url: string }[];
+  photos: { id: number; url: string; edited?: boolean }[];
   listings: ListingRow[];
 }
 
 export function hydrateItem(db: Db, row: ItemRow): Item {
   const photos = db
-    .prepare("SELECT id, path FROM photos WHERE item_id = ? ORDER BY position, id")
-    .all(row.id) as { id: number; path: string }[];
+    .prepare("SELECT id, path, original_path FROM photos WHERE item_id = ? ORDER BY position, id")
+    .all(row.id) as { id: number; path: string; original_path: string | null }[];
   const listings = db.prepare("SELECT * FROM listings WHERE item_id = ? ORDER BY marketplace").all(row.id) as unknown as ListingRow[];
   const sold = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS n FROM sales WHERE item_id = ?").get(row.id) as { n: number };
   return {
@@ -438,7 +472,7 @@ export function hydrateItem(db: Db, row: ItemRow): Item {
     variations: getVariations(db, row.id),
     specifics: JSON.parse(row.specifics || "{}"),
     keywords: JSON.parse(row.keywords || "[]"),
-    photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : `/uploads/${path.basename(p.path)}` })),
+    photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : `/uploads/${path.basename(p.path)}`, edited: Boolean(p.original_path) })),
     listings,
   };
 }
