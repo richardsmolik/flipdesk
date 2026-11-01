@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { money } from "../api";
 import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
+import { GetStarted } from "../components/Onboarding";
+import { useEffect as useEffect_, useReducer } from "react";
 
 interface Dash {
   inventory: { active: number; draft: number; value: number; costBasis: number; units: number };
@@ -86,6 +88,11 @@ function ProfitChart({ data }: { data: Dash["daily"] }) {
 
 export default function Dashboard() {
   const { data: d } = useFetch<Dash>("/api/dashboard");
+  const [gsKey, bump] = useReducer((x: number) => x + 1, 0);
+  useEffect_(() => {
+    window.addEventListener("fd-onboarding-changed", bump);
+    return () => window.removeEventListener("fd-onboarding-changed", bump);
+  }, []);
   const { byId } = useMarketplaces();
   if (!d) return <div className="text-zinc-500">Loading…</div>;
   return (
@@ -98,6 +105,8 @@ export default function Dashboard() {
           <Link to="/switch" className="btn-ghost">Coming from Vendoo / List Perfectly?</Link>
         </div>
       </div>
+
+      <GetStarted key={gsKey} onWelcome={() => window.dispatchEvent(new Event("fd-open-welcome"))} />
 
       {d.alerts.filter((a) => a.severity === "critical").map((a) => (
         <Link key={a.id} to="/inbox" className="block rounded-lg border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-100 hover:bg-red-950">

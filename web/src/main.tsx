@@ -1,9 +1,11 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { api } from "./api";
 import { Toaster } from "./ui";
+import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
+import { Welcome, type OnboardingState } from "./components/Onboarding";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import ItemEditor from "./pages/ItemEditor";
@@ -25,26 +27,6 @@ import PhoneCapture from "./pages/PhoneCapture";
 import Shoot from "./pages/Shoot";
 import Switch from "./pages/Switch";
 
-const NAV = [
-  ["/", "Dashboard", "📊"],
-  ["/inbox", "Inbox", "🔔"],
-  ["/items/new", "New listing", "✨"],
-  ["/bulk", "Bulk upload", "🗂️"],
-  ["/shoot", "Shoot (phone)", "📷"],
-  ["/source", "Sourcing mode", "🛒"],
-  ["/inventory", "Inventory", "📦"],
-  ["/bins", "Bins", "🗄️"],
-  ["/shipping", "Shipping", "🚚"],
-  ["/sales", "Sales & profit", "💵"],
-  ["/reports", "Reports", "📈"],
-  ["/mileage", "Mileage", "🚗"],
-  ["/bundles", "Bundles", "🎁"],
-  ["/tools", "Power tools", "⚡"],
-  ["/queue", "Sync queue", "🔄"],
-  ["/connections", "Marketplaces", "🔌"],
-  ["/settings", "Settings", "⚙️"],
-  ["/switch", "Switch to FlipDesk", "🔀"],
-] as const;
 
 function Login() {
   const [pw, setPw] = useState("");
@@ -80,48 +62,30 @@ function Shell() {
     return () => window.removeEventListener("fd-login-required", f);
   }, []);
   const [health, setHealth] = useState<{ ai: string; ebay: string } | null>(null);
+  const counts = useNavCounts();
+  const [welcome, setWelcome] = useState(false);
+  useEffect(() => {
+    api.get<OnboardingState>("/api/onboarding").then((o) => setWelcome(o.showWelcome)).catch(() => {});
+    const open = () => setWelcome(true);
+    window.addEventListener("fd-open-welcome", open);
+    return () => window.removeEventListener("fd-open-welcome", open);
+  }, []);
   useEffect(() => void api.get<{ ai: string; ebay: string }>("/api/health").then(setHealth).catch(() => {}), []);
   if (needLogin) return <Login />;
   return (
     <div className="flex min-h-screen">
-      <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 p-3 md:flex">
-        <div className="mb-6 px-2 pt-2 text-lg font-bold tracking-tight">
-          📦 Flip<span className="text-brand">Desk</span>
-        </div>
-        <nav className="space-y-0.5">
-          {NAV.map(([to, label, icon]) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === "/"}
-              className={({ isActive }) =>
-                `flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${isActive ? "bg-zinc-800 text-white" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100"}`
-              }
-            >
-              <span aria-hidden>{icon}</span>
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-        {health && (
-          <div className="mt-auto space-y-1 px-2 text-[11px] text-zinc-500">
-            <div>
-              AI writer: <span className={health.ai === "live" ? "text-green-400" : "text-amber-400"}>{health.ai}</span>
+      <Sidebar
+        counts={counts}
+        footer={
+          health && (
+            <div className="space-y-1 px-2 text-[11px] text-zinc-500">
+              <div>AI writer: <span className={health.ai === "live" ? "text-green-400" : "text-amber-400"}>{health.ai}</span></div>
+              <div>eBay API: <span className={health.ebay === "live" ? "text-green-400" : "text-amber-400"}>{health.ebay}</span></div>
             </div>
-            <div>
-              eBay API: <span className={health.ebay === "live" ? "text-green-400" : "text-amber-400"}>{health.ebay}</span>
-            </div>
-          </div>
-        )}
-      </aside>
-      <main className="min-w-0 flex-1 p-4 md:p-8">
-        <nav className="mb-4 flex gap-1 overflow-x-auto md:hidden">
-          {NAV.map(([to, label]) => (
-            <NavLink key={to} to={to} end={to === "/"} className="whitespace-nowrap rounded bg-zinc-900 px-2 py-1 text-xs">
-              {label}
-            </NavLink>
-          ))}
-        </nav>
+          )
+        }
+      />
+      <main className="min-w-0 flex-1 p-4 pb-24 md:p-8">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/inventory" element={<Inventory />} />
@@ -145,6 +109,8 @@ function Shell() {
           <Route path="/bins/:name" element={<BinDetail />} />
         </Routes>
       </main>
+      <MobileBar counts={counts} />
+      {welcome && <Welcome onDone={() => (setWelcome(false), window.dispatchEvent(new Event("fd-onboarding-changed")))} />}
       <Toaster />
     </div>
   );

@@ -21,6 +21,7 @@ import { checkItem } from "./services/sourcing.js";
 import { isImageUpload, normalizeUploads } from "./services/uploads.js";
 import { importInventory, previewInventory } from "./services/inventoryImport.js";
 import { findDuplicates } from "./services/duplicates.js";
+import { onboarding, saveProfile } from "./services/onboarding.js";
 import { aiStatus, scheduleAutoWrite } from "./services/autowrite.js";
 import { importSales, previewSales } from "./services/salesImport.js";
 import { checkUploadToken, createUploadToken, MAX_PER_TOKEN, phoneAddresses } from "./services/phone.js";
@@ -182,6 +183,29 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   });
 
   api.get("/dashboard", (_req, res) => void res.json(dashboard(db)));
+  api.get("/onboarding", (_req, res) => void res.json(onboarding(db)));
+  api.post("/onboarding/profile", (req, res) => {
+    const b = z
+      .object({ marketplaces: z.array(z.string()).max(11), sells: z.array(z.string()).max(10).default([]), experience: z.enum(["new", "growing", "fulltime"]).default("growing") })
+      .parse(req.body);
+    saveProfile(db, b as Parameters<typeof saveProfile>[1]);
+    res.json(onboarding(db));
+  });
+  api.post("/onboarding/dismiss", (req, res) => {
+    const b = z.object({ dismissed: z.boolean().optional(), checklist: z.boolean().optional() }).parse(req.body ?? {});
+    if (b.checklist !== undefined) setSetting(db, "checklistHidden", b.checklist);
+    else setSetting(db, "onboardingDismissed", b.dismissed ?? true);
+    res.json(onboarding(db));
+  });
+  api.get("/nav-counts", (_req, res) => {
+    const n = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+    res.json({
+      inbox: n("SELECT COUNT(*) AS n FROM alerts WHERE resolved_at IS NULL"),
+      toShip: n("SELECT COUNT(*) AS n FROM sales WHERE shipped_at IS NULL AND sold_at >= datetime('now','-30 days')"),
+      drafts: n("SELECT COUNT(*) AS n FROM items WHERE status = 'draft'"),
+      failed: n("SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND updated_at >= datetime('now','-7 days')"),
+    });
+  });
   api.get("/reports", (req, res) => void res.json(profitReport(db, Number(req.query.days ?? 365))));
 
   // ---------------- Items ----------------

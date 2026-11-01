@@ -199,6 +199,7 @@ function EditItem({ id }: { id: number }) {
   const shipping = 0;
   const { data: recs, reload: reloadRecs } = useFetch<Rec[]>(`/api/items/${id}/recommend?shipping=${shipping}`, [item?.price, item?.cost]);
   const [picked, setPicked] = useState<string[]>([]);
+  const { data: ob } = useFetch<{ defaultMarketplaces: string[] }>("/api/onboarding");
   const photoInput = useRef<HTMLInputElement>(null);
   const [viewPhoto, setViewPhoto] = useState<number | null>(null);
   const [editPhoto, setEditPhoto] = useState<number | null>(null);
@@ -217,12 +218,14 @@ function EditItem({ id }: { id: number }) {
     api.get<{ draft: Draft | null }>(`/api/items/${id}/ai-status`).then((r) => r.draft && setDraft(r.draft)).catch(() => {});
   }, [id, item?.title]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (recs && !picked.length) {
+    if (recs && ob && !picked.length) {
       const live = new Set(item?.listings.filter((l) => ["active", "queued"].includes(l.status)).map((l) => l.marketplace));
-      setPicked((draft?.best_marketplaces ?? recs.slice(0, 4).map((r) => r.marketplace)).filter((m) => !live.has(m)).slice(0, 4));
+      // Your own sites (from the welcome questions) first; otherwise the AI's / fee ranking's picks.
+      const mine = ob?.defaultMarketplaces?.length ? ob.defaultMarketplaces : null;
+      setPicked((mine ?? draft?.best_marketplaces ?? recs.slice(0, 4).map((r) => r.marketplace)).filter((m) => !live.has(m)).slice(0, mine ? 11 : 4));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recs]);
+  }, [recs, ob]);
 
   if (!item) return <div className="text-zinc-500">Loading…</div>;
   const set = <K extends keyof Item>(k: K, v: Item[K]) => setForm((f) => ({ ...f, [k]: v }));
