@@ -11,6 +11,7 @@ import path from "node:path";
 import { getSetting, logActivity, type Db } from "../db.js";
 import { parseCsv } from "./comps.js";
 import { normalizeImage } from "./uploads.js";
+import { countTitleMatches } from "./duplicates.js";
 
 type Field = "title" | "description" | "brand" | "category" | "condition" | "price" | "cost" | "quantity" | "sku" | "location" | "images" | "ebayId" | "size" | "color" | "notes" | "source";
 
@@ -139,6 +140,8 @@ export function previewInventory(db: Db, text: string) {
   if (!found.price) warnings.push("No price column found - items import with price $0 (you can set prices after).");
   if (!found.cost) warnings.push("No cost column found - profit will assume $0 cost until you fill it in.");
   if (dupes) warnings.push(`${dupes} row(s) have a SKU that already exists and will be skipped.`);
+  const lookalikes = countTitleMatches(db, rows.filter((r) => !r.sku || !db.prepare("SELECT 1 FROM items WHERE sku = ?").get(r.sku)).map((r) => r.title));
+  if (lookalikes) warnings.push(`${lookalikes} item(s) look like things already in your inventory (same title). Check for duplicates after importing.`);
   return {
     columns: found,
     total: rows.length,

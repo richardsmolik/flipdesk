@@ -21,6 +21,7 @@ import { Labels, PackingSlips, PickList } from "./pages/Print";
 import { BinDetail, BinList } from "./pages/Bins";
 import Mileage from "./pages/Mileage";
 import Bulk from "./pages/Bulk";
+import PhoneCapture from "./pages/PhoneCapture";
 
 const NAV = [
   ["/", "Dashboard", "📊"],
@@ -151,6 +152,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/print/slips" element={<PackingSlips />} />
         <Route path="/print/picklist" element={<PickList />} />
         <Route path="/print/labels" element={<Labels />} />
+        <Route path="/m/:token" element={<PhoneCapture />} />
         <Route path="*" element={<Shell />} />
       </Routes>
     </BrowserRouter>

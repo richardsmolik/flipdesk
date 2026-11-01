@@ -7,6 +7,8 @@ import VariationsCard from "../components/Variations";
 import Lightbox from "../components/Lightbox";
 import EbayCheck from "../components/EbayCheck";
 import PhotoEditor from "../components/PhotoEditor";
+import PhoneUpload from "../components/PhoneUpload";
+import Duplicates from "../components/Duplicates";
 
 interface Draft {
   title: string;
@@ -162,6 +164,18 @@ function NewItem() {
           {busy ?? "✨ Generate listing with AI"}
         </button>
         <button className="btn-ghost" disabled={!!busy} onClick={() => create(false)}>Fill in manually</button>
+        <button
+          className="btn-ghost"
+          disabled={!!busy}
+          title="Take the photos with your phone"
+          onClick={async () => {
+            const units = Math.max(1, Number(qty) || 1);
+            const item = await api.post<Item>("/api/items", { cost: Number(cost) || 0, quantity: units, quantity_purchased: units, notes: hint });
+            nav(`/items/${item.id}?phone=1`);
+          }}
+        >
+          📱 Use phone
+        </button>
       </div>
     </div>
   );
@@ -189,6 +203,7 @@ function EditItem({ id }: { id: number }) {
   const [viewPhoto, setViewPhoto] = useState<number | null>(null);
   const [editPhoto, setEditPhoto] = useState<number | null>(null);
   const [uploadPct, setUploadPct] = useState<number | null>(null);
+  const [phone, setPhone] = useState(() => new URLSearchParams(location.search).get("phone") === "1");
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const { data: priceAdvice } = useFetch<{ action: string; pct: number; newPrice: number | null; reason: string; confidence: string; basis: string }>(item?.status === "active" ? `/api/items/${id}/price-advice` : null, [item?.price, item?.status]);
   const { data: lotParts } = useFetch<{ itemId: number; quantity: number; sku: string; title: string; price: number; available: number }[]>(`/api/items/${id}/bundle`, [item?.quantity]);
@@ -275,7 +290,10 @@ function EditItem({ id }: { id: number }) {
           <div className="card p-4">
             <div className="mb-2 flex items-center justify-between">
               <h2 className="text-sm font-semibold">Photos ({item.photos.length})</h2>
-              <button className="text-xs text-brand hover:underline" onClick={() => photoInput.current?.click()}>+ Add photos</button>
+              <span className="flex gap-3">
+                <button className="text-xs text-brand hover:underline" onClick={() => setPhone(true)}>📱 From phone</button>
+                <button className="text-xs text-brand hover:underline" onClick={() => photoInput.current?.click()}>+ Add photos</button>
+              </span>
               <input
                 ref={photoInput}
                 type="file"
@@ -347,6 +365,8 @@ function EditItem({ id }: { id: number }) {
               ))}
             </div>
           </div>
+
+          <Duplicates itemId={id} refreshKey={`${item.photos.length}-${item.title}`} />
 
           {!!lotParts?.length && (
             <div className="card p-4 text-sm">
@@ -551,6 +571,7 @@ function EditItem({ id }: { id: number }) {
         </div>
       </div>
 
+      {phone && <PhoneUpload item={item} onClose={() => (setPhone(false), history.replaceState(null, "", location.pathname))} onPhotos={setData} />}
       {editPhoto !== null && item.photos.some((p) => p.id === editPhoto) && <PhotoEditor item={item} photoId={editPhoto} onClose={() => setEditPhoto(null)} onSaved={setData} />}
       {viewPhoto !== null && <Lightbox item={item} start={viewPhoto} onClose={() => setViewPhoto(null)} />}
       <SoldModal open={modal === "sold"} item={item} onClose={() => setModal(null)} onDone={(i) => (setData(i), setModal(null))} />

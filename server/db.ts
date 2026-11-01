@@ -327,6 +327,19 @@ const MIGRATIONS: ((db: DatabaseSync) => void)[] = [
       CREATE INDEX IF NOT EXISTS idx_traffic_ext ON listing_traffic(external_id);
     `);
   },
+  // v6: phone upload links, photo fingerprints (duplicate detection)
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS upload_tokens (
+        token TEXT PRIMARY KEY,
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        uploads INTEGER NOT NULL DEFAULT 0,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      ALTER TABLE photos ADD COLUMN phash TEXT;
+    `);
+  },
 ];
 
 function migrate(db: DatabaseSync) {

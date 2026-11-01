@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, money } from "../api";
 import { Modal, MpBadge, Stat, toast, useFetch, useMarketplaces } from "../ui";
+import ImportSales from "../components/ImportSales";
 
 interface Sale {
   id: number; item_id: number; sku: string; title: string; marketplace: string; quantity: number; sale_price: number;
@@ -15,6 +16,7 @@ export default function Sales() {
   const { data: expenses, reload: reloadExp } = useFetch<Expense[]>("/api/expenses");
   const { byId } = useMarketplaces();
   const [returning, setReturning] = useState<Sale | null>(null);
+  const [importing, setImporting] = useState(false);
   const [exp, setExp] = useState({ category: "supplies", amount: "", note: "" });
   const s = sales ?? [];
   const sum = (f: (x: Sale) => number) => s.reduce((a, x) => a + f(x), 0);
@@ -26,8 +28,9 @@ export default function Sales() {
         <h1 className="text-2xl font-semibold">Sales & profit</h1>
         <div className="flex flex-wrap gap-2">
           <select className="input w-auto" value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            {[7, 30, 90, 365].map((d) => <option key={d} value={d}>Last {d} days</option>)}
+            {[7, 30, 90, 365, 3650].map((d) => <option key={d} value={d}>{d === 3650 ? "All time" : `Last ${d} days`}</option>)}
           </select>
+          <button className="btn-ghost" onClick={() => setImporting(true)}>⬆ Import sold history</button>
           <a className="btn-ghost" href={`/api/export/sales.csv?year=${year}`}>⬇ Sales CSV {year}</a>
           <a className="btn-ghost" href={`/api/export/expenses.csv?year=${year}`}>⬇ Expenses CSV</a>
         </div>
@@ -68,6 +71,7 @@ export default function Sales() {
         </table>
       </div>
 
+      <ImportSales open={importing} onClose={() => setImporting(false)} onDone={() => (setImporting(false), setDays(3650), reloadSales())} />
       {returning && <ReturnModal sale={returning} onClose={() => setReturning(null)} onDone={() => (setReturning(null), reloadSales())} />}
 
       <div className="card p-4">

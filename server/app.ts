@@ -20,6 +20,9 @@ import { compsLibrary, importComps } from "./services/comps.js";
 import { checkItem } from "./services/sourcing.js";
 import { isImageUpload, normalizeUploads } from "./services/uploads.js";
 import { importInventory, previewInventory } from "./services/inventoryImport.js";
+import { findDuplicates } from "./services/duplicates.js";
+import { importSales, previewSales } from "./services/salesImport.js";
+import { checkUploadToken, createUploadToken, MAX_PER_TOKEN, phoneAddresses } from "./services/phone.js";
 import { advise, learn, recordPriceChange } from "./services/priceAdvice.js";
 import { diagnose, importTrafficCsv, latestTraffic, syncEbayTraffic } from "./services/traffic.js";
 import { adviceToOps, aiAdvice, capabilities as photoCaps, editPhoto, retouchPhoto, revertPhoto, type EditOp } from "./services/photos.js";
@@ -104,6 +107,33 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     next();
   });
   app.use("/uploads", express.static(uploadDir, { maxAge: "7d" }));
+
+  // Phone upload links (token-only; works without logging in on the phone).
+  app.get("/api/m/:token", (req, res) => {
+    try {
+      const t = checkUploadToken(db, String(req.params.token));
+      const item = getItem(db, t.item_id)!;
+      res.json({ title: item.title || "New item", sku: item.sku, photos: item.photos.map((p) => p.url), expiresAt: t.expires_at, remaining: MAX_PER_TOKEN - t.uploads });
+    } catch (e) {
+      res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
+    }
+  });
+  app.post("/api/m/:token/photos", (req, res, next) => {
+    try {
+      checkUploadToken(db, String(req.params.token));
+      next();
+    } catch (e) {
+      res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
+    }
+  }, upload.array("photos", 20), normalizeUploads, (req, res) => {
+    const t = checkUploadToken(db, String(req.params.token));
+    const files = ((req.files as Express.Multer.File[]) ?? []).slice(0, Math.max(0, MAX_PER_TOKEN - t.uploads));
+    const start = (db.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM photos WHERE item_id = ?").get(t.item_id) as { p: number }).p;
+    files.forEach((f, i) => db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(t.item_id, f.path, start + i));
+    db.prepare("UPDATE upload_tokens SET uploads = uploads + ? WHERE token = ?").run(files.length, t.token);
+    db.prepare("UPDATE items SET updated_at = datetime('now') WHERE id = ?").run(t.item_id);
+    res.json({ added: files.length, total: (db.prepare("SELECT COUNT(*) AS n FROM photos WHERE item_id = ?").get(t.item_id) as { n: number }).n });
+  });
 
   // eBay Marketplace Account Deletion notifications (required for production keysets when hosted). No login: eBay calls it.
   app.get("/api/ebay/account-deletion", async (req, res) => {
@@ -275,6 +305,14 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
     files.forEach((f, i) => db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(id, f.path, start + i));
     const skipped = (req as typeof req & { skippedUploads?: string[] }).skippedUploads ?? [];
     res.json({ ...getItem(db, id), skippedUploads: skipped });
+  });
+
+  api.get("/items/:id/duplicates", async (req, res) => void res.json(await findDuplicates(db, Number(req.params.id))));
+
+  api.post("/items/:id/phone-link", (req, res) => {
+    const id = Number(req.params.id);
+    if (!getItem(db, id)) return void res.status(404).json({ error: "Not found" });
+    res.json({ ...createUploadToken(db, id), ...phoneAddresses() });
   });
 
   api.post("/items/:id/photos/order", (req, res) => {
@@ -634,6 +672,16 @@ export function createApp(db: Db, opts: { uploadDir?: string } = {}) {
   api.post("/import/inventory", csvUpload.single("file"), async (req, res) => {
     if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
     res.json(await importInventory(db, req.file.buffer.toString("utf8"), { uploadDir, downloadPhotos: req.body.photos !== "0" }));
+  });
+
+  const mpParam = (v: unknown) => (typeof v === "string" && isMarketplaceId(v) ? v : undefined);
+  api.post("/import/sales/preview", csvUpload.single("file"), (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
+    res.json(previewSales(db, req.file.buffer.toString("utf8"), mpParam(req.body.marketplace)));
+  });
+  api.post("/import/sales", csvUpload.single("file"), (req, res) => {
+    if (!req.file) return void res.status(400).json({ error: "Choose a CSV file." });
+    res.json(importSales(db, req.file.buffer.toString("utf8"), mpParam(req.body.marketplace)));
   });
 
   // ---------------- Sold comps library (Terapeak etc) ----------------

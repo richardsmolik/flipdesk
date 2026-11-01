@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, uploadWithProgress, type Item } from "../api";
 import { toast } from "../ui";
 import FileThumb from "../components/FileThumb";
+import Duplicates from "../components/Duplicates";
 
 /**
  * Bulk upload: drop a folder (or a pile of photos) for many items at once.
@@ -181,7 +182,12 @@ export default function Bulk() {
                   )}
                   {st?.state === "uploading" && <span className="text-zinc-400">Uploading {st.pct ?? 0}%</span>}
                   {st?.state === "writing" && <span className="text-blue-300">✨ AI writing…</span>}
-                  {st?.state === "done" && st.itemId && <Link className="text-green-400 hover:underline" to={`/items/${st.itemId}`}>✓ Draft ready - review</Link>}
+                  {st?.state === "done" && st.itemId && (
+                    <>
+                      <Duplicates itemId={st.itemId} compact />
+                      <Link className="text-green-400 hover:underline" to={`/items/${st.itemId}`}>✓ Draft ready - review</Link>
+                    </>
+                  )}
                   {st?.state === "error" && <span className="text-red-300">⚠ {st.error}</span>}
                 </span>
               </div>
