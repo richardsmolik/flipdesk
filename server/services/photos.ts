@@ -19,6 +19,7 @@ import path from "node:path";
 import type { Db } from "../db.js";
 import { aiIsLive, MODEL } from "./ai.js";
 import { useAi } from "../context.js";
+import { trackAnthropic } from "../health.js";
 
 export type EditOp =
   | { type: "rotate"; deg: number } // any angle; 90/180/270 for orientation, small values to straighten
@@ -264,7 +265,7 @@ export async function aiAdvice(db: Db, id: number): Promise<{ advice: PhotoAdvic
   }
   useAi("photo");
   const small = await sharp(fs.readFileSync(p.path)).rotate().resize(1200, 1200, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
-  const client = new Anthropic();
+  const client = trackAnthropic(new Anthropic());
   const r = await client.beta.messages.parse({
     model: MODEL,
     max_tokens: 4000,

@@ -82,6 +82,14 @@ async function stripe<T>(path: string, body: URLSearchParams): Promise<T> {
   return j;
 }
 
+export async function stripeGet<T>(pathName: string): Promise<T> {
+  const r = await fetch(`https://api.stripe.com/v1/${pathName}`, { headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` } });
+  const j = (await r.json()) as T & { error?: { message?: string } };
+  if (!r.ok) throw Object.assign(new Error(`Stripe: ${j.error?.message ?? r.status}`), { status: 502 });
+  return j;
+}
+export const stripePost = <T>(pathName: string, body: Record<string, string | number | undefined>) => stripe<T>(pathName, form(body));
+
 export async function checkoutUrl(u: BillingRow, base: string) {
   const trialEnd = Math.floor(parseTime(u.trial_ends_at) / 1000);
   // Subscribing early? Don't charge until the free trial would have ended (Stripe needs 48h+ notice).

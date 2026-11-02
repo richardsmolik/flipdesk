@@ -114,9 +114,74 @@ function YourData() {
   );
 }
 
+/** "flipdesk-20261102-031500.zip" -> local date and time */
+function backupWhen(name: string) {
+  const m = name.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})?/);
+  if (!m) return name;
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] ?? 0))).toLocaleString();
+}
+
+function RestoreDialog({ name, onClose }: { name: string; onClose: () => void }) {
+  const [parts, setParts] = useState<{ part: string; label: string; bytes: number; photos: number }[] | null>(null);
+  const [pick, setPick] = useState<string[]>([]);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.get<{ parts: { part: string; label: string; bytes: number; photos: number }[] }>(`/api/backups/${name}/contents`).then((r) => (setParts(r.parts), setPick(r.parts.filter((p) => !p.part.endsWith(".db")).map((p) => p.part))), (e: Error) => toast(e.message, "err"));
+  }, [name]);
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="card max-h-[90vh] w-full max-w-lg space-y-3 overflow-y-auto bg-zinc-900 p-5" onClick={(e) => e.stopPropagation()}>
+        <h2 className="font-semibold">Restore from {backupWhen(name)}</h2>
+        <p className="text-sm text-zinc-400">What you pick is put back exactly as it was then. Anything newer in those parts is replaced.</p>
+        <p className="text-sm text-green-300">🛟 Safe to try: FlipDesk makes a fresh backup first (your undo button), and keeps the replaced files in data/restore-trash.</p>
+        {!parts ? (
+          <div className="text-sm text-zinc-500">Reading the backup…</div>
+        ) : (
+          <div className="space-y-1">
+            {parts.map((p) => (
+              <label key={p.part} className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={pick.includes(p.part)} onChange={(e) => setPick(e.target.checked ? [...pick, p.part] : pick.filter((x) => x !== p.part))} />
+                <span className="text-zinc-200">{p.label}</span>
+                <span className="text-xs text-zinc-500">{mb(p.bytes)}{p.photos ? ` · ${p.photos} photos` : ""}</span>
+              </label>
+            ))}
+            {pick.includes("accounts.db") && <p className="text-xs text-amber-400">Restoring sign-ins may sign people out, and undoes newer sign-ups and plan changes.</p>}
+          </div>
+        )}
+        <label className="block text-sm">
+          Type <b>RESTORE</b> to confirm
+          <input className="input mt-1" value={typed} onChange={(e) => setTyped(e.target.value)} />
+        </label>
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button
+            className="btn-primary"
+            disabled={busy || typed !== "RESTORE" || !pick.length}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const r = await api.post<{ restored: string[]; undoBackup: string }>(`/api/backups/${name}/restore`, { parts: pick, confirm: "RESTORE" });
+                toast(`Restored. Undo copy: ${backupWhen(r.undoBackup)}`);
+                setTimeout(() => location.reload(), 900);
+              } catch (e) {
+                toast((e as Error).message, "err");
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Restoring…" : "Restore"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Backups() {
   const [b, setB] = useState<BackupState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
   useEffect(() => void api.get<BackupState>("/api/backups").then(setB).catch(() => {}), []);
   if (!b) return null;
   return (
@@ -156,11 +221,15 @@ function Backups() {
       {b.files.length > 0 && (
         <ul className="space-y-1 text-sm">
           {b.files.map((f) => (
-            <li key={f.name} className="flex justify-between gap-2"><a className="text-brand hover:underline" href={`/api/backups/${f.name}`}>{f.name}</a><span className="text-zinc-500">{mb(f.bytes)}</span></li>
+            <li key={f.name} className="flex items-center justify-between gap-2">
+              <a className="text-brand hover:underline" href={`/api/backups/${f.name}`}>{backupWhen(f.name)}</a>
+              <span className="flex items-center gap-2 text-zinc-500">{mb(f.bytes)}<button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => setRestoring(f.name)}>Restore…</button></span>
+            </li>
           ))}
         </ul>
       )}
-      <p className="text-xs text-zinc-500">To restore: stop FlipDesk, unzip a backup and copy its files back into the data folder (see docs/DEPLOY.md).</p>
+      {restoring && <RestoreDialog name={restoring} onClose={() => setRestoring(null)} />}
+      <p className="text-xs text-zinc-500">Restore… puts a backup back right here (a fresh backup is made first, so it can be undone).</p>
     </section>
   );
 }

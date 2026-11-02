@@ -126,3 +126,53 @@ export function readZip(buf: Buffer): Map<string, Buffer> {
   }
   return out;
 }
+
+export interface ZipEntryInfo { name: string; method: number; csize: number; size: number; offset: number }
+
+/** List a zip file's contents without loading it into memory. */
+export function zipEntries(file: string): ZipEntryInfo[] {
+  const fd = fs.openSync(file, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    const tailLen = Math.min(size, 22 + 65535);
+    const tail = Buffer.alloc(tailLen);
+    fs.readSync(fd, tail, 0, tailLen, size - tailLen);
+    const at = tail.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    if (at < 0) throw new Error("Not a zip file");
+    const count = tail.readUInt16LE(at + 10);
+    const cdSize = tail.readUInt32LE(at + 12);
+    const cdOff = tail.readUInt32LE(at + 16);
+    const cd = Buffer.alloc(cdSize);
+    fs.readSync(fd, cd, 0, cdSize, cdOff);
+    const out: ZipEntryInfo[] = [];
+    let p = 0;
+    for (let i = 0; i < count; i++) {
+      if (cd.readUInt32LE(p) !== 0x02014b50) throw new Error("Damaged zip file");
+      const nlen = cd.readUInt16LE(p + 28);
+      const elen = cd.readUInt16LE(p + 30);
+      const clen = cd.readUInt16LE(p + 32);
+      out.push({ name: cd.subarray(p + 46, p + 46 + nlen).toString("utf8"), method: cd.readUInt16LE(p + 10), csize: cd.readUInt32LE(p + 20), size: cd.readUInt32LE(p + 24), offset: cd.readUInt32LE(p + 42) });
+      p += 46 + nlen + elen + clen;
+    }
+    return out;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Read one entry's bytes from a zip file. */
+export function extractEntry(file: string, e: ZipEntryInfo): Buffer {
+  const fd = fs.openSync(file, "r");
+  try {
+    const h = Buffer.alloc(30);
+    fs.readSync(fd, h, 0, 30, e.offset);
+    if (h.readUInt32LE(0) !== 0x04034b50) throw new Error(`Damaged zip entry ${e.name}`);
+    const data = Buffer.alloc(e.csize);
+    fs.readSync(fd, data, 0, e.csize, e.offset + 30 + h.readUInt16LE(26) + h.readUInt16LE(28));
+    const out = e.method === 8 ? zlib.inflateRawSync(data) : data;
+    if ((zlib.crc32(out) >>> 0) !== (h.readUInt32LE(14) >>> 0)) throw new Error(`Checksum mismatch in ${e.name}`);
+    return out;
+  } finally {
+    fs.closeSync(fd);
+  }
+}

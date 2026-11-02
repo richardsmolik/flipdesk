@@ -22,9 +22,12 @@ import { seedDemo } from "./demo.js";
 import { accountDeletionChallenge } from "./marketplaces/ebay.js";
 import { goalProgress } from "./services/goals.js";
 import { mailConfigured, sendMail } from "./services/mailer.js";
-import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, paidAiLimit, planStatus, portalUrl, trialDays, verifyWebhook, type BillingRow } from "./services/billing.js";
+import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, type BillingRow } from "./services/billing.js";
 import { backupAll, exportShop, listBackups, backupDir, s3Configured, type BackupSource } from "./services/backup.js";
 import { notify } from "./services/alerts.js";
+import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
+import { ebayIsLive } from "./marketplaces/ebay.js";
+import { extractEntry, zipEntries } from "./services/zip.js";
 
 export interface Workspace extends WorkspaceContext {
   db: Db;
@@ -72,38 +75,52 @@ export class Workspaces {
     this.dataDir = opts.dataDir ?? path.dirname(this.mainDb);
     this.mainUploads = opts.mainUploads ?? process.env.FLIPDESK_UPLOADS ?? path.join(this.dataDir, "uploads");
     this.password = opts.password ?? process.env.FLIPDESK_PASSWORD ?? "";
+    fs.mkdirSync(this.dataDir, { recursive: true });
     if (this.multiuser) {
-      fs.mkdirSync(this.dataDir, { recursive: true });
-      const a = new DatabaseSync(path.join(this.dataDir, "accounts.db"));
-      a.exec(`PRAGMA journal_mode = WAL;
-        CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE, pass_hash TEXT NOT NULL, salt TEXT NOT NULL,
-          is_owner INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-        CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-        CREATE TABLE IF NOT EXISTS login_attempts (email TEXT NOT NULL, at TEXT NOT NULL DEFAULT (datetime('now')));
-        CREATE TABLE IF NOT EXISTS resets (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), used_at TEXT);
-        CREATE TABLE IF NOT EXISTS ai_usage (user_id INTEGER NOT NULL, day TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, day));`);
-      a.exec(`CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, note TEXT NOT NULL DEFAULT '', created_by INTEGER,
-          created_at TEXT NOT NULL DEFAULT (datetime('now')), used_by INTEGER, used_at TEXT, revoked_at TEXT);`);
-      for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER"]) {
-        try {
-          a.exec(`ALTER TABLE users ADD COLUMN ${col}`);
-        } catch {
-          /* already there */
-        }
-      }
-      this.accounts = a as unknown as Db;
+      this.accounts = this.openAccounts();
       setAiGate((ws, kind) => this.chargeAi(ws, kind));
     } else setAiGate(null);
-    fs.mkdirSync(this.dataDir, { recursive: true });
+    this.site = this.openSite();
+  }
+
+  private openAccounts(): Db {
+    const a = new DatabaseSync(path.join(this.dataDir, "accounts.db"));
+    a.exec(`PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE COLLATE NOCASE, pass_hash TEXT NOT NULL, salt TEXT NOT NULL,
+        is_owner INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
+      CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE IF NOT EXISTS login_attempts (email TEXT NOT NULL, at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE IF NOT EXISTS resets (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), used_at TEXT);
+      CREATE TABLE IF NOT EXISTS ai_usage (user_id INTEGER NOT NULL, day TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, day));
+      CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, note TEXT NOT NULL DEFAULT '', created_by INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), used_by INTEGER, used_at TEXT, revoked_at TEXT);
+      CREATE TABLE IF NOT EXISTS activity_days (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day));
+      CREATE TABLE IF NOT EXISTS referral_rewards (id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL UNIQUE,
+        kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER"]) {
+      try {
+        a.exec(`ALTER TABLE users ADD COLUMN ${col}`);
+      } catch {
+        /* already there */
+      }
+    }
+    return a as unknown as Db;
+  }
+
+  private openSite(): Db {
     const site = new DatabaseSync(path.join(this.dataDir, "site.db"));
     site.exec(`PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS shares (token TEXT PRIMARY KEY, ws_key TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), views INTEGER NOT NULL DEFAULT 0, revoked_at TEXT);
       CREATE TABLE IF NOT EXISTS site_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, user_id INTEGER, email TEXT, page TEXT NOT NULL DEFAULT '', message TEXT NOT NULL,
-        context TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT);`);
-    this.site = site as unknown as Db;
+        context TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT);
+      CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', link TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), ends_at TEXT, archived_at TEXT);
+      CREATE TABLE IF NOT EXISTS announcement_seen (announcement_id INTEGER NOT NULL, viewer TEXT NOT NULL, seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+        dismissed_at TEXT, PRIMARY KEY (announcement_id, viewer));`);
+    return site as unknown as Db;
   }
 
   // ---------------- AI cap (hosted) ----------------
@@ -138,8 +155,7 @@ export class Workspaces {
   private chargeAi(ws: WorkspaceContext | undefined, _kind: string) {
     if (!ws?.userId || !this.accounts) return;
     const limit = this.aiLimit(ws.userId);
-    if (limit === null) return;
-    if (this.aiUsedToday(ws.userId) >= limit)
+    if (limit !== null && this.aiUsedToday(ws.userId) >= limit)
       throw Object.assign(new Error(`You've used today's ${limit} AI requests. They reset at midnight UTC. You can still write and list items by hand.`), { status: 429 });
     this.accounts
       .prepare("INSERT INTO ai_usage (user_id, day, calls) VALUES (?, date('now'), 1) ON CONFLICT(user_id, day) DO UPDATE SET calls = calls + 1")
@@ -515,6 +531,323 @@ export class Workspaces {
     return this.backupNow();
   }
 
+  // ---------------- Announcements (owner → everyone) ----------------
+
+  /** Active announcements this viewer hasn't dismissed. Marks them seen. */
+  announcementsFor(viewer: string) {
+    const rows = this.site
+      .prepare(
+        `SELECT a.id, a.title, a.body, a.link, a.created_at FROM announcements a
+         WHERE a.archived_at IS NULL AND (a.ends_at IS NULL OR a.ends_at > datetime('now'))
+           AND NOT EXISTS (SELECT 1 FROM announcement_seen s WHERE s.announcement_id = a.id AND s.viewer = ? AND s.dismissed_at IS NOT NULL)
+         ORDER BY a.id DESC LIMIT 3`,
+      )
+      .all(viewer) as { id: number; title: string; body: string; link: string; created_at: string }[];
+    for (const r of rows) this.site.prepare("INSERT OR IGNORE INTO announcement_seen (announcement_id, viewer) VALUES (?, ?)").run(r.id, viewer);
+    return rows;
+  }
+
+  announcementList() {
+    return this.site
+      .prepare(
+        `SELECT a.*, (SELECT COUNT(*) FROM announcement_seen s WHERE s.announcement_id = a.id) AS seen,
+           (SELECT COUNT(*) FROM announcement_seen s WHERE s.announcement_id = a.id AND s.dismissed_at IS NOT NULL) AS dismissed
+         FROM announcements a ORDER BY a.id DESC LIMIT 50`,
+      )
+      .all() as Record<string, unknown>[];
+  }
+
+  // ---------------- Usage (owner) ----------------
+
+  /** Last N weeks (Monday-start, UTC): active sellers, sign-ups, AI calls + cost estimate; plus today's plan mix. */
+  usage(weeks = 12) {
+    const a = this.accounts!;
+    const costPer = Number(process.env.FLIPDESK_AI_COST_PER_CALL) || 0.04;
+    const monday = (d: Date) => {
+      const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+      x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7));
+      return x;
+    };
+    const start0 = monday(new Date());
+    const rows = [];
+    for (let i = weeks - 1; i >= 0; i--) {
+      const from = new Date(start0.getTime() - i * 7 * 86400_000);
+      const to = new Date(from.getTime() + 7 * 86400_000);
+      const f = from.toISOString().slice(0, 10);
+      const t = to.toISOString().slice(0, 10);
+      const n = (sql: string) => Number((a.prepare(sql).get(f, t) as { n: number }).n);
+      const calls = n("SELECT COALESCE(SUM(calls),0) AS n FROM ai_usage WHERE day >= ? AND day < ?");
+      rows.push({
+        week: f,
+        activeSellers: n("SELECT COUNT(DISTINCT d.user_id) AS n FROM activity_days d JOIN users u ON u.id = d.user_id AND u.is_owner = 0 WHERE d.day >= ? AND d.day < ?"),
+        signups: n("SELECT COUNT(*) AS n FROM users WHERE is_owner = 0 AND date(created_at) >= ? AND date(created_at) < ?"),
+        aiCalls: calls,
+        aiCost: Math.round(calls * costPer * 100) / 100,
+      });
+    }
+    const users = a.prepare("SELECT id FROM users WHERE is_owner = 0").all() as { id: number }[];
+    const mix: Record<string, number> = { trial: 0, active: 0, past_due: 0, expired: 0, free: 0 };
+    let trialsEnded = 0;
+    let converted = 0;
+    for (const u of users) {
+      const b = this.billingRow(u.id)!;
+      const st = planStatus(b);
+      mix[st] = (mix[st] ?? 0) + 1;
+      if (b.trial_ends_at && Date.parse(b.trial_ends_at.replace(" ", "T") + "Z") < Date.now()) {
+        trialsEnded++;
+        if (st === "active" || st === "past_due") converted++;
+      }
+    }
+    const price = Number(process.env.FLIPDESK_PRICE_MONTHLY) || null;
+    return {
+      weeks: rows,
+      costPerCall: costPer,
+      plans: mix,
+      members: users.length,
+      conversion: { trialsEnded, converted, pct: trialsEnded ? Math.round((converted / trialsEnded) * 100) : null },
+      mrr: price ? Math.round(price * (mix.active + mix.past_due) * 100) / 100 : null,
+      referrals: Number((a.prepare("SELECT COUNT(*) AS n FROM referral_rewards").get() as { n: number }).n),
+    };
+  }
+
+  // ---------------- Referrals ----------------
+
+  /** Members can make their own invite links (FLIPDESK_MEMBER_INVITES=1, or by default when billing is on). */
+  memberInvitesOn() {
+    const v = process.env.FLIPDESK_MEMBER_INVITES;
+    return this.multiuser && (v === "1" || (v !== "0" && billingEnabled()));
+  }
+
+  /**
+   * Someone you invited started paying: you get a free month. With a Stripe subscription, that's a credit
+   * on your next invoice; otherwise 30 more days of your trial. Once per person invited.
+   */
+  async grantReferral(referredId: number) {
+    const a = this.accounts!;
+    const r = a.prepare("SELECT invited_by, email FROM users WHERE id = ?").get(referredId) as { invited_by: number | null; email: string } | undefined;
+    if (!r?.invited_by || a.prepare("SELECT 1 FROM referral_rewards WHERE referred_id = ?").get(referredId)) return null;
+    const ref = this.billingRow(r.invited_by);
+    if (!ref || ref.is_owner) return null;
+    const st = planStatus(ref);
+    let kind = "trial_days";
+    let detail = "";
+    if (st === "free") (kind = "none"), (detail = "already free");
+    else if (ref.stripe_customer_id && (st === "active" || st === "past_due")) {
+      const price = await stripeGet<{ unit_amount: number; currency: string }>(`prices/${process.env.STRIPE_PRICE_ID}`);
+      await stripePost("customers/" + ref.stripe_customer_id + "/balance_transactions", {
+        amount: -price.unit_amount,
+        currency: price.currency,
+        description: "FlipDesk referral: one free month",
+      });
+      kind = "credit";
+      detail = `${(price.unit_amount / 100).toFixed(2)} ${price.currency.toUpperCase()} credit`;
+    } else {
+      a.prepare("UPDATE users SET trial_ends_at = datetime(MAX(COALESCE(trial_ends_at, datetime('now')), datetime('now')), '+30 days') WHERE id = ?").run(ref.id);
+      detail = "+30 days of trial";
+    }
+    a.prepare("INSERT INTO referral_rewards (referrer_id, referred_id, kind, detail) VALUES (?, ?, ?, ?)").run(ref.id, referredId, kind, detail);
+    if (kind !== "none" && (mailConfigured() || process.env.SMTP_HOST === "test")) {
+      const masked = r.email.replace(/^(.).*(@.*)$/, "$1…$2");
+      void sendMail(ref.email, "You earned a free month of FlipDesk 🎉", `${masked} joined from your invite and just subscribed. Your reward: ${detail}.\n\nThanks for spreading the word!`).catch(() => {});
+    }
+    return { referrerId: ref.id, kind, detail };
+  }
+
+  // ---------------- Restore (owner) ----------------
+
+  /** What's inside a backup: one part per shop, plus sign-ins and server settings. */
+  backupContents(name: string) {
+    const file = this.backupFile(name);
+    const parts = new Map<string, { part: string; label: string; bytes: number; photos: number }>();
+    for (const e of zipEntries(file)) {
+      if (e.name === "README.txt") continue;
+      const m = e.name.match(/^(shop|users\/\d+)\/(flipdesk\.db|uploads\/.+)$/) ?? (e.name.match(/^(accounts\.db|site\.db)$/) ? [e.name, e.name, e.name] : null);
+      if (!m) continue;
+      const part = m[1];
+      const p = parts.get(part) ?? { part, label: this.partLabel(part), bytes: 0, photos: 0 };
+      p.bytes += e.size;
+      if (m[2].startsWith("uploads/")) p.photos++;
+      parts.set(part, p);
+    }
+    return [...parts.values()];
+  }
+
+  private partLabel(part: string) {
+    if (part === "shop") return "Your shop";
+    if (part === "accounts.db") return "Sign-ins, plans and invites";
+    if (part === "site.db") return "Server settings (shares, feedback, announcements)";
+    const id = Number(part.split("/")[1]);
+    const email = this.accounts ? (this.accounts.prepare("SELECT email FROM users WHERE id = ?").get(id) as { email: string } | undefined)?.email : undefined;
+    return email ? `${email}'s shop` : `Shop #${id}`;
+  }
+
+  private backupFile(name: string) {
+    if (!/^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(name)) throw Object.assign(new Error("Unknown backup"), { status: 400 });
+    const file = path.join(backupDir(this.dataDir), name);
+    if (!fs.existsSync(file)) throw Object.assign(new Error("That backup isn't on the server anymore"), { status: 404 });
+    return file;
+  }
+
+  /**
+   * Put chosen parts of a backup back. A fresh backup is made first, and the files being replaced are moved
+   * to data/restore-trash/<time>/ instead of deleted, so a restore can always be undone.
+   */
+  async restore(name: string, parts: string[]) {
+    const file = this.backupFile(name);
+    const available = new Set(this.backupContents(name).map((p) => p.part));
+    const chosen = parts.filter((p) => available.has(p));
+    if (!chosen.length) throw Object.assign(new Error("Pick at least one part to restore"), { status: 400 });
+    const safety = await this.backupNow(); // undo point
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
+    const trash = path.join(this.dataDir, "restore-trash", stamp);
+    const staging = path.join(this.dataDir, ".restore-tmp", stamp);
+    const entries = zipEntries(file);
+    const SQLITE = Buffer.from("SQLite format 3\0");
+    try {
+      for (const part of chosen) {
+        // 1. unpack this part into staging and check it
+        const dir = path.join(staging, part.replace(/\//g, "_"));
+        fs.mkdirSync(dir, { recursive: true });
+        for (const e of entries) {
+          const rel = part.endsWith(".db") ? (e.name === part ? "db" : null) : e.name.startsWith(part + "/") ? e.name.slice(part.length + 1) : null;
+          if (!rel) continue;
+          if (rel.split("/").some((seg) => seg === ".." || seg === "")) throw new Error(`Unsafe path in backup: ${e.name}`);
+          const out = path.join(dir, rel === "flipdesk.db" ? "db" : rel);
+          fs.mkdirSync(path.dirname(out), { recursive: true });
+          fs.writeFileSync(out, extractEntry(file, e));
+        }
+        if (!fs.existsSync(path.join(dir, "db")) || !fs.readFileSync(path.join(dir, "db")).subarray(0, 16).equals(SQLITE)) throw new Error(`${this.partLabel(part)}: the database in this backup is damaged`);
+        // 2. swap it in
+        const moveAway = (f: string, as: string) => {
+          if (!fs.existsSync(f)) return;
+          fs.mkdirSync(path.dirname(path.join(trash, as)), { recursive: true });
+          fs.renameSync(f, path.join(trash, as));
+        };
+        if (part === "accounts.db" || part === "site.db") {
+          const target = path.join(this.dataDir, part);
+          if (part === "accounts.db" && this.accounts) this.accounts.close();
+          if (part === "site.db") this.site.close();
+          for (const sfx of ["", "-wal", "-shm"]) moveAway(target + sfx, part + sfx);
+          fs.renameSync(path.join(dir, "db"), target);
+          if (part === "accounts.db" && this.multiuser) this.accounts = this.openAccounts();
+          if (part === "site.db") this.site = this.openSite();
+          continue;
+        }
+        const key = part === "shop" ? "main" : `u${part.split("/")[1]}`;
+        if (part === "shop" && this.multiuser) continue;
+        this.close(key);
+        const { dbFile, uploadDir } = this.location(key);
+        for (const sfx of ["", "-wal", "-shm"]) moveAway(dbFile + sfx, `${part}/flipdesk.db${sfx}`);
+        moveAway(uploadDir, `${part}/uploads`);
+        fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+        fs.renameSync(path.join(dir, "db"), dbFile);
+        if (fs.existsSync(path.join(dir, "uploads"))) fs.renameSync(path.join(dir, "uploads"), uploadDir);
+        else fs.mkdirSync(uploadDir, { recursive: true });
+      }
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
+    this.siteSet("lastRestore", { at: new Date().toISOString(), from: name, parts: chosen, undo: path.basename(safety.file), trash: path.relative(this.dataDir, trash) });
+    return { restored: chosen, undoBackup: path.basename(safety.file) };
+  }
+
+  // ---------------- Status ----------------
+
+  status(req: Request & { fdUser?: Account | null }) {
+    type Row = { key: string; label: string; state: "ok" | "warn" | "down" | "off"; detail: string; lastOk?: string | null; lastError?: string | null };
+    const from = (c: Check | null, label: string, key: string, offDetail: string | null, okDetail: string): Row => {
+      if (offDetail) return { key, label, state: "off", detail: offDetail };
+      const st = stateOf(c);
+      return {
+        key,
+        label,
+        state: st === "down" ? "down" : "ok",
+        detail: st === "down" ? `Last try failed: ${c!.lastError}` : st === "unknown" ? `${okDetail} (no calls since the server started)` : okDetail,
+        lastOk: c?.lastOk ?? null,
+        lastError: c?.lastFail ? c.lastError ?? null : null,
+      };
+    };
+    const lastBackup = this.siteGet<{ at?: string; error?: string | null; failedAt?: string } | null>("lastBackup", null);
+    const backupAgeH = lastBackup?.at ? (Date.now() - Date.parse(lastBackup.at)) / 3600_000 : null;
+    const services: Row[] = [
+      { key: "server", label: "FlipDesk", state: "ok", detail: `Running since ${new Date(startedAt).toLocaleString("en-US", { timeZone: "UTC" })} UTC` },
+      from(globalCheck("ai"), "AI writer (Claude)", "ai", process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN ? null : "Not set up (demo writer in use)", "Answering"),
+      from(globalCheck("ebay"), "eBay", "ebay", process.env.EBAY_CLIENT_ID ? null : "Not set up (demo mode)", "Reachable"),
+      from(globalCheck("mail"), "Email", "mail", mailConfigured() ? null : "Not set up", "Sending"),
+    ];
+    // Backups: the owner sees problems (and can fix them); members just see that it's handled.
+    const isOwner = this.multiuser ? Boolean(req.fdUser?.is_owner) : true;
+    const upH = (Date.now() - Date.parse(startedAt)) / 3600_000;
+    const backupState: Row["state"] =
+      process.env.BACKUP_DISABLED === "1"
+        ? "off"
+        : lastBackup?.failedAt && (!lastBackup.at || lastBackup.failedAt > lastBackup.at)
+          ? "down"
+          : backupAgeH === null
+            ? upH < 2 ? "ok" : "warn"
+            : backupAgeH > 30 || lastBackup?.error
+              ? "warn"
+              : "ok";
+    const backupDetail =
+      process.env.BACKUP_DISABLED === "1"
+        ? "Turned off"
+        : backupAgeH === null
+          ? upH < 2 ? "First backup runs within the hour" : "No backup yet"
+          : `Last one ${backupAgeH < 1 ? "less than an hour" : `${Math.round(backupAgeH)} h`} ago${lastBackup?.error ? `. ${lastBackup.error}` : ""}`;
+    if (isOwner) services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupDetail });
+    else if (backupState === "ok" || backupState === "off") services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupState === "ok" ? "Your shop is backed up every night" : "Turned off by the owner" });
+    if (this.multiuser) services.push({ key: "payments", label: "Payments (Stripe)", state: billingEnabled() ? "ok" : "off", detail: billingEnabled() ? `Last update from Stripe: ${this.siteGet<string | null>("lastStripeEvent", null) ?? "none yet"}` : "Not set up (everyone is free)" });
+
+    // Yours: this browser's shop
+    const ws = this.current(req, req.fdUser ?? null);
+    const yours: Row[] = [];
+    if (ws) {
+      const n = (sql: string) => Number((ws.db.prepare(sql).get() as { n: number }).n);
+      const ebayConnected = runInWorkspace(ws, () => ebayIsLive(ws.db));
+      const login = shopCheck(ws.key, "ebay-login");
+      yours.push(
+        !process.env.EBAY_CLIENT_ID
+          ? { key: "ebay", label: "Your eBay connection", state: "off", detail: "eBay isn't set up on this server" }
+          : !ebayConnected
+            ? { key: "ebay", label: "Your eBay connection", state: "warn", detail: "Not connected. Marketplaces → Connect eBay." }
+            : stateOf(login) === "down"
+              ? { key: "ebay", label: "Your eBay connection", state: "down", detail: `eBay sign-in stopped working: ${login!.lastError}. Reconnect on the Marketplaces page.` }
+              : { key: "ebay", label: "Your eBay connection", state: "ok", detail: "Connected" },
+      );
+      const pending = n("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'");
+      const failed = n("SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND updated_at >= datetime('now','-7 days')");
+      const oldestMin = n("SELECT COALESCE(MAX(CAST((julianday('now') - julianday(created_at)) * 1440 AS INTEGER)), 0) AS n FROM jobs WHERE status = 'pending'");
+      yours.push({
+        key: "sync",
+        label: "Sync queue",
+        state: failed ? "down" : pending && oldestMin > 60 ? "warn" : "ok",
+        detail: failed ? `${failed} failed in the last week (Sync queue page shows why)` : pending ? `${pending} waiting${oldestMin > 60 ? `, oldest ${Math.round(oldestMin / 60)} h (is the extension running?)` : ""}` : "Nothing waiting",
+      });
+      const extMps = n(`SELECT COUNT(*) AS n FROM connections WHERE status = 'connected' AND marketplace IN ('poshmark','mercari','depop','vinted','grailed','facebook','whatnot')`);
+      const seenAt = lastSeen("extension", ws.key);
+      const seenMin = seenAt ? (Date.now() - Date.parse(seenAt)) / 60_000 : null;
+      yours.push(
+        !extMps && !seenAt
+          ? { key: "extension", label: "Chrome extension", state: "off", detail: "Not in use (only needed for Poshmark, Mercari, Depop…)" }
+          : { key: "extension", label: "Chrome extension", state: seenMin !== null && seenMin < 10 ? "ok" : "warn", detail: seenAt ? `Last checked in ${seenMin! < 1 ? "just now" : `${Math.round(seenMin!)} min ago`}` : "Hasn't checked in since the server started. Open Chrome with the extension." },
+      );
+      for (const [task, label] of [["ebay-sales", "eBay sale check"], ["email", "Sale emails (inbox)"]] as const) {
+        const c = shopCheck(ws.key, `task:${task}`);
+        if (c && stateOf(c) === "down") yours.push({ key: task, label, state: "down", detail: `Last run failed: ${c.lastError}`, lastOk: c.lastOk ?? null });
+      }
+      if (req.fdUser) {
+        const lim = this.aiLimit(req.fdUser.id);
+        if (lim !== null) {
+          const used = this.aiUsedToday(req.fdUser.id);
+          yours.push({ key: "ai-allowance", label: "Your AI allowance", state: used >= lim ? "warn" : "ok", detail: `${used} of ${lim} used today (resets at midnight UTC)` });
+        }
+      }
+    }
+    const all = [...services, ...yours];
+    const overall = all.some((r) => r.state === "down") ? "down" : all.some((r) => r.state === "warn") ? "warn" : "ok";
+    return { overall, checkedAt: new Date().toISOString(), services, yours };
+  }
+
   // ---------------- The front door ----------------
 
   /** Single-user password check (same cookie the shop apps use). */
@@ -665,7 +998,13 @@ export class Workspaces {
       if (!verifyWebhook(req.body as Buffer, req.headers["stripe-signature"] as string | undefined, secret)) return void res.status(400).json({ error: "Bad signature" });
       const ev = JSON.parse((req.body as Buffer).toString("utf8"));
       const r = applyStripeEvent(this.accounts, ev);
+      this.siteSet("lastStripeEvent", new Date().toISOString());
       if (r) console.log(`[billing] user ${r.userId} -> ${r.plan}`);
+      // Their friend gets a free month once they're actually paying.
+      if (r?.plan === "active")
+        void this.grantReferral(r.userId)
+          .then((g) => g && console.log(`[referral] user ${g.referrerId}: ${g.detail || g.kind}`))
+          .catch((e) => console.error("[referral]", (e as Error).message));
       res.json({ received: true });
     });
     // Is this invite link still good? (for the sign-up screen)
@@ -704,6 +1043,7 @@ export class Workspaces {
       const user = this.multiuser ? this.userFor(req) : null;
       if (this.multiuser ? !user : !this.passwordOk(req)) return void res.status(401).json({ error: "login required", auth: this.multiuser ? "accounts" : "password" });
       (req as Request & { fdUser?: Account | null }).fdUser = user;
+      if (user) this.accounts!.prepare("INSERT OR IGNORE INTO activity_days (user_id, day) VALUES (?, date('now'))").run(user.id); // weekly active sellers
       // Trial over and no plan: everything stays viewable and downloadable, but nothing new can be changed.
       if (user && billingEnabled() && req.method !== "GET" && req.method !== "HEAD" && !/^\/(billing|auth|feedback|export)(\/|$)/.test(req.path)) {
         const b = this.billingRow(user.id);
@@ -820,12 +1160,57 @@ export class Workspaces {
       const r = await this.backupNow();
       res.json({ last: this.siteGet("lastBackup", null), files: listBackups(this.dataDir), offsite: s3Configured(), result: { bytes: r.bytes, uploaded: r.uploaded, error: r.error ?? null } });
     });
+    root.get("/api/backups/:name/contents", (req, res) => void res.json({ parts: this.backupContents(String(req.params.name)), lastRestore: this.siteGet("lastRestore", null) }));
+    root.post("/api/backups/:name/restore", json, async (req, res) => {
+      const b = z.object({ parts: z.array(z.string().max(40)).min(1).max(1000), confirm: z.literal("RESTORE") }).parse(req.body);
+      res.json(await this.restore(String(req.params.name), b.parts));
+    });
     root.get("/api/backups/:name", (req, res) => {
       const name = String(req.params.name);
-      if (!/^flipdesk-\d{8}-\d{4}\.zip$/.test(name)) return void res.status(400).end();
+      if (!/^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(name)) return void res.status(400).end();
       const file = path.join(backupDir(this.dataDir), name);
       if (!fs.existsSync(file)) return void res.status(404).end();
       res.download(file, name);
+    });
+
+    // ---- Announcements ----
+    const viewer = (req: R) => (req.fdUser ? `u${req.fdUser.id}` : "main");
+    root.get("/api/announcements", (req: R, res) => void res.json(req.fdShare ? [] : this.announcementsFor(viewer(req))));
+    root.post("/api/announcements/:id/dismiss", (req: R, res) => {
+      this.site
+        .prepare("INSERT INTO announcement_seen (announcement_id, viewer, dismissed_at) VALUES (?, ?, datetime('now')) ON CONFLICT(announcement_id, viewer) DO UPDATE SET dismissed_at = datetime('now')")
+        .run(Number(req.params.id), viewer(req));
+      res.json({ ok: true });
+    });
+
+    // ---- Status ----
+    root.get("/api/status", (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      res.json(this.status(req));
+    });
+
+    // ---- Invite a friend (members), with a free month when they subscribe ----
+    root.get("/api/invites", (req: R, res) => {
+      const u = req.fdUser;
+      if (!u || !this.memberInvitesOn()) return void res.json({ enabled: false });
+      const mine = this.listInvites().filter((i) => i.created_by_email === u.email);
+      const rewards = this.accounts!.prepare("SELECT r.kind, r.detail, r.created_at, u.email FROM referral_rewards r JOIN users u ON u.id = r.referred_id WHERE r.referrer_id = ? ORDER BY r.id DESC").all(u.id) as { kind: string; detail: string; created_at: string; email: string }[];
+      res.json({
+        enabled: true,
+        reward: billingEnabled() ? "a free month when they start paying" : null,
+        invites: mine.map((i) => ({ id: i.id, note: i.note, link: `${base(req)}/join?invite=${i.token}`, used: Boolean(i.used_at), usedBy: i.used_by_email?.replace(/^(.).*(@.*)$/, "$1…$2") ?? null, created_at: i.created_at })),
+        rewards: rewards.map((r) => ({ ...r, email: r.email.replace(/^(.).*(@.*)$/, "$1…$2") })),
+      });
+    });
+    root.post("/api/invites", json, (req: R, res) => {
+      const u = needUser(req, res);
+      if (!u) return;
+      if (!this.memberInvitesOn()) return void res.status(403).json({ error: "Only the owner can invite people here." });
+      const open = Number((this.accounts!.prepare("SELECT COUNT(*) AS n FROM invites WHERE created_by = ? AND used_at IS NULL AND revoked_at IS NULL").get(u.id) as { n: number }).n);
+      if (open >= 10) return void res.status(429).json({ error: "You have 10 unused invite links. Use some first." });
+      const note = z.object({ note: z.string().trim().max(80).default("") }).parse(req.body ?? {}).note;
+      const token = this.createInvite(u.id, note);
+      res.json({ link: `${base(req)}/join?invite=${token}` });
     });
 
     // ---- Owner: accounts ----
@@ -858,6 +1243,24 @@ export class Workspaces {
     root.delete("/api/admin/invites/:id", (req, res) => {
       this.accounts!.prepare("UPDATE invites SET revoked_at = datetime('now') WHERE id = ? AND used_at IS NULL").run(Number(req.params.id));
       res.json({ invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
+    });
+    root.get("/api/admin/usage", (req, res) => void res.json(this.usage(Math.min(52, Math.max(4, Number(req.query.weeks) || 12)))));
+    root.get("/api/admin/announcements", (_req, res) => void res.json(this.announcementList()));
+    root.post("/api/admin/announcements", json, (req, res) => {
+      const b = z
+        .object({
+          title: z.string().trim().min(3, "Give it a title").max(120),
+          body: z.string().trim().max(1000).default(""),
+          link: z.string().trim().max(300).default("").refine((v) => !v || /^(\/[^\s]*|https:\/\/[^\s]+)$/.test(v), "Link must start with / or https://"),
+          days: z.number().int().min(1).max(365).nullable().default(14),
+        })
+        .parse(req.body);
+      this.site.prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)").run(b.title, b.body, b.link, b.days, `+${b.days ?? 0} days`);
+      res.json(this.announcementList());
+    });
+    root.delete("/api/admin/announcements/:id", (req, res) => {
+      this.site.prepare("UPDATE announcements SET archived_at = datetime('now') WHERE id = ?").run(Number(req.params.id));
+      res.json(this.announcementList());
     });
     root.get("/api/admin/feedback", (_req, res) => {
       const rows = this.site.prepare("SELECT * FROM feedback ORDER BY resolved_at IS NOT NULL, id DESC LIMIT 200").all() as Record<string, unknown>[];
@@ -942,8 +1345,10 @@ export class Workspaces {
       if (ws.demo && !opts.includeDemo) continue;
       try {
         await runInWorkspace(ws, () => fn(ws.db, ws));
+        runInWorkspace(ws, () => reportHealth(`task:${name}`, true));
       } catch (e) {
         console.error(`[${name}:${ws.key}]`, (e as Error).message);
+        runInWorkspace(ws, () => reportHealth(`task:${name}`, false, (e as Error).message));
       }
     }
   }

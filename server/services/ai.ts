@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Comp } from "./pricing.js";
 import { useAi } from "../context.js";
+import { trackAnthropic } from "../health.js";
 
 export const MODEL = "claude-opus-5-5";
 
@@ -74,7 +75,7 @@ export async function generateListing(input: GenerateInput): Promise<{ draft: Li
   if (!aiIsLive()) return { draft: demoDraft(input), demo: true };
   useAi("listing");
 
-  const client = new Anthropic();
+  const client = trackAnthropic(new Anthropic());
   const images = input.photoPaths.slice(0, 8).map((p) => ({
     type: "image" as const,
     source: { type: "base64" as const, media_type: mediaType(p), data: fs.readFileSync(p).toString("base64") },

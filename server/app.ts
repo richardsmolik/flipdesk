@@ -40,6 +40,7 @@ import { profitReport } from "./services/insights.js";
 import { confirmEmail, imapConfigured, ingestEmail } from "./services/email.js";
 import { simpleParser } from "mailparser";
 import { currentWorkspace, enterWorkspace, personalEnv, uploadUrl, type WorkspaceContext } from "./context.js";
+import { touch } from "./health.js";
 
 const MarketplaceEnum = z.enum(MARKETPLACE_IDS as [MarketplaceId, ...MarketplaceId[]]);
 
@@ -1116,6 +1117,7 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     if (req.headers["x-flipdesk-token"] !== extensionToken(db)) return void res.status(401).json({ error: "Bad extension token" });
     next();
   });
+  ext.use((_req, _res, next) => (touch("extension"), next())); // for the Status page: "extension last seen"
   ext.get("/ping", (_req, res) => void res.json({ ok: true }));
   ext.get("/next", (req, res) => {
     const ms = String(req.query.m ?? "")

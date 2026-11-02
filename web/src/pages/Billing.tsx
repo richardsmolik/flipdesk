@@ -12,6 +12,55 @@ const LABEL: Record<BillingInfo["status"], string> = {
   expired: "Trial ended",
 };
 
+interface MyInvites { enabled: boolean; reward?: string | null; invites?: { id: number; note: string; link: string; used: boolean; usedBy: string | null; created_at: string }[]; rewards?: { kind: string; detail: string; created_at: string; email: string }[] }
+
+/** Invite a friend: your own one-use links, and the free months you've earned. */
+function InviteFriends() {
+  const [d, setD] = useState<MyInvites | null>(null);
+  const [note, setNote] = useState("");
+  const load = () => api.get<MyInvites>("/api/invites").then(setD).catch(() => {});
+  useEffect(() => void load(), []);
+  if (!d?.enabled) return null;
+  return (
+    <div className="card space-y-3 p-5">
+      <h2 className="font-semibold">🎁 Invite a friend{d.reward ? `, get ${d.reward}` : ""}</h2>
+      <p className="text-sm text-zinc-400">Each link works for one person. {d.reward ? "When they start paying, your free month is added automatically (as credit on your next bill, or extra trial days)." : ""}</p>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          try {
+            const r = await api.post<{ link: string }>("/api/invites", { note });
+            setNote("");
+            navigator.clipboard?.writeText(r.link).then(() => toast("Link copied: send it to your friend"), () => toast("Link made"));
+            void load();
+          } catch (x) {
+            toast((x as Error).message, "err");
+          }
+        }}
+      >
+        <input className="input max-w-xs" maxLength={80} placeholder="Friend's name (just for you)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button className="btn-primary">Make my invite link</button>
+      </form>
+      {!!d.invites?.length && (
+        <ul className="divide-y divide-zinc-800 text-sm">
+          {d.invites.map((i) => (
+            <li key={i.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <span>{i.note || "Invite"} <span className="text-xs text-zinc-500">{i.used ? `joined (${i.usedBy})` : "not used yet"}</span></span>
+              {!i.used && <button className="btn-ghost px-2 py-1 text-xs" onClick={() => (navigator.clipboard?.writeText(i.link), toast("Copied"))}>Copy link</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!!d.rewards?.length && (
+        <div className="rounded-md border border-green-900 bg-green-950/30 p-3 text-sm text-green-200">
+          {d.rewards.map((r) => <div key={r.created_at + r.email}>🎉 {r.email} subscribed: {r.detail || "thank you!"}</div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Your plan: trial days left, subscribe (Stripe Checkout), manage or cancel (Stripe portal). */
 export default function Billing() {
   const [b, setB] = useState<BillingInfo | null>(null);
@@ -59,6 +108,7 @@ export default function Billing() {
           </div>
         )}
       </div>
+      <InviteFriends />
       <p className="text-xs text-zinc-500">Cancel any time from "Manage billing". Your data stays yours: Settings → Download all my data.</p>
     </div>
   );

@@ -125,6 +125,10 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **Invite links.** Accounts → Invite links: one link per person (with a note like "Sam"). Each works once, the Accounts list shows who invited whom, and you can turn off unused links. The shared `FLIPDESK_INVITE_CODE` still works if you set it.
 - **Feedback.** Everyone has "💬 Send feedback" in the sidebar. It lands on your Accounts page with the page they were on and any recent errors, and pings your phone (your ntfy topic) and email.
 
+- **Announcements.** Accounts → Announcements: a title, optional details and a link (`/bundles` or `https://…`), shown once at the top of everyone's dashboard until they close it, for 3 days up to "until removed". You see how many saw and closed it.
+- **How FlipDesk is doing.** The top of the Accounts page: members, active sellers per week, paying vs trial, trial → paid %, monthly revenue estimate (`FLIPDESK_PRICE_MONTHLY`), and AI requests per week with a cost estimate (`FLIPDESK_AI_COST_PER_CALL`, default $0.04).
+- **Status page.** Tools → Status answers "is it me or FlipDesk?": your eBay connection, sync queue, Chrome extension check-ins, AI allowance, plus AI, eBay, email, backups and payments. It uses real results from the last calls and refreshes every 30 seconds. The feedback form points there first.
+
 ## Charging for it (Stripe)
 
 1. In Stripe: **Products → Add product**, monthly price (e.g. $19). Copy the price id (`price_...`).
@@ -132,6 +136,8 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 3. **Developers → Webhooks → Add endpoint**: `https://<your address>/api/billing/webhook`, events `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`. Copy the signing secret (`whsec_...`).
 4. **Settings → Billing → Customer portal**: turn it on (lets people update cards and cancel).
 5. Set `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, and optionally `FLIPDESK_TRIAL_DAYS` (14), `FLIPDESK_PRICE_LABEL` ("$19/month"), `FLIPDESK_AI_PAID_LIMIT` (200).
+
+**Referrals:** members get their own invite links (Your plan → Invite a friend; on by default when billing is on, `FLIPDESK_MEMBER_INVITES=0` to turn off). When someone they invited **starts paying**, they get one free month, once per friend: a Stripe credit worth one month on their next bill if they're subscribed, otherwise 30 more days of trial. They get an email about it when email is set up.
 
 How it behaves:
 - New accounts start a free trial. Subscribing during the trial doesn't charge until the trial ends.
@@ -143,7 +149,8 @@ How it behaves:
 
 - **Nightly**, FlipDesk saves a .zip of every real shop (database + photos), the accounts and server settings to `data/backups/` and keeps the newest 7 (`BACKUP_KEEP`). Settings → Nightly backups shows the last one, has **Back up now**, and lets you download any copy.
 - **Off-site:** set `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY` (and `BACKUP_S3_REGION`, "auto" for R2). Cloudflare R2 is free up to 10 GB: create a bucket, then an R2 API token with write access; the endpoint is `https://<account id>.r2.cloudflarestorage.com`.
-- **Restore:** stop FlipDesk, unzip the backup, copy `shop/flipdesk.db` to `data/flipdesk.db` and `shop/uploads/` to `data/uploads/` (accounts mode: `users/<id>/…` to `data/users/<id>/…`, plus `accounts.db` and `site.db` to `data/`), then start FlipDesk.
+- **Restore in the app:** Settings → Nightly backups → **Restore…** on any backup. Pick what to put back (your shop, one person's shop, sign-ins, server settings), type RESTORE. FlipDesk first makes a fresh backup (your undo) and moves the replaced files to `data/restore-trash/` instead of deleting them.
+- **Restore by hand** (if the server won't start): stop FlipDesk, unzip the backup, copy `shop/flipdesk.db` to `data/flipdesk.db` and `shop/uploads/` to `data/uploads/` (accounts mode: `users/<id>/…` to `data/users/<id>/…`, plus `accounts.db` and `site.db` to `data/`), then start FlipDesk.
 - **Everyone can download their own data** any time: Settings → Download all my data (spreadsheets, photos and the database in one .zip).
 
 Still to do as it grows: moving to Postgres + object storage once you have more than a few dozen sellers.

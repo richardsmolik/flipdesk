@@ -31,7 +31,7 @@ export const GROUPS: Group[] = [
       { to: "/leaderboard", label: "Leaderboard", icon: "🏆", only: "accounts" },
     ],
   },
-  { key: "tools", label: "Tools", items: [{ to: "/tools", label: "Power tools", icon: "⚡" }, { to: "/queue", label: "Sync queue", icon: "🔄", badge: "failed" }] },
+  { key: "tools", label: "Tools", items: [{ to: "/tools", label: "Power tools", icon: "⚡" }, { to: "/queue", label: "Sync queue", icon: "🔄", badge: "failed" }, { to: "/status", label: "Status", icon: "🩺" }] },
   {
     key: "setup",
     label: "Setup",

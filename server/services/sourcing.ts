@@ -14,6 +14,7 @@ import { recommend } from "./fees.js";
 import { researchPrice } from "./pricing.js";
 import { lookupBarcode, type BarcodeProduct } from "./barcode.js";
 import { useAi } from "../context.js";
+import { trackAnthropic } from "../health.js";
 
 export const QuickId = z.object({
   name: z.string().describe("What the item is, specific: brand + model/line + type"),
@@ -47,7 +48,7 @@ export async function quickIdentify(photoPath: string | undefined, hint: string 
     };
   }
   useAi("sourcing");
-  const client = new Anthropic();
+  const client = trackAnthropic(new Anthropic());
   const response = await client.beta.messages.parse({
     model: MODEL,
     max_tokens: 4000,

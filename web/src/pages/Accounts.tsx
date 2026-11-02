@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { timeAgo, toast } from "../ui";
+import { WeeklyBars } from "../components/WeeklyBars";
 
 interface Acct {
   id: number; email: string; owner: boolean; createdAt: string; lastLoginAt: string | null; items: number; sales30: number; aiToday: number; aiLimit: number | null; aiLimitCustom: number | null; onLeaderboard: boolean;
@@ -9,6 +10,96 @@ interface Acct {
 }
 interface Invite { id: number; link: string; note: string; created_at: string; used_at: string | null; revoked_at: string | null; used_by_email: string | null }
 interface Feedback { id: number; email: string | null; page: string; message: string; context: { browser?: string; errors?: string[]; screen?: string }; created_at: string; resolved_at: string | null }
+
+interface Usage {
+  weeks: { week: string; activeSellers: number; signups: number; aiCalls: number; aiCost: number }[];
+  costPerCall: number;
+  plans: Record<string, number>;
+  members: number;
+  conversion: { trialsEnded: number; converted: number; pct: number | null };
+  mrr: number | null;
+  referrals: number;
+}
+
+function UsagePanel() {
+  const [u, setU] = useState<Usage | null>(null);
+  useEffect(() => void api.get<Usage>("/api/admin/usage?weeks=12").then(setU).catch(() => {}), []);
+  if (!u) return null;
+  const last = u.weeks[u.weeks.length - 1];
+  const Tile = ({ label, value, sub }: { label: string; value: string; sub?: string }) => (
+    <div className="card p-3">
+      <div className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-xl font-semibold text-zinc-100">{value}</div>
+      {sub && <div className="text-xs text-zinc-500">{sub}</div>}
+    </div>
+  );
+  return (
+    <section className="space-y-3">
+      <h2 className="font-semibold">📈 How FlipDesk is doing</h2>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <Tile label="Members" value={String(u.members)} sub={`${last.activeSellers} active this week`} />
+        <Tile label="Paying" value={String((u.plans.active ?? 0) + (u.plans.past_due ?? 0))} sub={`${u.plans.trial ?? 0} on trial · ${u.plans.free ?? 0} free`} />
+        <Tile label="Trial → paid" value={u.conversion.pct === null ? "–" : `${u.conversion.pct}%`} sub={`${u.conversion.converted} of ${u.conversion.trialsEnded} finished trials`} />
+        <Tile label="Monthly revenue" value={u.mrr === null ? "–" : `$${u.mrr.toLocaleString()}`} sub={u.mrr === null ? "set FLIPDESK_PRICE_MONTHLY" : "estimate"} />
+        <Tile label="AI cost this week" value={`$${last.aiCost.toFixed(2)}`} sub={`${last.aiCalls} calls · ~$${u.costPerCall}/call`} />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <WeeklyBars title="Active sellers per week" data={u.weeks.map((w) => ({ week: w.week, value: w.activeSellers }))} extra={(i) => `${u.weeks[i].signups} new`} />
+        <WeeklyBars title="AI requests per week" data={u.weeks.map((w) => ({ week: w.week, value: w.aiCalls }))} extra={(i) => `~$${u.weeks[i].aiCost.toFixed(2)}`} />
+      </div>
+      <p className="text-xs text-zinc-500">AI cost is an estimate (FLIPDESK_AI_COST_PER_CALL); your Anthropic console has the exact bill. {u.referrals} referral reward{u.referrals === 1 ? "" : "s"} given.</p>
+    </section>
+  );
+}
+
+interface Ann { id: number; title: string; body: string; link: string; created_at: string; ends_at: string | null; archived_at: string | null; seen: number; dismissed: number }
+
+function Announcements() {
+  const [list, setList] = useState<Ann[] | null>(null);
+  const [f, setF] = useState({ title: "", body: "", link: "", days: "14" });
+  useEffect(() => void api.get<Ann[]>("/api/admin/announcements").then(setList).catch(() => {}), []);
+  if (!list) return null;
+  const live = (a: Ann) => !a.archived_at && (!a.ends_at || Date.parse(a.ends_at.replace(" ", "T") + "Z") > Date.now());
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">📣 Announcements</h2>
+      <p className="text-sm text-zinc-400">Shows once at the top of everyone's dashboard until they close it. Good for "New: …" and "Heads up: eBay is slow today".</p>
+      <form
+        className="grid gap-2 md:grid-cols-[1fr_1fr_8rem_auto]"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          try {
+            setList(await api.post<Ann[]>("/api/admin/announcements", { title: f.title, body: f.body, link: f.link, days: f.days ? Number(f.days) : null }));
+            setF({ title: "", body: "", link: "", days: "14" });
+            toast("Posted");
+          } catch (x) {
+            toast((x as Error).message, "err");
+          }
+        }}
+      >
+        <input className="input" maxLength={120} placeholder="Title, e.g. New: bundles on your phone!" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+        <input className="input" maxLength={300} placeholder="Link (optional): /bundles or https://…" value={f.link} onChange={(e) => setF({ ...f, link: e.target.value })} />
+        <select className="input" value={f.days} onChange={(e) => setF({ ...f, days: e.target.value })}>
+          <option value="3">3 days</option><option value="7">1 week</option><option value="14">2 weeks</option><option value="30">1 month</option><option value="">Until removed</option>
+        </select>
+        <button className="btn-primary" disabled={f.title.trim().length < 3}>Post</button>
+        <textarea className="input md:col-span-4" maxLength={1000} placeholder="More detail (optional)" value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })} />
+      </form>
+      {list.length > 0 && (
+        <ul className="divide-y divide-zinc-800 text-sm">
+          {list.map((a) => (
+            <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+              <span className={live(a) ? "" : "opacity-50"}>
+                <b className="text-zinc-200">{a.title}</b> <span className="text-xs text-zinc-500">{timeAgo(a.created_at)} · seen by {a.seen} · closed by {a.dismissed}{live(a) ? "" : " · ended"}</span>
+              </span>
+              {live(a) && <button className="btn-ghost px-2 py-1 text-xs" onClick={async () => setList((await api.del(`/api/admin/announcements/${a.id}`).then(() => api.get<Ann[]>("/api/admin/announcements"))))}>Remove</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 const PLAN: Record<string, string> = { owner: "Owner", free: "Free", trial: "Trial", active: "Paying", past_due: "Payment issue", expired: "Trial ended" };
 
@@ -110,6 +201,7 @@ export default function Accounts() {
           {s.inviteCode ? "Anyone with your shared invite code (FLIPDESK_INVITE_CODE) can sign up, plus anyone you send an invite link below." : "Only people you send an invite link (below) can sign up."} Everyone except you gets {s.defaultAiLimit} AI requests a day (FLIPDESK_AI_DAILY_LIMIT); change it per person below.
         </p>
       </div>
+      <UsagePanel />
       {link && (
         <div className="card space-y-2 border-amber-800 p-4 text-sm">
           <div>Reset link for <b>{link.email}</b> (works once, for 24 hours). Send it to them yourself:</div>
@@ -187,6 +279,7 @@ export default function Accounts() {
         </table>
       </div>
       <p className="text-xs text-zinc-500">Plan checkbox = free forever for that person (only when billing is on: STRIPE_SECRET_KEY + STRIPE_PRICE_ID).</p>
+      <Announcements />
       <Invites />
       <FeedbackInbox />
     </div>

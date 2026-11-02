@@ -4,6 +4,7 @@ import { money } from "../api";
 import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
 import { GetStarted } from "../components/Onboarding";
 import { GoalsCard, TodayCard } from "../components/Today";
+import { AnnouncementBar } from "../components/Announcements";
 import { useEffect as useEffect_, useReducer } from "react";
 
 interface Dash {
@@ -106,6 +107,8 @@ export default function Dashboard() {
           <Link to="/switch" className="btn-ghost">Coming from Vendoo / List Perfectly?</Link>
         </div>
       </div>
+
+      <AnnouncementBar />
 
       <GetStarted key={gsKey} onWelcome={() => window.dispatchEvent(new Event("fd-open-welcome"))} />
 

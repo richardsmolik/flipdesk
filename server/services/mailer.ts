@@ -3,6 +3,7 @@
  * Works with Gmail (app password), Resend, Postmark, SendGrid, Amazon SES... any SMTP service.
  */
 import nodemailer from "nodemailer";
+import { reportHealth } from "../health.js";
 
 export const mailConfigured = () => Boolean(process.env.SMTP_HOST && process.env.SMTP_FROM);
 
@@ -24,6 +25,12 @@ export async function sendMail(to: string, subject: string, text: string) {
     secure: port === 465,
     auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
   });
-  await t.sendMail({ from: process.env.SMTP_FROM, to, subject, text });
+  try {
+    await t.sendMail({ from: process.env.SMTP_FROM, to, subject, text });
+    reportHealth("mail", true);
+  } catch (e) {
+    reportHealth("mail", false, (e as Error).message);
+    throw e;
+  }
   return true;
 }

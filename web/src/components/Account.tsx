@@ -265,6 +265,7 @@ export function FeedbackButton() {
           >
             <h2 className="font-semibold">💬 Send feedback</h2>
             <p className="text-xs text-zinc-500">A bug, an idea, something confusing? It goes straight to the person who runs this FlipDesk, with the page you're on ({location.pathname}) and any recent errors.</p>
+            <p className="text-xs text-zinc-500">Something not working? <a href="/status" className="text-brand hover:underline">Check the Status page</a> first: it may already say why.</p>
             <textarea className="input min-h-32" autoFocus value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="What happened, or what would make this better?" />
             <div className="flex justify-end gap-2">
               <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>

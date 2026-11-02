@@ -45,7 +45,7 @@ describe("AI daily cap", () => {
     expect(() => runInWorkspace(u2, () => useAi("listing"))).toThrow(/today's 3 AI requests/);
     for (let i = 0; i < 10; i++) runInWorkspace(shops.get("u1")!, () => useAi("listing")); // owner: no cap
     expect((await friend.get("/api/account")).body.ai).toEqual({ used: 3, limit: 3 });
-    expect((await owner.get("/api/account")).body.ai).toEqual({ used: 0, limit: null });
+    expect((await owner.get("/api/account")).body.ai).toEqual({ used: 10, limit: null }); // counted (for the cost chart) but never capped
 
     // the sample shop shares the account's allowance
     await friend.post("/api/workspace").send({ action: "enter_demo" }).expect(200);

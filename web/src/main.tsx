@@ -9,6 +9,7 @@ import { Welcome, type OnboardingState } from "./components/Onboarding";
 import { Shortcuts } from "./components/Shortcuts";
 import { AuthScreen, DemoBanner, PlanBanner, ResetPage, SharePage, ShopSwitch, useBilling, useWorkspace } from "./components/Account";
 import Billing from "./pages/Billing";
+import StatusPage from "./pages/Status";
 import { useParams } from "react-router-dom";
 import Leaderboard from "./pages/Leaderboard";
 import Accounts from "./pages/Accounts";
@@ -102,6 +103,7 @@ function Shell() {
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/billing" element={<Billing />} />
+          <Route path="/status" element={<StatusPage />} />
         </Routes>
         </div>
       </main>

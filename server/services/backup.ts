@@ -86,8 +86,10 @@ export const s3Configured = () => Boolean(process.env.BACKUP_S3_ENDPOINT && proc
 export async function backupAll(dataDir: string, sources: BackupSource[], now = new Date()): Promise<BackupResult> {
   const dir = backupDir(dataDir);
   fs.mkdirSync(dir, { recursive: true });
-  const stamp = now.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
-  const file = path.join(dir, `flipdesk-${stamp}.zip`);
+  const stamp = now.toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  // Never overwrite an existing backup (e.g. the undo copy made right before restoring this one).
+  let file = path.join(dir, `flipdesk-${stamp}.zip`);
+  for (let i = 2; fs.existsSync(file); i++) file = path.join(dir, `flipdesk-${stamp}-${i}.zip`);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-backup-"));
   const partial = `${file}.partial`;
   try {
@@ -104,7 +106,7 @@ export async function backupAll(dataDir: string, sources: BackupSource[], now = 
     fs.renameSync(partial, file);
     // Keep the newest N local copies.
     const keep = Math.max(1, Number(process.env.BACKUP_KEEP) || 7);
-    const all = fs.readdirSync(dir).filter((f) => /^flipdesk-\d{8}-\d{4}\.zip$/.test(f)).sort();
+    const all = fs.readdirSync(dir).filter((f) => /^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(f)).sort();
     for (const old of all.slice(0, Math.max(0, all.length - keep))) fs.rmSync(path.join(dir, old), { force: true });
     const res: BackupResult = { file, bytes: r.bytes, files: r.files, at: now.toISOString(), uploaded: null };
     if (s3Configured()) {
@@ -163,7 +165,7 @@ export function listBackups(dataDir: string) {
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
-    .filter((f) => /^flipdesk-\d{8}-\d{4}\.zip$/.test(f))
+    .filter((f) => /^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(f))
     .sort()
     .reverse()
     .map((f) => ({ name: f, bytes: fs.statSync(path.join(dir, f)).size }));

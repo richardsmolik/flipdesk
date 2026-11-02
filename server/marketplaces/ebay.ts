@@ -15,6 +15,7 @@
 import type { Db, Item, ListingRow } from "../db.js";
 import { getSetting } from "../db.js";
 import { uploadUrl } from "../context.js";
+import { reportHealth } from "../health.js";
 
 const ENV = () => (process.env.EBAY_ENV === "production" ? "production" : "sandbox");
 const API = () => (ENV() === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com");
@@ -116,8 +117,17 @@ async function appToken(): Promise<string> {
 }
 
 async function call<T>(db: Db, method: string, path: string, body?: unknown, useApp = false): Promise<T> {
-  const token = useApp ? await appToken() : await userToken(db);
-  const res = await fetch(`${API()}${path}`, {
+  let token: string;
+  try {
+    token = useApp ? await appToken() : await userToken(db);
+  } catch (e) {
+    reportHealth(useApp ? "ebay" : "ebay-login", false, (e as Error).message);
+    throw e;
+  }
+  if (!useApp) reportHealth("ebay-login", true);
+  let res: Response;
+  try {
+    res = await fetch(`${API()}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -127,7 +137,13 @@ async function call<T>(db: Db, method: string, path: string, body?: unknown, use
       "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID(),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+    });
+  } catch (e) {
+    reportHealth("ebay", false, `Can't reach eBay: ${(e as Error).message}`);
+    throw e;
+  }
+  // 5xx = eBay is having trouble; 4xx = eBay answered (the listing needs a fix), so eBay itself is fine.
+  reportHealth("ebay", res.status < 500, res.status >= 500 ? `eBay error ${res.status} on ${method} ${path}` : undefined);
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   if (!res.ok) throw new Error(friendlyEbayError(res.status, text, `${method} ${path}`));
