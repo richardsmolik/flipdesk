@@ -7,6 +7,8 @@
 import fs from "node:fs";
 import { getItem, getSetting, logActivity, setSetting, type Db } from "../db.js";
 import { generateListing, type ListingDraft } from "./ai.js";
+import { correctPrices, recordAiTitle } from "./aiInsights.js";
+import type { ProviderId } from "./llm.js";
 import { researchPrice } from "./pricing.js";
 
 export interface AiStatus {
@@ -56,7 +58,11 @@ export async function runAutoWrite(db: Db, itemId: number) {
   setStatus(db, itemId, { state: "writing" });
   try {
     const comps = item.notes ? (await researchPrice(db, item.notes)).comps.filter((c) => c.source !== "demo") : [];
-    const { draft, demo } = await generateListing({ photoPaths: paths, hint: item.notes || undefined, cost: item.cost || undefined, comps: comps.length ? comps : undefined });
+    const { draft, demo, provider } = await generateListing({ photoPaths: paths, hint: item.notes || undefined, cost: item.cost || undefined, comps: comps.length ? comps : undefined });
+    if (!demo) {
+      correctPrices(db, provider as ProviderId | undefined, draft); // known lean of this AI, from your backtest
+      if (provider && !getItem(db, itemId)?.title) recordAiTitle(db, draft.title, provider, itemId);
+    }
     const fresh = getItem(db, itemId)!; // re-read: you may have typed while the AI worked
     const specifics = { ...Object.fromEntries(draft.item_specifics.map((s) => [s.name, s.value])), ...fresh.specifics };
     const upd: Record<string, unknown> = {

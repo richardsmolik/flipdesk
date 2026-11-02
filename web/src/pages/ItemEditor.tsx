@@ -10,6 +10,38 @@ import PhotoEditor from "../components/PhotoEditor";
 import PhoneUpload from "../components/PhoneUpload";
 import Duplicates from "../components/Duplicates";
 
+/** What came back with an AI draft: a price corrected for the AI's known lean, and a second AI's price. */
+interface AiNotes {
+  correction?: { note: string } | null;
+  secondOpinion?: { name: string; price: number; quickSale: number; diffPct: number; agree: boolean } | null;
+}
+function rememberAiNotes(itemId: number, r: AiNotes) {
+  if (r.correction || r.secondOpinion) sessionStorage.setItem(`ainotes-${itemId}`, JSON.stringify({ correction: r.correction, secondOpinion: r.secondOpinion }));
+  else sessionStorage.removeItem(`ainotes-${itemId}`);
+}
+function AiNotesBanner({ itemId, tick }: { itemId: number; tick: number }) {
+  void tick;
+  let n: AiNotes | null = null;
+  try {
+    n = JSON.parse(sessionStorage.getItem(`ainotes-${itemId}`) ?? "null");
+  } catch {
+    n = null;
+  }
+  if (!n) return null;
+  const so = n.secondOpinion;
+  return (
+    <div className="space-y-1 rounded-md border border-zinc-700 bg-zinc-900/60 p-3 text-sm">
+      {n.correction && <p>🎯 {n.correction.note}</p>}
+      {so && (so.agree ? (
+        <p className="text-green-300">✓ Second opinion: {so.name} prices it at ${so.price.toFixed(2)}, within {so.diffPct}% of this price.</p>
+      ) : (
+        <p className="text-amber-300">⚠️ Second opinion: {so.name} prices it at ${so.price.toFixed(2)} ({so.diffPct}% apart). Worth checking sold comps before listing.</p>
+      ))}
+      <button className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (sessionStorage.removeItem(`ainotes-${itemId}`), location.reload())}>Dismiss</button>
+    </div>
+  );
+}
+
 interface Draft {
   title: string;
   short_title: string;
@@ -80,9 +112,10 @@ function NewItem() {
         fd.append("itemId", String(item.id));
         if (hint) fd.append("hint", hint);
         if (cost) fd.append("cost", cost);
-        const r = await api.post<{ draft: Draft; demo: boolean }>("/api/ai/generate", fd);
+        const r = await api.post<{ draft: Draft; demo: boolean } & AiNotes>("/api/ai/generate", fd);
         await api.patch(`/api/items/${item.id}`, applyDraft(r.draft));
         sessionStorage.setItem(`draft-${item.id}`, JSON.stringify(r.draft));
+        rememberAiNotes(item.id, r);
         toast(r.demo ? "Demo draft created - add an AI key in Settings → AI for real AI" : "Listing written - review and crosslist");
       }
       nav(`/items/${item.id}`);
@@ -194,6 +227,7 @@ function EditItem({ id }: { id: number }) {
   const [form, setForm] = useState<Partial<Item>>({});
   const [draft, setDraft] = useState<Draft | null>(() => JSON.parse(sessionStorage.getItem(`draft-${id}`) ?? "null"));
   const [busy, setBusy] = useState<string | null>(null);
+  const [notesTick, setNotesTick] = useState(0);
   const [modal, setModal] = useState<null | "sold" | "restock" | "comps">(null);
   const { byId } = useMarketplaces();
   const shipping = 0;
@@ -260,7 +294,9 @@ function EditItem({ id }: { id: number }) {
       fd.append("itemId", String(id));
       if (form.notes) fd.append("hint", form.notes);
       if (form.cost) fd.append("cost", String(form.cost));
-      const r = await api.post<{ draft: Draft; demo: boolean }>("/api/ai/generate", fd);
+      const r = await api.post<{ draft: Draft; demo: boolean } & AiNotes>("/api/ai/generate", fd);
+      rememberAiNotes(Number(id), r);
+      setNotesTick((n) => n + 1);
       setDraft(r.draft);
       sessionStorage.setItem(`draft-${id}`, JSON.stringify(r.draft));
       setForm((f) => ({ ...f, ...applyDraft(r.draft) }));
@@ -292,6 +328,7 @@ function EditItem({ id }: { id: number }) {
 
   return (
     <div className="space-y-5">
+      <AiNotesBanner itemId={id} tick={notesTick} />
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <Link to="/inventory" className="text-xs text-zinc-500 hover:text-zinc-300">← Inventory</Link>

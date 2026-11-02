@@ -2,6 +2,7 @@ import { useState } from "react";
 import { money } from "../api";
 import { MpBadge, useFetch, useMarketplaces } from "../ui";
 import Backtest from "../components/Backtest";
+import AiInsights from "../components/AiInsights";
 
 interface G { mileageCost?: number; profitAfterMileage?: number; key: string; unitsBought: number; unitsSold: number; revenue: number; profit: number; cogs: number; roiPct: number | null; sellThroughPct: number | null; avgDaysToSell: number | null; avgProfit: number | null }
 interface R {
@@ -150,6 +151,7 @@ export default function Reports() {
           </table>
         </div>
       </div>
+      <AiInsights />
       <Backtest />
     </div>
   );

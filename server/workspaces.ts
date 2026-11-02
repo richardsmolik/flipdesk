@@ -275,6 +275,25 @@ export class Workspaces {
     }
   }
 
+  /** AI cost per item sold in one shop over the last N days, and what share of profit that is. */
+  aiPerSale(ws: Workspace, days = 30) {
+    const ai = this.site.prepare(`SELECT COALESCE(SUM(cost),0) AS c, COUNT(*) AS n FROM ai_calls WHERE ws_key = ? AND at >= datetime('now', ?)`).get(ws.key, `-${days} days`) as { c: number; n: number };
+    const s = ws.db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(profit),0) AS p, COALESCE(SUM(sale_price),0) AS r FROM sales WHERE sold_at >= datetime('now', ?)`).get(`-${days} days`) as { n: number; p: number; r: number };
+    const byTask = this.site.prepare(`SELECT task, COUNT(*) AS calls, ROUND(SUM(cost), 4) AS cost FROM ai_calls WHERE ws_key = ? AND at >= datetime('now', ?) GROUP BY task ORDER BY cost DESC`).all(ws.key, `-${days} days`) as { task: string; calls: number; cost: number }[];
+    const cost = Math.round(ai.c * 100) / 100;
+    return {
+      days,
+      aiCost: cost,
+      aiCalls: ai.n,
+      sales: s.n,
+      profit: Math.round(s.p * 100) / 100,
+      perSale: s.n ? Math.round((ai.c / s.n) * 100) / 100 : null,
+      profitPerSale: s.n ? Math.round((s.p / s.n) * 100) / 100 : null,
+      shareOfProfit: s.p > 0 ? Math.round((ai.c / s.p) * 1000) / 10 : null,
+      byTask,
+    };
+  }
+
   /** Owner's Settings → AI: providers, choices, this month's spending. */
   aiOverview() {
     const r = getAiRouting();
@@ -1233,6 +1252,11 @@ export class Workspaces {
     const chk = this.siteGet<{ at: string; ok: boolean } | null>("lastBackupCheck", null);
     const speed = speedLine(speedTrend(this.siteGet<SelfCheck[]>("selfChecks", [])));
     if (speed) lines.push(speed);
+    const own = this.ownerContact();
+    if (own) {
+      const cps = this.aiPerSale(own.ws);
+      if (cps.aiCalls && cps.perSale !== null) lines.push(`💵 AI cost per sale (your shop, 30 days): $${cps.perSale.toFixed(2)}${cps.shareOfProfit !== null ? ` (${cps.shareOfProfit}% of profit)` : ""}`);
+    }
     const real = realTrend(this.siteGet<RealDay[]>("realSpeed", []));
     if (real?.rows.length) {
       const slowest = [...real.rows].filter((r) => r.n >= 5).sort((a, b) => b.p95 - a.p95)[0];
@@ -2637,6 +2661,13 @@ export class Workspaces {
       this.siteSet("aiBudget", b);
       this.audit(req, "AI budget changed", `monthly ${b.monthly ?? "none"}, per member ${b.perMember ?? "none"}`);
       res.json(this.aiOverview());
+    });
+    // The shop you're in: what AI cost per item sold (last 30 days), next to profit per sale.
+    root.get("/api/ai/per-sale", (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      const ws = this.current(req, req.fdUser ?? null);
+      if (!ws) return void res.status(404).json({ error: "No shop" });
+      res.json(this.aiPerSale(ws));
     });
     // Anyone signed in: their own AI spending this month (and the allowance, if there is one).
     root.get("/api/ai/mine", (req: R, res) => {

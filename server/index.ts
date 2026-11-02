@@ -14,6 +14,7 @@ import { sendDigest } from "./services/digest.js";
 import { syncEbayLabelCosts } from "./services/shipping.js";
 import { syncEbayTraffic } from "./services/traffic.js";
 import { ebayCheckIfDue } from "./services/ebaySmoke.js";
+import { reportCardIfDue } from "./services/aiInsights.js";
 import { markGood, noteStart } from "./services/versions.js";
 import { safeMode } from "./safeMode.js";
 
@@ -85,6 +86,7 @@ every(2 * 60_000, "email", (db) => pollImap(db)); // sale emails from every mark
 every(15 * 60_000, "weekly", (db) => sendDigest(db)); // Monday-morning summary (once per week)
 every(30 * 60_000, "ebay-labels", (db) => syncEbayLabelCosts(db)); // exact eBay label costs -> profit
 every(12 * 60 * 60_000, "ebay-traffic", (db) => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"
+every(6 * 60 * 60_000, "ai-report-card", (db) => reportCardIfDue(db)); // monthly (if turned on): re-test the AIs on new sales
 every(6 * 60 * 60_000, "ebay-weekly", (db, ws) => ebayCheckIfDue(db, ws.uploadDir)); // weekly eBay check: catch eBay changes before a listing fails
 
 // Nightly backup of every shop (data/backups, plus cloud storage when BACKUP_S3_* is set).

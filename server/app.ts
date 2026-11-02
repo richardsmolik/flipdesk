@@ -8,6 +8,7 @@ import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
 import { ebaySmokeTest, runWeeklyEbay, weeklyEbay } from "./services/ebaySmoke.js";
 import { estimateCost, getBacktest, listBacktests, pickCases, startBacktest } from "./services/backtest.js";
+import { calibrations, correctionOn, correctPrices, recordAiTitle, reportCardSettings, secondOpinion, secondOpinionSettings, titleReport } from "./services/aiInsights.js";
 import { PROVIDER_IDS, PROVIDERS, providerReady, type ProviderId } from "./services/llm.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
@@ -464,7 +465,18 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const comps = hint ? (await researchPrice(db, hint)).comps : [];
     const cost = req.body.cost ? Number(req.body.cost) : undefined;
     const result = await generateListing({ photoPaths, hint, cost, comps: comps.some((c) => c.source !== "demo") ? comps : undefined });
-    res.json({ ...result, uploaded: photoPaths });
+    if (result.demo) return void res.json({ ...result, uploaded: photoPaths });
+    const provider = result.provider as ProviderId | undefined;
+    // Learn from results: correct this AI's known lean, get a second opinion on pricier items, remember the title.
+    const correction = correctPrices(db, provider, result.draft);
+    let second = null;
+    try {
+      second = await secondOpinion(db, provider, result.draft, photoPaths);
+    } catch {
+      /* a second opinion is a bonus: never block the draft */
+    }
+    if (provider) recordAiTitle(db, result.draft.title, provider, itemId);
+    res.json({ ...result, uploaded: photoPaths, correction, secondOpinion: second });
   });
 
   api.get("/pricing", async (req, res) => {
@@ -874,6 +886,23 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const b = getBacktest(db, String(req.params.id));
     if (!b) return void res.status(404).json({ error: "Not found" });
     res.json(b);
+  });
+
+  // What FlipDesk learned about the AIs from your results (see services/aiInsights.ts).
+  api.get("/ai-insights", (_req, res) => {
+    res.json({
+      correction: { on: correctionOn(db), calibrations: Object.values(calibrations(db)) },
+      secondOpinion: secondOpinionSettings(db),
+      reportCard: reportCardSettings(db),
+      titles: titleReport(db),
+    });
+  });
+  api.put("/ai-insights/settings", (req, res) => {
+    const b = z.object({ correction: z.boolean().optional(), secondOpinion: z.object({ on: z.boolean(), threshold: z.number().min(0).max(100000) }).optional(), reportCard: z.boolean().optional() }).parse(req.body);
+    if (b.correction !== undefined) setSetting(db, "aiCorrection", { on: b.correction });
+    if (b.secondOpinion) setSetting(db, "secondOpinion", b.secondOpinion);
+    if (b.reportCard !== undefined) setSetting(db, "aiReportCard", { ...reportCardSettings(db), on: b.reportCard });
+    res.json({ correction: { on: correctionOn(db), calibrations: Object.values(calibrations(db)) }, secondOpinion: secondOpinionSettings(db), reportCard: reportCardSettings(db), titles: titleReport(db) });
   });
 
   // Weekly eBay check (full test on the sandbox, read-only on a real account).

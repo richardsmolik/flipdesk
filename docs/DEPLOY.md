@@ -206,6 +206,14 @@ Reports → **Which AI prices best?** tests the AIs you pick on items you've alr
 - **Results:** a winner needs 5+ answers. If your own prices were closer, it says so. One button puts the winner first for listings. The last 5 runs are kept.
 - **Limits of the test:** AIs still know general prices from training, and items edited after selling show their final details. A few items are a hint; 50+ are evidence.
 
+### What FlipDesk learns from your results (Reports → 🧠)
+
+- **Correcting each AI's lean:** if your latest backtest shows an AI guesses too high or too low on your items (10+ items, a lean of 5% or more), its price suggestions are adjusted by that much. The item shows a note such as "ChatGPT guessed 25% too high on your past sales, so its price was adjusted from $200 to $160." On by default; switch it off in the 🧠 card.
+- **Second opinion on pricier items:** when the AI prices something at or above your threshold (default $100), the next AI in your list prices it too. If they're more than 25% apart, the item shows both prices so you can check comps before listing. Needs two AIs set up. Each one counts as an AI request.
+- **AI titles vs your own:** FlipDesk remembers every title an AI writes. A title counts as the AI's if you kept it or nearly all its words. For items listed in the last year, the card compares AI titles (overall and per AI) with yours on sell-through, days to sell, and sale price as a % of list. This shows how items did, not why.
+- **Monthly AI report card** (off by default): once a month, after 10+ new sales and with 2+ AIs set up, the backtest re-runs on your newest 30 sales. An Inbox note and phone alert say which AI is best, and whether that changed.
+- **AI cost per sale:** this shop's AI spend over the last 30 days divided by its sales, next to profit per sale and as a share of profit, split by feature. The owner's weekly report includes it too.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:
