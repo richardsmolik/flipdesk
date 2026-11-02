@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import QRCode from "qrcode";
+import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/browser";
 import { timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import { switchShop, useAccount, useWorkspace } from "../components/Account";
 
@@ -303,6 +304,109 @@ function AlertSettings() {
   );
 }
 
+interface PasskeyRow { id: string; name: string; device: string; created_at: string; last_used_at: string | null }
+function Passkeys() {
+  const [st, setSt] = useState<{ passkeys: PasskeyRow[]; unavailable?: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => void api.get<{ passkeys: PasskeyRow[]; unavailable?: string }>("/api/passkeys").then(setSt).catch(() => setSt(null)), []);
+  if (!st) return null;
+  const supported = browserSupportsWebAuthn();
+  const add = async () => {
+    setBusy(true);
+    try {
+      const options = await api.post<Parameters<typeof startRegistration>[0]["optionsJSON"]>("/api/passkeys/register/options");
+      const response = await startRegistration({ optionsJSON: options });
+      const r = await api.post<{ passkeys: PasskeyRow[] }>("/api/passkeys/register", { response });
+      setSt({ passkeys: r.passkeys });
+      toast("Passkey added. Next time, tap “Sign in with a passkey”.");
+    } catch (e) {
+      const m = (e as Error).message;
+      toast(/NotAllowed|cancel|timed out|not allowed/i.test(m) ? "Cancelled" : /InvalidState|already/i.test(m) ? "This device already has a FlipDesk passkey." : m, "err");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">🔑 Passkeys {st.passkeys.length > 0 && <span className="text-sm font-normal text-green-400">{st.passkeys.length} set up</span>}</h2>
+      <p className="text-sm text-zinc-400">Sign in with Face ID, your fingerprint, Windows Hello or your phone instead of typing a password and code. A passkey only works on FlipDesk's own address, so a fake sign-in page can't steal it.</p>
+      {st.unavailable && <p className="text-sm text-amber-300">{st.unavailable}</p>}
+      {st.passkeys.length > 0 && (
+        <ul className="divide-y divide-zinc-800 rounded-md border border-zinc-800">
+          {st.passkeys.map((k) => (
+            <li key={k.id} className="flex flex-wrap items-center gap-2 p-2 text-sm">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{k.name}</div>
+                <div className="text-xs text-zinc-500">Added {timeAgo(k.created_at)}{k.last_used_at ? ` · last used ${timeAgo(k.last_used_at)}` : " · not used yet"}</div>
+              </div>
+              <button
+                className="btn-ghost text-xs"
+                onClick={async () => {
+                  const name = prompt("Name this passkey (e.g. “My iPhone”)", k.name);
+                  if (name?.trim()) setSt({ passkeys: (await api.patch<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`, { name: name.trim() })).passkeys });
+                }}
+              >
+                Rename
+              </button>
+              <button
+                className="btn-ghost text-xs text-red-300"
+                onClick={async () => {
+                  if (!confirm(`Remove “${k.name}”? That device won't be able to sign in with it any more.`)) return;
+                  setSt({ passkeys: (await api.del<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`)).passkeys });
+                }}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!st.unavailable &&
+        (supported ? (
+          <button className="btn-primary" disabled={busy} onClick={add}>{busy ? "…" : st.passkeys.length ? "Add another device" : "Add a passkey on this device"}</button>
+        ) : (
+          <p className="text-xs text-zinc-500">This browser can't make passkeys. Try Safari, Chrome or Edge on a recent phone or computer.</p>
+        ))}
+      <p className="text-xs text-zinc-500">Keep your password too: it's the way back in if you lose every device.</p>
+    </section>
+  );
+}
+
+interface DeviceRow { device: string; ip: string | null; firstSeen: string; lastSeen: string; thisOne: boolean }
+function Devices() {
+  const [st, setSt] = useState<{ devices: DeviceRow[]; canSignOut: boolean } | null>(null);
+  useEffect(() => void api.get<{ devices: DeviceRow[]; canSignOut: boolean }>("/api/devices").then(setSt).catch(() => setSt(null)), []);
+  if (!st || !st.canSignOut) return null;
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">📱 Signed-in devices</h2>
+      <p className="text-sm text-zinc-400">Browsers that have signed in to your FlipDesk. When a new one signs in you get an alert with a “this wasn't me” link.</p>
+      {st.devices.length ? (
+        <ul className="divide-y divide-zinc-800 rounded-md border border-zinc-800">
+          {st.devices.map((d, i) => (
+            <li key={i} className="p-2 text-sm">
+              <span className="font-medium">{d.device}</span> {d.thisOne && <span className="text-xs text-green-400">this one</span>}
+              <div className="text-xs text-zinc-500">Last signed in {timeAgo(d.lastSeen)} · first {timeAgo(d.firstSeen)}{d.ip ? ` · ${d.ip}` : ""}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-zinc-500">FlipDesk starts remembering devices from your next sign-in.</p>
+      )}
+      <button
+        className="btn-ghost text-red-300"
+        onClick={async () => {
+          if (!confirm("Sign out every other device? This one stays signed in.")) return;
+          setSt({ ...st, ...(await api.post<{ devices: DeviceRow[] }>("/api/devices/sign-out-everywhere")) });
+          toast("Every other device is signed out");
+        }}
+      >
+        Sign out everywhere else
+      </button>
+    </section>
+  );
+}
+
 function TwoStep() {
   const [st, setSt] = useState<{ enabled: boolean; recoveryLeft: number; unavailable?: string } | null>(null);
   const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
@@ -453,7 +557,9 @@ function SiteSections() {
   return (
     <>
       {a?.user && <AccountSection email={a.user.email} optOut={Boolean(a.emailOptOut)} />}
+      {!w?.shared && <Passkeys />}
       {!w?.shared && <TwoStep />}
+      {!w?.shared && <Devices />}
       {!w?.shared && <YourData />}
       {a?.canEditSite && <Backups />}
       {a?.canEditSite && <AlertSettings />}

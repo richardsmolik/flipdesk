@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod/v4";
-import { getSetting, openDb, setSetting, logActivity, type Db } from "./db.js";
+import { getSetting, openDb, setSetting, logActivity, type Db, type Rehearsal } from "./db.js";
 import { hostGuard, localOnly, rateLimit, sameSiteGuard, securityHeaders } from "./security.js";
 import { createApp } from "./app.js";
 import { runInWorkspace, setAiGate, type WorkspaceContext } from "./context.js";
@@ -30,10 +30,11 @@ import { FIRST_WEEK } from "./services/firstWeek.js";
 import { askHelp, draftArticle, setExtraArticles, type HelpTurn } from "./services/help.js";
 import { getProblem, markSent } from "./services/replay.js";
 import { createIssue, githubIssuesReady, problemIssue } from "./services/github.js";
-import { runSelfCheck, type SelfCheck } from "./services/selfcheck.js";
+import { runSelfCheck, speedLine, speedTrend, type SelfCheck } from "./services/selfcheck.js";
 import { newRecoveryCodes, newSecret, otpauthUrl, useRecoveryCode, verifyTotp } from "./services/totp.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
-import { notify } from "./services/alerts.js";
+import { notify, raiseAlert } from "./services/alerts.js";
+import { describeDevice, ensurePasskeys, finishLogin, finishRegistration, hasPasskeys, listPasskeys, loginOptions, registrationOptions, relyingParty, removePasskey, renamePasskey } from "./services/passkeys.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
 import { ebayIsLive } from "./marketplaces/ebay.js";
 import { extractEntry, zipEntries } from "./services/zip.js";
@@ -149,6 +150,10 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')), actor TEXT NOT NULL, action TEXT NOT NULL,
         detail TEXT NOT NULL DEFAULT '', ip TEXT);
       CREATE TABLE IF NOT EXISTS owner_sessions (token_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS known_devices (actor_key TEXT NOT NULL, device_hash TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', ip TEXT,
+        first_seen TEXT NOT NULL DEFAULT (datetime('now')), last_seen TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (actor_key, device_hash));
+      CREATE TABLE IF NOT EXISTS not_me (token_hash TEXT PRIMARY KEY, actor_key TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL, used_at TEXT);
       CREATE TABLE IF NOT EXISTS help_articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, from_question TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), archived_at TEXT);`);
     try {
@@ -163,6 +168,7 @@ export class Workspaces {
         /* already there */
       }
     }
+    ensurePasskeys(site as unknown as Db);
     return site as unknown as Db;
   }
 
@@ -477,6 +483,7 @@ export class Workspaces {
     this.site.prepare("UPDATE shares SET revoked_at = datetime('now') WHERE ws_key IN (?, ?)").run(`u${userId}`, `u${userId}d`);
     this.accounts!.prepare("DELETE FROM users WHERE id = ?").run(userId);
     this.accounts!.prepare("DELETE FROM ai_usage WHERE user_id = ?").run(userId);
+    for (const t of ["passkeys WHERE owner_key", "known_devices WHERE actor_key", "not_me WHERE actor_key"]) this.site.prepare(`DELETE FROM ${t} = ?`).run(`u${userId}`);
     fs.rmSync(path.join(this.dataDir, "users", String(userId)), { recursive: true, force: true });
   }
 
@@ -1111,6 +1118,8 @@ export class Workspaces {
     if (inc.n) lines.push(`🩺 ${inc.n} outage${inc.n === 1 ? "" : "s"} this week (see Tools → Status)`);
     const lb = this.siteGet<{ at?: string; error?: string | null } | null>("lastBackup", null);
     const chk = this.siteGet<{ at: string; ok: boolean } | null>("lastBackupCheck", null);
+    const speed = speedLine(speedTrend(this.siteGet<SelfCheck[]>("selfChecks", [])));
+    if (speed) lines.push(speed);
     lines.push(`🛟 ${lb?.at ? `Last backup ${new Date(lb.at).toISOString().slice(0, 10)}${lb.error ? " (upload problem)" : ""}` : "No backup yet"}${chk ? ` · last restore check ${chk.ok ? "passed" : "FAILED"}` : ""}`);
     return { title: `FlipDesk this week: ${cur.activeSellers} active, ${cur.signups} new`, body: lines.join("\n") };
   }
@@ -1358,6 +1367,23 @@ export class Workspaces {
     add(githubIssuesReady()
       ? { key: "reports", group: "Staying informed", label: "Problem reports to GitHub", state: "ok", detail: `Issues go to ${process.env.FLIPDESK_GITHUB_REPO}` }
       : { key: "reports", group: "Staying informed", label: "Problem reports to GitHub", state: "optional", detail: "Without it, reports can still be downloaded and sent by hand", fix: "Set FLIPDESK_GITHUB_REPO and GITHUB_TOKEN (Issues: write)" });
+    if (this.password || this.multiuser) {
+      const keys = listPasskeys(this.site, this.keyFor(this.multiuser ? o?.ws.userId : undefined)).length;
+      add(keys
+        ? { key: "passkey", group: "Address & safety", label: "Passkey (owner)", state: "ok", detail: `${keys} set up` }
+        : { key: "passkey", group: "Address & safety", label: "Passkey (owner)", state: "optional", detail: "Sign in with Face ID or a fingerprint; can't be phished", href: "/settings" });
+    }
+    const ownerDbFile = o?.ws.dbFile;
+    const reh = (() => {
+      try {
+        return ownerDbFile ? (JSON.parse(fs.readFileSync(path.join(path.dirname(ownerDbFile), "before-update", "last.json"), "utf8")) as Rehearsal) : null;
+      } catch {
+        return null;
+      }
+    })();
+    add(reh
+      ? { key: "update-copy", group: "Data safety", label: "Updates tried on a copy first", state: reh.ok ? "ok" : "fail", detail: reh.ok ? `Last update (v${reh.from} → v${reh.to}) passed on a copy ${Math.round((age(reh.at) ?? 0) / 24)} days ago` : `Last update stopped: ${reh.detail}` }
+      : { key: "update-copy", group: "Data safety", label: "Updates tried on a copy first", state: "ok", detail: "Automatic: the next update that changes your data is tried on a copy before it touches the real thing" });
     const sc = this.siteGet<SelfCheck[]>("selfChecks", [])[0];
     add(sc
       ? { key: "selfcheck", group: "Data safety", label: "Nightly self-check", state: sc.ok ? "ok" : "fail", detail: sc.ok ? "Passing" : sc.problems[0] ?? "Problems found", href: "/status" }
@@ -1548,16 +1574,115 @@ export class Workspaces {
     return token;
   }
 
+  /** The older single-password cookie (still accepted until "sign out everywhere" bumps the epoch). */
+  private legacyOwnerCookie() {
+    const epoch = this.siteGet<number>("ownerCookieEpoch", 0);
+    return crypto.createHmac("sha256", this.password).update(epoch ? `flipdesk-session:${epoch}` : "flipdesk-session").digest("base64url");
+  }
+
+  // ---------------- Sign-in, devices, "this wasn't me" ----------------
+
+  /** Every successful sign-in goes through here: session cookie, new-device check, activity log. */
+  private signIn(req: Request, res: Response, userId: number | undefined, how: string) {
+    const cookies = [userId ? cookie(req, "fd_user", this.newSession(userId), 60 * 60 * 24 * 30) : cookie(req, "fd_session", this.newOwnerSession(), 60 * 60 * 24 * 30)];
+    const dev = this.noteDevice(req, userId, how);
+    if (dev) cookies.push(dev);
+    res.setHeader("Set-Cookie", cookies);
+    this.audit(req, "signed in", how, userId ? this.accountEmail(userId) : "owner");
+  }
+
+  /** Remember this browser for this account; tell them when a browser they haven't used before signs in. */
+  private noteDevice(req: Request, userId: number | undefined, how: string): string | null {
+    try {
+      let id = readCookie(req, "fd_dev") ?? "";
+      let set: string | null = null;
+      if (!/^[A-Za-z0-9_-]{20,64}$/.test(id)) {
+        id = crypto.randomBytes(18).toString("base64url");
+        set = cookie(req, "fd_dev", id, 60 * 60 * 24 * 400);
+      }
+      const key = this.keyFor(userId);
+      const device = describeDevice(String(req.headers["user-agent"] ?? ""));
+      const known = this.site.prepare("SELECT 1 FROM known_devices WHERE actor_key = ? AND device_hash = ?").get(key, sha(id));
+      if (known) {
+        this.site.prepare("UPDATE known_devices SET last_seen = datetime('now'), ip = ?, device = ? WHERE actor_key = ? AND device_hash = ?").run(req.ip ?? null, device, key, sha(id));
+        return set;
+      }
+      const before = (this.site.prepare("SELECT COUNT(*) AS n FROM known_devices WHERE actor_key = ?").get(key) as { n: number }).n;
+      this.site.prepare("INSERT INTO known_devices (actor_key, device_hash, device, ip) VALUES (?, ?, ?, ?)").run(key, sha(id), device, req.ip ?? null);
+      if (before > 0) void this.newDeviceAlert(req, userId, device, how).catch((e) => console.error("[new device]", (e as Error).message));
+      return set;
+    } catch {
+      return null; // never block a sign-in
+    }
+  }
+
+  /** "New sign-in: Safari on iPhone" with a "this wasn't me" link that signs every device out. */
+  async newDeviceAlert(req: Request, userId: number | undefined, device: string, how: string) {
+    const key = this.keyFor(userId);
+    const token = crypto.randomBytes(24).toString("base64url");
+    this.site.prepare("DELETE FROM not_me WHERE expires_at < datetime('now')").run();
+    this.site.prepare("INSERT INTO not_me (token_hash, actor_key, device, expires_at) VALUES (?, ?, ?, datetime('now','+14 days'))").run(sha(token), key, device);
+    const base = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+    const link = `${base}/not-me?t=${token}`;
+    const when = new Date().toUTCString();
+    const title = `New sign-in to FlipDesk: ${device}`;
+    const body = `Someone signed in to ${userId ? "your FlipDesk account" : "your FlipDesk"} from a browser it hasn't seen before.\n\nDevice: ${device}\nAddress: ${req.ip ?? "unknown"}\nWhen: ${when}${how ? `\nHow: ${how}` : ""}\n\nIf this was you, there's nothing to do.\nIf it wasn't: ${link}\nThat signs out every device right away${userId ? " and sends you a link to choose a new password" : ""}.`;
+    this.audit(req, "new device", device, userId ? this.accountEmail(userId) : "owner");
+    if (userId) {
+      const email = this.accountEmail(userId);
+      // Security emails go out even if reminder emails are turned off.
+      if (mailConfigured() || process.env.SMTP_HOST === "test") await sendMail(email, title, body).catch(() => false);
+      const ws = this.get(this.realKey(userId));
+      if (ws) await runInWorkspace(ws, () => notify(ws.db, "security", title, body)).catch(() => false);
+    } else {
+      await this.tellOwner(title, body);
+      const ws = this.get("main");
+      if (ws) raiseAlert(ws.db, { kind: "security", severity: "warning", title, body: `${device} from ${req.ip ?? "?"}. Not you? Open the link in your phone alert, or Settings → Signed-in devices → Sign out everywhere.` });
+    }
+    return { link };
+  }
+
+  /** Sign this account out everywhere (and forget its devices). */
+  signOutEverywhere(userId: number | undefined) {
+    if (userId) this.accounts!.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    else {
+      this.site.prepare("DELETE FROM owner_sessions").run();
+      this.siteSet("ownerCookieEpoch", Date.now()); // the older password cookie stops working too
+    }
+    this.site.prepare("DELETE FROM known_devices WHERE actor_key = ?").run(this.keyFor(userId));
+  }
+
+  /** The "this wasn't me" link. */
+  async notMe(req: Request, token: string) {
+    const r = this.site.prepare("SELECT * FROM not_me WHERE token_hash = ? AND expires_at > datetime('now') AND used_at IS NULL").get(sha(token)) as { actor_key: string; device: string; created_at: string } | undefined;
+    if (!r) throw Object.assign(new Error("This link has expired or was already used. Sign in and use Settings → Signed-in devices → Sign out everywhere."), { status: 410 });
+    this.site.prepare("UPDATE not_me SET used_at = datetime('now') WHERE token_hash = ?").run(sha(token));
+    const userId = r.actor_key === "owner" ? undefined : Number(r.actor_key.slice(1));
+    this.signOutEverywhere(userId);
+    // Passkeys added since that sign-in could be the intruder's: remove them.
+    const removed = this.site.prepare("DELETE FROM passkeys WHERE owner_key = ? AND created_at >= ?").run(r.actor_key, r.created_at).changes;
+    let resetSent = false;
+    if (userId) resetSent = (await this.forgot(this.accountEmail(userId)).catch(() => ({ emailed: false }))).emailed;
+    this.audit(req, "signed out everywhere", `"this wasn't me" for ${r.device}${removed ? `; removed ${removed} new passkey(s)` : ""}`, userId ? this.accountEmail(userId) : "owner");
+    await this.tellOwner("🔐 Someone used \"this wasn't me\" on FlipDesk", `${userId ? this.accountEmail(userId) : "You"}: every device was signed out (${r.device}).`, { email: false }).catch(() => {});
+    return { ok: true, resetSent, removedPasskeys: removed, mode: this.multiuser ? "accounts" : "single" };
+  }
+
+  devicesFor(userId: number | undefined, req: Request) {
+    const cur = readCookie(req, "fd_dev");
+    const here = cur ? sha(cur) : "";
+    return (this.site.prepare("SELECT device_hash, device, ip, first_seen, last_seen FROM known_devices WHERE actor_key = ? ORDER BY last_seen DESC").all(this.keyFor(userId)) as { device_hash: string; device: string; ip: string | null; first_seen: string; last_seen: string }[]).map((d) => ({ device: d.device, ip: d.ip, firstSeen: d.first_seen, lastSeen: d.last_seen, thisOne: d.device_hash === here }));
+  }
+
   // ---------------- The front door ----------------
 
-  /** Single-user password check (same cookie the shop apps use). */
+  /** Single-user password check. */
   private passwordOk(req: Request) {
     if (!this.password) return true;
     const c = readCookie(req, "fd_session") ?? "";
     const session = Boolean(c) && Boolean(this.site.prepare("SELECT 1 FROM owner_sessions WHERE token_hash = ? AND expires_at > datetime('now')").get(sha(c)));
     if (this.twofa()) return session; // with two-step sign-in, only a real session counts
-    const v = crypto.createHmac("sha256", this.password).update("flipdesk-session").digest("base64url");
-    return session || c === v;
+    return session || c === this.legacyOwnerCookie();
   }
 
   /** Which shop this browser is looking at. */
@@ -1590,7 +1715,7 @@ export class Workspaces {
     root.use(securityHeaders, hostGuard, sameSiteGuard);
     // Slow down password guessing and email bombing (per IP, on top of the per-account limits).
     const signInLimit = rateLimit(30, 15 * 60_000, "Too many sign-in attempts from here. Wait 15 minutes.");
-    root.use(["/api/login", "/api/auth/login", "/api/auth/reset"], (req, res, next) => (req.method === "POST" ? signInLimit(req, res, next) : next()));
+    root.use(["/api/login", "/api/auth/login", "/api/auth/reset", "/api/passkeys/login", "/api/auth/not-me"], (req, res, next) => (req.method === "POST" ? signInLimit(req, res, next) : next()));
     root.use("/api/auth/signup", rateLimit(10, 60 * 60_000, "Too many sign-ups from here. Try again later."));
     root.use("/api/auth/forgot", rateLimit(10, 60 * 60_000, "Too many reset requests from here. Try again later."));
 
@@ -1692,10 +1817,7 @@ export class Workspaces {
         return void res.status(401).json({ error: "That code isn't right. Check the time on your phone, or use a recovery code." });
       }
       this.loginTickets.delete(b.ticket);
-      const actor = t.userId ? this.accountEmail(t.userId) : "owner";
-      this.audit(req, "signed in", how === "recovery" ? "with a recovery code" : "with two-step code", actor);
-      if (t.userId) res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(t.userId), 60 * 60 * 24 * 30));
-      else res.setHeader("Set-Cookie", cookie(req, "fd_session", this.newOwnerSession(), 60 * 60 * 24 * 30));
+      this.signIn(req, res, t.userId, how === "recovery" ? "with a recovery code" : "with two-step code");
       res.json({ ok: true, recoveryLeft: this.twofa(t.userId)?.recovery.length ?? 0 });
     });
     if (!this.multiuser)
@@ -1708,9 +1830,7 @@ export class Workspaces {
           return void res.status(401).json({ error: "Wrong password" });
         }
         if (this.twofa()) return void res.json({ needs2fa: true, ticket: this.newTicket() });
-        this.audit(req, "signed in", "", "owner");
-        const v = crypto.createHmac("sha256", this.password).update("flipdesk-session").digest("base64url");
-        res.setHeader("Set-Cookie", cookie(req, "fd_session", v, 60 * 60 * 24 * 30));
+        this.signIn(req, res, undefined, "with password");
         res.json({ ok: true });
       });
     if (this.multiuser) {
@@ -1729,7 +1849,7 @@ export class Workspaces {
               `Welcome! Here's a simple plan for your first week, one small step a day (FlipDesk ticks them off on its own):\n\n${FIRST_WEEK.map((d) => `Day ${d.day}: ${d.title}. ${d.how}`).join("\n")}\n\nStart here: ${link("/shoot")}\nStuck? Press ❓ Help in the app, or reply to this email.\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
             ).catch(() => {});
           }
-          res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
+          res.setHeader("Set-Cookie", [cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30), ...[this.noteDevice(req, u.id, "sign-up")].filter((x): x is string => Boolean(x))]);
           res.json({ ok: true, owner: Boolean(u.is_owner) });
         } catch (e) {
           const msg = e instanceof z.ZodError ? e.issues[0]?.message ?? "Check your email and password" : (e as Error).message;
@@ -1747,8 +1867,7 @@ export class Workspaces {
             throw e;
           }
           if (this.twofa(u.id)) return void res.json({ needs2fa: true, ticket: this.newTicket(u.id) });
-          this.audit(req, "signed in", "", u.email);
-          res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
+          this.signIn(req, res, u.id, "with password");
           res.json({ ok: true });
         } catch (e) {
           res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
@@ -1773,7 +1892,7 @@ export class Workspaces {
           this.audit(req, "password reset", "via reset link", u.email);
           // With two-step sign-in on, a reset link alone never signs anyone in.
           if (this.twofa(u.id)) return void res.json({ ok: true, signIn: true });
-          res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
+          this.signIn(req, res, u.id, "after a password reset");
           res.json({ ok: true });
         } catch (e) {
           const msg = e instanceof z.ZodError ? e.issues[0]?.message ?? "Check the password" : (e as Error).message;
@@ -1821,6 +1940,37 @@ export class Workspaces {
     root.post("/api/share/leave", (req, res) => {
       res.setHeader("Set-Cookie", cookie(req, "fd_share", "", 0));
       res.json({ ok: true });
+    });
+
+    // ---- Passkey sign-in (no password needed; counts as both steps) ----
+    root.post("/api/passkeys/login/options", async (req, res) => {
+      if (!this.multiuser && !this.password) return void res.status(400).json({ error: "No sign-in needed here." });
+      res.json({ ...(await loginOptions(relyingParty(req))), available: hasPasskeys(this.site) });
+    });
+    root.post("/api/passkeys/login", express.json({ limit: "64kb" }), async (req, res) => {
+      try {
+        const b = z.object({ ticket: z.string().max(100), response: z.looseObject({ id: z.string().max(1500) }) }).parse(req.body);
+        const r = await finishLogin(this.site, relyingParty(req), b.ticket, b.response as never);
+        const userId = r.ownerKey === "owner" ? undefined : Number(r.ownerKey.slice(1));
+        if (this.multiuser ? !userId || !this.accounts!.prepare("SELECT 1 FROM users WHERE id = ?").get(userId) : r.ownerKey !== "owner")
+          return void res.status(401).json({ error: "This passkey isn't for this FlipDesk." });
+        this.signIn(req, res, userId, "with a passkey");
+        res.json({ ok: true });
+      } catch (e) {
+        this.audit(req, "sign-in failed", `passkey: ${(e as Error).message}`.slice(0, 200), "someone");
+        res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
+      }
+    });
+    // "This wasn't me" (from the new-device email/alert). A button on the page posts here; just opening the link does nothing.
+    root.post("/api/auth/not-me", json, async (req, res) => {
+      try {
+        const t = z.object({ token: z.string().min(10).max(200) }).parse(req.body).token;
+        const r = await this.notMe(req, t);
+        res.setHeader("Set-Cookie", [cookie(req, "fd_user", "", 0), cookie(req, "fd_session", "", 0)]);
+        res.json(r);
+      } catch (e) {
+        res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
+      }
     });
 
     // Everything else needs a signed-in browser (or a shared read-only link).
@@ -1976,6 +2126,63 @@ export class Workspaces {
       res.json({ recoveryCodes: rc.codes });
     });
 
+    // ---- Passkeys (manage) ----
+    root.get("/api/passkeys", (req: R, res) => {
+      if (!this.multiuser && !req.fdShare && !this.password) return void res.json({ passkeys: [], unavailable: "Set FLIPDESK_PASSWORD first: passkeys replace typing it." });
+      const w = who2fa(req, res);
+      if (!w) return;
+      res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
+    });
+    root.post("/api/passkeys/register/options", async (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      res.json(await registrationOptions(this.site, relyingParty(req), this.keyFor(w.userId), w.label));
+    });
+    root.post("/api/passkeys/register", express.json({ limit: "64kb" }), async (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      try {
+        const b = z.object({ response: z.looseObject({ id: z.string().max(1500) }), name: z.string().trim().max(60).optional() }).parse(req.body);
+        const device = describeDevice(String(req.headers["user-agent"] ?? ""));
+        const r = await finishRegistration(this.site, relyingParty(req), this.keyFor(w.userId), b.response as never, b.name || device, device);
+        this.audit(req, "passkey added", b.name || device, w.label);
+        res.json({ ...r, passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
+      } catch (e) {
+        res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
+      }
+    });
+    root.patch("/api/passkeys/:id", json, (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      const name = z.object({ name: z.string().trim().min(1).max(60) }).parse(req.body).name;
+      if (!renamePasskey(this.site, this.keyFor(w.userId), String(req.params.id), name)) return void res.status(404).json({ error: "Not found" });
+      res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
+    });
+    root.delete("/api/passkeys/:id", (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      if (!removePasskey(this.site, this.keyFor(w.userId), String(req.params.id))) return void res.status(404).json({ error: "Not found" });
+      this.audit(req, "passkey removed", "", w.label);
+      res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
+    });
+
+    // ---- Signed-in devices ----
+    root.get("/api/devices", (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      if (this.multiuser && !req.fdUser) return void res.status(401).json({ error: "login required" });
+      res.json({ devices: this.devicesFor(req.fdUser?.id, req), canSignOut: this.multiuser || Boolean(this.password) });
+    });
+    root.post("/api/devices/sign-out-everywhere", (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      if (this.multiuser && !req.fdUser) return void res.status(401).json({ error: "login required" });
+      if (!this.multiuser && !this.password) return void res.status(400).json({ error: "No password is set, so there's nothing to sign out of." });
+      const userId = req.fdUser?.id;
+      this.signOutEverywhere(userId);
+      this.audit(req, "signed out everywhere", "from Settings", userId ? req.fdUser!.email : "owner");
+      this.signIn(req, res, userId, "kept this device signed in"); // this one stays in (and is remembered again)
+      res.json({ ok: true, devices: this.devicesFor(userId, req) });
+    });
+
     // ---- Send a problem report (with your OK): owner → GitHub issue; member → the owner's feedback inbox ----
     root.post("/api/problems/:id/send", json, async (req: R, res) => {
       if (req.fdShare) return void res.status(403).json({ error: "read-only" });
@@ -2011,6 +2218,11 @@ export class Workspaces {
     root.get("/api/selfcheck", (req: R, res) => {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       res.json(this.siteGet<SelfCheck[]>("selfChecks", []));
+    });
+    root.get("/api/selfcheck/trend", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const h = this.siteGet<SelfCheck[]>("selfChecks", []);
+      res.json({ trend: speedTrend(h), last: h[0] ?? null });
     });
     root.post("/api/selfcheck", async (req: R, res) => {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });

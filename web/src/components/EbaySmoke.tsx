@@ -52,6 +52,72 @@ export default function EbaySmoke() {
           )}
         </div>
       )}
+      <WeeklyCheck />
     </section>
+  );
+}
+
+interface Weekly { enabled: boolean; env: string; connected: boolean; last: (Result & { kind: "full" | "read-only" }) | null }
+/** Every week, by itself: the full test on the sandbox; on a real account a read-only check (nothing listed). */
+function WeeklyCheck() {
+  const [w, setW] = useState<Weekly | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  useEffect(() => void api.get<Weekly>("/api/ebay/weekly-check").then(setW).catch(() => {}), []);
+  if (!w) return null;
+  const last = w.last;
+  return (
+    <div className="space-y-2 border-t border-zinc-800 pt-3">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1" checked={w.enabled} onChange={async (e) => setW(await api.put<Weekly>("/api/ebay/weekly-check", { enabled: e.target.checked }))} />
+        <span>
+          <span className="font-medium">Check eBay every week by itself</span>
+          <span className="block text-xs text-zinc-500">
+            {w.env === "sandbox" ? "On the sandbox: the full test above (list, end, clean up)." : "On your real account: a read-only check. Nothing is listed or changed; it checks your policies, ship-from location, category lookup and sales feed still answer."} If eBay changed something, the Inbox tells you before a real listing fails.
+          </span>
+        </span>
+      </label>
+      {last ? (
+        <div className="text-xs">
+          <button className={`${last.ok ? "text-green-400" : "text-red-400"} hover:underline`} onClick={() => setOpen(!open)}>
+            {last.ok ? "✓ Last weekly check passed" : `✕ Last weekly check failed: ${last.steps.find((s) => !s.ok)?.name ?? last.error}`}
+          </button>{" "}
+          <span className="text-zinc-500">· {last.kind} · {timeAgo(last.ranAt)}</span>
+          {open && (
+            <ol className="mt-1 space-y-0.5">
+              {last.steps.map((s) => (
+                <li key={s.name} className="flex gap-2">
+                  <span className={s.ok ? "text-green-400" : "text-red-400"}>{s.ok ? "✓" : "✕"}</span>
+                  <span className="text-zinc-300">{s.name}</span>
+                  <span className="text-zinc-500">{s.detail}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-zinc-500">{w.connected ? "First check runs within a few hours." : "Starts once eBay is connected."}</p>
+      )}
+      {w.connected && (
+        <button
+          className="btn-ghost text-xs"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const r = (await api.post<{ last: Weekly["last"] }>("/api/ebay/weekly-check")).last;
+              setW({ ...w, last: r });
+              toast(r?.ok ? "eBay check passed ✅" : "eBay check found a problem", r?.ok ? "ok" : "err");
+            } catch (e) {
+              toast((e as Error).message, "err");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Checking…" : "Run the weekly check now"}
+        </button>
+      )}
+    </div>
   );
 }

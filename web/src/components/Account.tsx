@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { browserSupportsWebAuthn, startAuthentication } from "@simplewebauthn/browser";
 import { api } from "../api";
 import { toast } from "../ui";
 
@@ -53,6 +54,25 @@ export function AuthScreen() {
   const [busy, setBusy] = useState(false);
   useEffect(() => void api.get<WorkspaceState>("/api/auth/mode").then((m) => (setMode(m), m.signupsOpen && !m.needsInvite && setTab("up"))).catch(() => setMode(null)), []);
   const accounts = mode?.mode === "accounts";
+  const passkeyOk = typeof window !== "undefined" && browserSupportsWebAuthn();
+  const done = () => location.assign(location.pathname === "/join" ? "/" : location.pathname + location.search);
+  // Face ID / fingerprint / phone / security key: no password, no code.
+  const passkey = async () => {
+    setErr("");
+    setBusy(true);
+    try {
+      const o = await api.post<{ ticket: string; options: Parameters<typeof startAuthentication>[0]["optionsJSON"]; available: boolean }>("/api/passkeys/login/options");
+      if (!o.available) throw new Error("No passkeys are set up yet. Sign in with your password, then add one in Settings.");
+      const response = await startAuthentication({ optionsJSON: o.options });
+      await api.post("/api/passkeys/login", { ticket: o.ticket, response });
+      done();
+    } catch (x) {
+      const m = (x as Error).message;
+      setErr(/NotAllowed|cancel|timed out|not allowed/i.test(m) ? "Passkey sign-in was cancelled." : m);
+    } finally {
+      setBusy(false);
+    }
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr("");
@@ -67,7 +87,7 @@ export function AuthScreen() {
         else await api.post("/api/auth/signup", { email: f.email, password: f.password, invite: f.invite || undefined });
         if (r.needs2fa && r.ticket) return void setTicket(r.ticket); // step 2: the code from the authenticator app
       }
-      location.assign(location.pathname === "/join" ? "/" : location.pathname + location.search);
+      done();
     } catch (x) {
       setErr((x as Error).message);
     } finally {
@@ -121,6 +141,11 @@ export function AuthScreen() {
         {accounts && !mode?.signupsOpen && <p className="text-xs text-zinc-500">New accounts need an invite from the owner.</p>}
         {err && <div className="text-sm text-red-400">{err}</div>}
         {!(tab === "forgot" && sent) && <button className="btn-primary w-full" disabled={busy}>{busy ? "…" : tab === "forgot" ? "Send reset link" : !accounts || tab === "in" ? "Sign in" : "Create my shop"}</button>}
+        {tab === "in" && passkeyOk && (
+          <button type="button" className="btn-ghost w-full" disabled={busy} onClick={passkey}>
+            🔑 Sign in with a passkey
+          </button>
+        )}
         </>
         )}
       </form>
@@ -204,6 +229,58 @@ export function ResetPage() {
         <button className="btn-primary w-full">Save and sign in</button>
         <p className="text-xs text-zinc-500">This signs you out on your other devices.</p>
       </form>
+    </div>
+  );
+}
+
+/** /not-me?t=... : from the "new sign-in" alert. Opening the link does nothing; the button signs every device out. */
+export function NotMePage() {
+  const token = new URLSearchParams(location.search).get("t") ?? "";
+  const [r, setR] = useState<null | { resetSent: boolean; mode: string; removedPasskeys: number }>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <div className="card w-full max-w-sm space-y-3 p-6">
+        <div className="text-lg font-bold">🔐 That sign-in wasn't you?</div>
+        {r ? (
+          <>
+            <p className="text-sm text-green-300">Done. Every device is signed out of FlipDesk{r.removedPasskeys ? `, and ${r.removedPasskeys} passkey(s) added since then were removed` : ""}.</p>
+            <p className="text-sm text-zinc-300">
+              {r.mode === "accounts"
+                ? r.resetSent
+                  ? "Check your email for a link to choose a new password. Do that first: whoever signed in knows your current one."
+                  : "Now choose a new password: use “Forgot password?” on the sign-in screen."
+                : "Now change FLIPDESK_PASSWORD on your server (fly secrets set FLIPDESK_PASSWORD=…), since whoever signed in knows it."}
+            </p>
+            <p className="text-xs text-zinc-500">Also turn on two-step sign-in or add a passkey in Settings so a password alone is never enough.</p>
+            <a className="btn-primary block w-full text-center" href="/">Go to sign in</a>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-zinc-300">This signs out every device that's signed in to your FlipDesk, including whoever that was. You'll then choose a new password.</p>
+            {err && <div className="text-sm text-red-400">{err}</div>}
+            <button
+              className="btn-primary w-full bg-red-600 hover:bg-red-500"
+              disabled={busy || !token}
+              onClick={async () => {
+                setBusy(true);
+                setErr("");
+                try {
+                  setR(await api.post("/api/auth/not-me", { token }));
+                } catch (x) {
+                  setErr((x as Error).message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {busy ? "…" : "Sign out everywhere"}
+            </button>
+            <a className="block text-center text-xs text-zinc-500 hover:text-zinc-200" href="/">It was me after all</a>
+          </>
+        )}
+      </div>
     </div>
   );
 }

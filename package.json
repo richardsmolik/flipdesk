@@ -12,10 +12,13 @@
     "start": "NODE_ENV=production tsx --disable-warning=ExperimentalWarning server/index.ts",
     "seed": "tsx --disable-warning=ExperimentalWarning server/seed.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "rehearse": "tsx --disable-warning=ExperimentalWarning scripts/rehearse.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.0.3",
     "@zxing/browser": "^0.2.1",
     "@zxing/library": "^0.23.0",
     "compression": "^1.8.2",

@@ -43,8 +43,22 @@ jobs:
           for i in $(seq 1 40); do curl -sf http://localhost:8787/healthz && break; sleep 1; done
       - name: Phone check (every screen at 390px)
         run: node scripts/phone-check.mjs http://localhost:8787
-      - name: Speed check (1,500 items)
-        run: npx tsx scripts/perf.ts 1500
+      - name: Last run's speeds
+        uses: actions/cache/restore@v4
+        with:
+          path: perf-history
+          key: perf-${{ github.run_id }}
+          restore-keys: perf-
+      - name: Speed check (1,500 items), compared with the last run
+        run: npx tsx scripts/perf.ts 1500 --compare perf-history/last.json --save perf-history/last.json
+      - name: Update rehearsal (this version on a copy of the running server's data)
+        run: npx tsx scripts/rehearse.ts /tmp/fd
+      - name: Keep these speeds for next time
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: perf-history
+          key: perf-${{ github.run_id }}
       - name: Server log
         if: always()
         run: tail -n 100 /tmp/fd/server.log || true

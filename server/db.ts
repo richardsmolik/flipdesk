@@ -361,13 +361,115 @@ function migrate(db: DatabaseSync) {
   }
 }
 
+/** The schema version this copy of FlipDesk expects. */
+export const SCHEMA_VERSION = MIGRATIONS.length + 1;
+
+const applyUpdate = (db: DatabaseSync) => {
+  db.exec(SCHEMA);
+  migrate(db);
+};
+
 export function openDb(file = process.env.FLIPDESK_DB ?? "data/flipdesk.db"): Db {
+  const existing = file !== ":memory:" && fs.existsSync(file) && fs.statSync(file).size > 0;
   if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
-  db.exec(SCHEMA);
-  migrate(db);
+  const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  // An update with database changes: try it on a copy first (and keep a copy of how things were).
+  const hasData = version > 0 || Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'items'").get());
+  if (existing && hasData && version < SCHEMA_VERSION && process.env.FLIPDESK_REHEARSE !== "0") {
+    try {
+      rehearseUpdate(db, file, version || 1, applyUpdate);
+    } catch (e) {
+      db.close();
+      throw e;
+    }
+  }
+  applyUpdate(db);
   return db;
+}
+
+// ---------------- Try updates on a copy first ----------------
+
+/** Your data: an update must never lose rows from these. */
+const PRECIOUS = ["items", "photos", "listings", "sales", "variations", "settings", "connections", "expenses", "returns", "mileage", "bundles", "bundle_items"];
+
+export interface Rehearsal { at: string; file: string; from: number; to: number; ok: boolean; detail: string; backup: string | null; ms: number }
+
+const tableCounts = (d: DatabaseSync) =>
+  Object.fromEntries(
+    (d.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map((t) => [t.name, Number((d.prepare(`SELECT COUNT(*) AS n FROM "${t.name.replace(/"/g, '""')}"`).get() as { n: number }).n)]),
+  ) as Record<string, number>;
+const healthy = (d: DatabaseSync) => (d.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check;
+const brokenLinks = (d: DatabaseSync) => d.prepare("PRAGMA foreign_key_check").all().length;
+const rmDb = (f: string) => ["", "-wal", "-shm"].forEach((x) => fs.rmSync(f + x, { force: true }));
+
+/**
+ * Before an update changes the database: 1) save a copy of it as it is now (kept in before-update/),
+ * 2) run the update on a second copy, 3) check that copy (healthy, no broken links, none of your rows lost).
+ * Only if all that passes is the real database updated. Otherwise it's left exactly as it was, and FlipDesk
+ * stops with a plain explanation instead of starting with damaged data.
+ */
+export function rehearseUpdate(db: DatabaseSync, file: string, from: number, apply: (d: DatabaseSync) => void): Rehearsal {
+  const t0 = performance.now();
+  const dir = path.join(path.dirname(file), "before-update");
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-");
+  const base = path.basename(file).replace(/\.db$/, "");
+  const backup = path.join(dir, `${base}-v${from}-${stamp}.db`);
+  const trial = path.join(dir, `${base}-trial-${process.pid}.db`);
+  const to = SCHEMA_VERSION;
+  const record = (r: Omit<Rehearsal, "at" | "file" | "from" | "to" | "ms">) => {
+    const out: Rehearsal = { at: new Date().toISOString(), file: path.basename(file), from, to, ms: Math.round(performance.now() - t0), ...r };
+    try {
+      fs.writeFileSync(path.join(dir, "last.json"), JSON.stringify(out, null, 1));
+    } catch {
+      /* best effort */
+    }
+    return out;
+  };
+  rmDb(backup);
+  db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+  fs.copyFileSync(backup, trial);
+  const t = new DatabaseSync(trial);
+  let problem: string | null = null;
+  try {
+    t.exec("PRAGMA foreign_keys = ON;");
+    const before = tableCounts(t);
+    const wasHealthy = healthy(t) === "ok";
+    const linksBefore = brokenLinks(t);
+    try {
+      apply(t);
+    } catch (e) {
+      problem = (e as Error).message;
+    }
+    if (!problem) {
+      const h = healthy(t);
+      if (wasHealthy && h !== "ok") problem = `the updated copy failed its health check (${h})`;
+      const links = brokenLinks(t);
+      if (!problem && links > linksBefore) problem = `${links - linksBefore} records would point at things that no longer exist`;
+      const after = tableCounts(t);
+      const lost = PRECIOUS.filter((k) => before[k] > 0 && (after[k] ?? 0) < before[k]).map((k) => `${k} ${before[k]} → ${after[k] ?? 0}`);
+      if (!problem && lost.length) problem = `your data would shrink: ${lost.join(", ")}`;
+    }
+  } finally {
+    t.close();
+    rmDb(trial);
+  }
+  if (problem) {
+    const r = record({ ok: false, detail: problem, backup });
+    console.error(`[update] tried the update on a copy of ${r.file} first and it failed: ${problem}`);
+    throw new Error(
+      `FlipDesk tried this update on a copy of your data first, and it didn't pass: ${problem}. Your data was NOT changed (a copy is also in ${backup}). ` +
+        `Go back to the previous version of FlipDesk (e.g. fly releases rollback) and report this.`,
+    );
+  }
+  // Keep the newest 3 "before" copies of each database.
+  const mine = fs.readdirSync(dir).filter((f) => f.startsWith(`${base}-v`) && f.endsWith(".db")).sort();
+  for (const f of mine.slice(0, Math.max(0, mine.length - 3))) rmDb(path.join(dir, f));
+  const r = record({ ok: true, detail: `Tried on a copy first: passed. Updated from v${from} to v${to}.`, backup });
+  console.log(`[update] ${r.file}: tried on a copy first (passed, ${r.ms} ms); copy of the old data in ${backup}`);
+  return r;
 }
 
 /** Run fn inside a transaction; rolls back on throw. */

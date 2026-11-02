@@ -119,3 +119,68 @@ export function findRegressions(speed: { path: string; ms: number }[], history: 
   }
   return out;
 }
+
+/** Plain names for the screens behind each API (for reports). */
+export const SCREEN_NAMES: Record<string, string> = {
+  "/api/items?view=inventory": "Inventory", "/api/items?view=selling": "Selling", "/api/items?view=unsold": "Not sold", "/api/items?view=drafts": "Drafts", "/api/items?view=sold": "Sold",
+  "/api/items?q=nike": "Search", "/api/items-counts": "Inventory tabs", "/api/dashboard": "Dashboard", "/api/today": "Today", "/api/nav-counts": "Menu counts", "/api/reports": "Reports",
+  "/api/goals": "Goals", "/api/onboarding": "Get started", "/api/sales": "Sales", "/api/shipping": "Shipping", "/api/tools/stale": "Stale listings", "/api/bundles/suggestions": "Bundles",
+  "/api/alerts": "Inbox", "/api/jobs": "Queue", "/api/status": "Status",
+};
+const median = (xs: number[]) => {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : null;
+};
+
+export interface SpeedRow { path: string; name: string; now: number; before: number | null; changePct: number | null }
+export interface SpeedComparison { rows: SpeedRow[]; now: number; before: number | null; changePct: number | null; slower: SpeedRow[]; faster: SpeedRow[] }
+
+/**
+ * Compare two sets of timings screen by screen. "Slower" needs both a real percentage (default +25%) and a
+ * real amount of time (default +30 ms), so tiny screens jittering from 4 to 6 ms never count.
+ */
+export function compareSpeed(now: { path: string; ms: number }[], before: { path: string; ms: number }[] | null, opts: { pct?: number; ms?: number } = {}): SpeedComparison {
+  const pct = opts.pct ?? 25;
+  const minMs = opts.ms ?? 30;
+  const rows = now.map((n) => {
+    const b = before?.find((x) => x.path === n.path)?.ms ?? null;
+    return { path: n.path, name: SCREEN_NAMES[n.path] ?? n.path, now: n.ms, before: b, changePct: b ? Math.round(((n.ms - b) / Math.max(1, b)) * 100) : null };
+  });
+  const avg = (xs: number[]) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : 0);
+  const both = rows.filter((r) => r.before !== null);
+  const nowAvg = avg(rows.map((r) => r.now));
+  const beforeAvg = both.length ? avg(both.map((r) => r.before!)) : null;
+  const nowBoth = avg(both.map((r) => r.now));
+  return {
+    rows,
+    now: nowAvg,
+    before: beforeAvg,
+    changePct: beforeAvg ? Math.round(((nowBoth - beforeAvg) / Math.max(1, beforeAvg)) * 100) : null,
+    slower: both.filter((r) => r.changePct! >= pct && r.now - r.before! >= minMs).sort((a, b) => b.changePct! - a.changePct!),
+    faster: both.filter((r) => r.changePct! <= -pct && r.before! - r.now >= minMs).sort((a, b) => a.changePct! - b.changePct!),
+  };
+}
+
+/** This week vs last week from the nightly self-checks (median per screen of each week's runs). */
+export function speedTrend(history: { at: string; speed: { path: string; ms: number }[] }[], now = Date.now()) {
+  const week = (from: number, to: number) => history.filter((h) => {
+    const age = now - Date.parse(h.at);
+    return age >= from * 86400_000 && age < to * 86400_000;
+  });
+  const summarize = (runs: typeof history) => {
+    const paths = [...new Set(runs.flatMap((r) => r.speed.map((s) => s.path)))];
+    return paths.map((p) => ({ path: p, ms: median(runs.map((r) => r.speed.find((s) => s.path === p)?.ms).filter((x): x is number => typeof x === "number"))! }));
+  };
+  const thisWeek = week(0, 7);
+  const lastWeek = week(7, 14);
+  if (!thisWeek.length) return null;
+  return { ...compareSpeed(summarize(thisWeek), lastWeek.length ? summarize(lastWeek) : null), runs: { now: thisWeek.length, before: lastWeek.length } };
+}
+
+/** One line for the weekly report: "⚡ Screens ~42 ms on average (last week 40 ms) · slower: Inventory +60%". */
+export function speedLine(t: ReturnType<typeof speedTrend>) {
+  if (!t) return null;
+  const vs = t.before !== null ? ` (last week ${t.before} ms${t.changePct ? `, ${t.changePct > 0 ? "+" : ""}${t.changePct}%` : ""})` : "";
+  const slow = t.slower.length ? ` · slower: ${t.slower.slice(0, 3).map((r) => `${r.name} +${r.changePct}%`).join(", ")}` : "";
+  return `⚡ Screens answer in ~${t.now} ms on average${vs}${slow}`;
+}

@@ -6,7 +6,7 @@ import path from "node:path";
 import { z } from "zod/v4";
 import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting, tx, type Db, type ItemRow, type JobRow, type ListingRow } from "./db.js";
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
-import { ebaySmokeTest } from "./services/ebaySmoke.js";
+import { ebaySmokeTest, runWeeklyEbay, weeklyEbay } from "./services/ebaySmoke.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
@@ -850,6 +850,15 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     setSetting(db, "ebaySmoke", r);
     res.json(r);
   });
+
+  // Weekly eBay check (full test on the sandbox, read-only on a real account).
+  api.get("/ebay/weekly-check", (_req, res) => void res.json({ ...weeklyEbay(db), env: ebayEnvironment(), connected: ebayIsLive(db) }));
+  api.put("/ebay/weekly-check", (req, res) => {
+    const enabled = z.object({ enabled: z.boolean() }).parse(req.body).enabled;
+    setSetting(db, "ebayWeekly", { ...weeklyEbay(db), enabled });
+    res.json({ ...weeklyEbay(db), env: ebayEnvironment(), connected: ebayIsLive(db) });
+  });
+  api.post("/ebay/weekly-check", async (_req, res) => void res.json({ last: await runWeeklyEbay(db, uploadDir) }));
 
   // Problem reports (replayable): list, one as a JSON download.
   api.get("/problems", (_req, res) => void res.json(listProblems(db)));

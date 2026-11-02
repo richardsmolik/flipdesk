@@ -7,9 +7,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { getItem, getSetting, type Db, type JobRow, type ListingRow } from "../db.js";
-import { ebayDeleteInventoryItem, ebayDelist, ebayEnvironment, ebayIsLive, ebayPublish, fetchPolicies } from "../marketplaces/ebay.js";
+import { getItem, getSetting, setSetting, type Db, type JobRow, type ListingRow } from "../db.js";
+import { ebayDeleteInventoryItem, ebayDelist, ebayEnvironment, ebayIsLive, ebayLocations, ebayOrdersSince, ebayPublish, fetchPolicies, suggestCategory } from "../marketplaces/ebay.js";
 import { saveProblem, withRecording } from "./replay.js";
+import { raiseAlert } from "./alerts.js";
 
 export interface SmokeStep { name: string; ok: boolean; ms: number; detail: string }
 
@@ -91,3 +92,102 @@ export async function ebaySmokeTest(db: Db, uploadDir: string, opts: { allowProd
   return { ok, env, steps, error, ranAt: new Date().toISOString() };
 }
 
+
+/**
+ * Read-only eBay check, safe on your real account: nothing is listed or changed. It makes the same kinds of
+ * calls FlipDesk relies on every day and checks the answers still make sense (your chosen policies and
+ * ship-from location still exist, category lookup and the sales feed answer).
+ */
+export async function ebayReadOnlyCheck(db: Db) {
+  const env = ebayEnvironment();
+  const steps: SmokeStep[] = [];
+  const step = async <T>(name: string, fn: () => Promise<T> | T, describe: (r: T) => string = () => "OK") => {
+    const t = performance.now();
+    try {
+      const r = await fn();
+      steps.push({ name, ok: true, ms: Math.round(performance.now() - t), detail: describe(r) });
+      return r;
+    } catch (e) {
+      steps.push({ name, ok: false, ms: Math.round(performance.now() - t), detail: (e as Error).message });
+      throw e;
+    }
+  };
+  let error: string | null = null;
+  const rec = withRecording(async () => {
+    try {
+      await step("eBay connected", () => {
+        if (!ebayIsLive(db)) throw new Error("Connect eBay first (Marketplaces → Connect eBay).");
+      }, () => `Connected (${env})`);
+      const c = getSetting<{ fulfillmentPolicyId?: string; paymentPolicyId?: string; returnPolicyId?: string; merchantLocationKey?: string }>(db, "ebay", {});
+      const p = await step("Reach your eBay account", () => fetchPolicies(db), (p) => `${p.fulfillment.length} shipping, ${p.payment.length} payment, ${p.returns.length} return policies`);
+      await step("Your chosen policies still exist", () => {
+        const gone = [
+          c.fulfillmentPolicyId && !p.fulfillment.some((x) => x.id === c.fulfillmentPolicyId) && "shipping policy",
+          c.paymentPolicyId && !p.payment.some((x) => x.id === c.paymentPolicyId) && "payment policy",
+          c.returnPolicyId && !p.returns.some((x) => x.id === c.returnPolicyId) && "return policy",
+        ].filter(Boolean);
+        if (gone.length) throw new Error(`eBay no longer has your chosen ${gone.join(", ")}. New listings would fail: pick again in Settings → eBay.`);
+        if (!c.fulfillmentPolicyId) return "None chosen yet";
+        return "All there";
+      }, (r) => r);
+      await step("Ship-from location still exists", async () => {
+        const locs = await ebayLocations(db);
+        if (c.merchantLocationKey && !locs.some((l) => l.key === c.merchantLocationKey)) throw new Error(`eBay no longer has your ship-from location "${c.merchantLocationKey}". Pick one again in Settings → eBay.`);
+        return locs.length;
+      }, (n) => `${n} location${n === 1 ? "" : "s"}`);
+      await step("Category lookup works", async () => {
+        const r = await suggestCategory(db, "nike running shoes");
+        if (!r.length) throw new Error("eBay's category lookup answered with nothing. The AI writer couldn't pick categories.");
+        return r[0].name;
+      }, (n) => `e.g. ${n}`);
+      await step("Sales feed works", () => ebayOrdersSince(db, new Date(Date.now() - 86400_000).toISOString()), (o) => `${o.length} order${o.length === 1 ? "" : "s"} in the last day`);
+    } catch (e) {
+      error = (e as Error).message;
+    }
+  });
+  await rec.run();
+  const ok = !error && steps.every((s) => s.ok);
+  if (!ok && steps.some((s) => s.name === "Reach your eBay account")) {
+    const job = { id: -Date.now(), type: "weekly-check", marketplace: "ebay", item_id: 0, listing_id: null, status: "failed", attempts: 1, result: null } as unknown as JobRow;
+    try {
+      saveProblem(db, { job, error: error ?? "eBay check failed", exchanges: rec.log, mode: env });
+    } catch {
+      /* never let reporting break the check */
+    }
+  }
+  return { ok, env, steps, error, ranAt: new Date().toISOString() };
+}
+
+export interface WeeklyEbay { enabled: boolean; last: (Awaited<ReturnType<typeof ebayReadOnlyCheck>> & { kind: "full" | "read-only" }) | null }
+export const weeklyEbay = (db: Db) => ({ enabled: true, last: null, ...getSetting<Partial<WeeklyEbay>>(db, "ebayWeekly", {}) }) as WeeklyEbay;
+
+/**
+ * Weekly eBay check (on by default once eBay is connected): on eBay's sandbox it runs the full test
+ * (list, end, clean up); on your real account it runs the read-only check. A failure goes to the Inbox
+ * (with a problem report you can send); the next pass clears it. So you hear about eBay changes before a listing fails.
+ */
+export async function ebayCheckIfDue(db: Db, uploadDir: string, now = Date.now()) {
+  const w = weeklyEbay(db);
+  if (!w.enabled || !ebayIsLive(db)) return null;
+  if (w.last && now - Date.parse(w.last.ranAt) < 7 * 86400_000 - 3600_000) return null;
+  return runWeeklyEbay(db, uploadDir);
+}
+
+export async function runWeeklyEbay(db: Db, uploadDir: string) {
+  const full = ebayEnvironment() === "sandbox";
+  const r = full ? await ebaySmokeTest(db, uploadDir) : await ebayReadOnlyCheck(db);
+  if (full) setSetting(db, "ebaySmoke", r);
+  const last = { ...r, kind: full ? ("full" as const) : ("read-only" as const) };
+  setSetting(db, "ebayWeekly", { ...weeklyEbay(db), last });
+  db.prepare("UPDATE alerts SET resolved_at = datetime('now') WHERE kind = 'ebay-check' AND resolved_at IS NULL").run();
+  if (!r.ok) {
+    const bad = r.steps.find((s) => !s.ok);
+    raiseAlert(db, {
+      kind: "ebay-check",
+      severity: "warning",
+      title: `Weekly eBay check failed${bad ? `: ${bad.name}` : ""}`,
+      body: `${bad?.detail ?? r.error ?? "Something went wrong."} Run it again from Marketplaces → eBay. If it keeps failing, send the problem report from the Queue.`,
+    });
+  }
+  return last;
+}

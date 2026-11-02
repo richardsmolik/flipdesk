@@ -24,19 +24,19 @@ export function raiseAlert(
   return Number(r.lastInsertRowid);
 }
 
-export async function notify(db: Db, event: "sale" | "oversell" | "email_review" | "weekly" | "feedback", title: string, message: string) {
+export async function notify(db: Db, event: "sale" | "oversell" | "email_review" | "weekly" | "feedback" | "security", title: string, message: string) {
   const s = getSetting<NotifySettings>(db, "notify", {});
   if (!s.ntfyTopic) return false;
   const enabled =
-    event === "sale" ? s.onSale !== false : event === "oversell" ? s.onOversell !== false : event === "weekly" ? s.onWeekly !== false : event === "feedback" ? true : s.onEmailReview !== false;
+    event === "sale" ? s.onSale !== false : event === "oversell" ? s.onOversell !== false : event === "weekly" ? s.onWeekly !== false : event === "feedback" || event === "security" ? true : s.onEmailReview !== false;
   if (!enabled) return false;
   try {
     const res = await fetch(`${(s.ntfyServer || "https://ntfy.sh").replace(/\/$/, "")}/${encodeURIComponent(s.ntfyTopic)}`, {
       method: "POST",
       headers: {
         Title: title.replace(/[^\x20-\x7E]/g, "").trim(), // headers must be ASCII (emoji dropped)
-        Priority: event === "oversell" ? "urgent" : "default",
-        Tags: event === "sale" ? "moneybag" : event === "oversell" ? "rotating_light" : event === "weekly" ? "bar_chart" : event === "feedback" ? "speech_balloon" : "envelope",
+        Priority: event === "oversell" ? "urgent" : event === "security" ? "high" : "default",
+        Tags: event === "sale" ? "moneybag" : event === "oversell" ? "rotating_light" : event === "weekly" ? "bar_chart" : event === "feedback" ? "speech_balloon" : event === "security" ? "lock" : "envelope",
       },
       body: message,
     });

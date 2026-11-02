@@ -97,7 +97,7 @@ export const api = {
   post: <T,>(u: string, b?: unknown) => req<T>("POST", u, b ?? {}),
   patch: <T,>(u: string, b: unknown) => req<T>("PATCH", u, b),
   put: <T,>(u: string, b: unknown) => req<T>("PUT", u, b),
-  del: (u: string) => req<void>("DELETE", u),
+  del: <T = void,>(u: string) => req<T>("DELETE", u),
 };
 
 export const money = (n: number | null | undefined) =>
