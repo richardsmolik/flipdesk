@@ -273,10 +273,10 @@ const hourLabel = (h: number) => (h === 0 ? "12 am" : h < 12 ? `${h} am` : h ===
 
 function AlertSettings() {
   const [a, setA] = useState<Alerts | null>(null);
-  useEffect(() => void api.get<Alerts>("/api/alerts").then(setA).catch(() => {}), []);
+  useEffect(() => void api.get<Alerts>("/api/alert-settings").then(setA).catch(() => {}), []);
   if (!a) return null;
   const save = async (next: Partial<Alerts>) => {
-    const r = await api.put<Alerts>("/api/alerts", { quiet: next.quiet ?? a.quiet, quietStart: next.quietStart ?? a.quietStart, quietEnd: next.quietEnd ?? a.quietEnd });
+    const r = await api.put<Alerts>("/api/alert-settings", { quiet: next.quiet ?? a.quiet, quietStart: next.quietStart ?? a.quietStart, quietEnd: next.quietEnd ?? a.quietEnd });
     setA(r);
     toast("Saved");
   };
@@ -582,7 +582,7 @@ export default function Settings() {
         <div className="grid gap-2 sm:grid-cols-2">
           {marketplaces.map((m) => (
             <div key={m.id} className="flex items-center gap-2 text-sm">
-              <span className="w-36 truncate">{m.name}</span>
+              <span className="w-24 truncate sm:w-36">{m.name}</span>
               <input className="input w-20" type="number" step="0.1" placeholder={String(m.fees.pct)} value={fees[m.id]?.pct ?? ""} onChange={(e) => setS({ ...s, feeOverrides: { ...fees, [m.id]: { ...fees[m.id], pct: e.target.value === "" ? undefined : Number(e.target.value) } } })} />%
               <input className="input w-20" type="number" step="0.01" placeholder={String(m.fees.fixed)} value={fees[m.id]?.fixed ?? ""} onChange={(e) => setS({ ...s, feeOverrides: { ...fees, [m.id]: { ...fees[m.id], fixed: e.target.value === "" ? undefined : Number(e.target.value) } } })} />$
             </div>

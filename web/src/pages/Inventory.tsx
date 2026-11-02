@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, toast, useFetch, useMarketplaces } from "../ui";
@@ -29,8 +29,11 @@ export default function Inventory() {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [bulk, setBulk] = useState<null | "crosslist" | "price">(null);
   const [importing, setImporting] = useState(false);
-  const url = `/api/items?view=${view}&q=${encodeURIComponent(q)}${mp ? `&marketplace=${mp}` : ""}`;
+  const [limit, setLimit] = useState(300);
+  const url = `/api/items?view=${view}&q=${encodeURIComponent(q)}${mp ? `&marketplace=${mp}` : ""}&limit=${limit}`;
   const { data: items, reload } = useFetch<Item[]>(url);
+  const total = !q && !mp && counts ? counts[view] ?? null : null;
+  useEffect(() => setLimit(300), [view, q, mp]);
   const { marketplaces, byId } = useMarketplaces();
   const nav = useNavigate();
 
@@ -151,6 +154,11 @@ export default function Inventory() {
               </div>
             );
           })}
+          {items && items.length >= limit && (
+            <div className="col-span-full text-center">
+              <button className="btn-ghost" onClick={() => setLimit(limit + 300)}>Show more{total !== null ? ` (${total - items.length} more)` : ""}</button>
+            </div>
+          )}
           {items?.length === 0 && <div className="col-span-full p-10 text-center text-zinc-500">Nothing here. <Link to="/items/new" className="text-brand hover:underline">Create a listing</Link></div>}
         </div>
       )}

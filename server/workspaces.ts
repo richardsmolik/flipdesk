@@ -16,6 +16,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod/v4";
 import { getSetting, openDb, setSetting, logActivity, type Db } from "./db.js";
+import { hostGuard, localOnly, rateLimit, sameSiteGuard, securityHeaders } from "./security.js";
 import { createApp } from "./app.js";
 import { runInWorkspace, setAiGate, type WorkspaceContext } from "./context.js";
 import { seedDemo } from "./demo.js";
@@ -25,6 +26,7 @@ import { mailConfigured, sendMail } from "./services/mailer.js";
 import { applyStripeEvent, currentStripeMode, setStripeMode, stripeIsTest, stripeModes, stripePriceId, webhookSecrets, type StripeMode, billingEnabled, billingSummary, checkoutUrl, createWinbackCoupon, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, winbackPct, type BillingRow } from "./services/billing.js";
 import { backupAll, exportShop, listBackups, backupDir, s3Configured, verifyBackup, type BackupSource } from "./services/backup.js";
 import { weeklySlot } from "./services/digest.js";
+import { FIRST_WEEK } from "./services/firstWeek.js";
 import { askHelp, draftArticle, setExtraArticles, type HelpTurn } from "./services/help.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify } from "./services/alerts.js";
@@ -351,6 +353,13 @@ export class Workspaces {
     const a = this.accounts!;
     const n = (a.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
     let inviteRow: { id: number; created_by: number | null } | undefined;
+    // The very first account becomes the owner. On a public server, only the email in FLIPDESK_OWNER_EMAIL
+    // may claim it, so a stranger can't sign up first and take over.
+    if (n === 0) {
+      const ownerEmail = process.env.FLIPDESK_OWNER_EMAIL?.trim().toLowerCase();
+      if (ownerEmail && email.toLowerCase() !== ownerEmail) throw Object.assign(new Error("This FlipDesk is waiting for its owner to sign up."), { status: 403 });
+      if (!ownerEmail && !localOnly()) throw Object.assign(new Error("Set FLIPDESK_OWNER_EMAIL to your email on the server, then sign up with it."), { status: 403 });
+    }
     if (n > 0) {
       const code = process.env.FLIPDESK_INVITE_CODE;
       inviteRow = this.inviteRow(invite);
@@ -1450,6 +1459,12 @@ export class Workspaces {
   handler() {
     const root = express.Router();
     const json = express.json({ limit: "100kb" });
+    root.use(securityHeaders, hostGuard, sameSiteGuard);
+    // Slow down password guessing and email bombing (per IP, on top of the per-account limits).
+    const signInLimit = rateLimit(30, 15 * 60_000, "Too many sign-in attempts from here. Wait 15 minutes.");
+    root.use(["/api/login", "/api/auth/login", "/api/auth/reset"], (req, res, next) => (req.method === "POST" ? signInLimit(req, res, next) : next()));
+    root.use("/api/auth/signup", rateLimit(10, 60 * 60_000, "Too many sign-ups from here. Try again later."));
+    root.use("/api/auth/forgot", rateLimit(10, 60 * 60_000, "Too many reset requests from here. Try again later."));
 
     // For uptime monitors (UptimeRobot, Better Stack…): no login. 200 when FlipDesk can serve, 503 when it can't.
     // ?strict=1 also returns 503 while a service (AI, eBay, email, backups) has an open outage.
@@ -1544,6 +1559,14 @@ export class Workspaces {
           const b = Creds.parse(req.body);
           const u = this.signup(b.email.trim(), b.password, b.invite?.trim());
           this.get(`u${u.id}`); // create the shop
+          if (!u.is_owner && (mailConfigured() || process.env.SMTP_HOST === "test")) {
+            const link = (p: string) => `${process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? ""}${p}`;
+            void sendMail(
+              u.email,
+              "Welcome to FlipDesk: your first week",
+              `Welcome! Here's a simple plan for your first week, one small step a day (FlipDesk ticks them off on its own):\n\n${FIRST_WEEK.map((d) => `Day ${d.day}: ${d.title}. ${d.how}`).join("\n")}\n\nStart here: ${link("/shoot")}\nStuck? Press ❓ Help in the app, or reply to this email.\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
+            ).catch(() => {});
+          }
           res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
           res.json({ ok: true, owner: Boolean(u.is_owner) });
         } catch (e) {
@@ -1790,11 +1813,11 @@ export class Workspaces {
     });
 
     // ---- Alert settings (owner) ----
-    root.get("/api/alerts", (req: R, res) => {
+    root.get("/api/alert-settings", (req: R, res) => {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       res.json({ ...this.alertSettings(), quietNow: this.isQuiet() });
     });
-    root.put("/api/alerts", json, (req: R, res) => {
+    root.put("/api/alert-settings", json, (req: R, res) => {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       const b = z.object({ quiet: z.boolean(), quietStart: z.number().int().min(0).max(23), quietEnd: z.number().int().min(0).max(23) }).parse(req.body);
       this.siteSet("alerts", b);

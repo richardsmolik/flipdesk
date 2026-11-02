@@ -17,6 +17,7 @@ export interface Section { title: string; text: string; source: string }
 const DOCS: [string, string][] = [
   ["README.md", "Features"],
   ["docs/EBAY_SETUP.md", "eBay setup guide"],
+  ["docs/FIRST_WEEK.md", "Your first week"],
   ["docs/DEPLOY.md", "Hosting guide"],
 ];
 

@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { MpBadge, timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 
-interface Job { id: number; marketplace: string; type: string; item_id: number; sku: string; title: string; status: string; attempts: number; result: string | null; updated_at: string }
+interface Job { id: number; marketplace: string; type: string; item_id: number; sku: string; title: string; status: string; attempts: number; result: string | null; updated_at: string; problemId?: number | null }
 
 export default function Queue() {
   const { data, reload } = useFetch<Job[]>("/api/jobs");
@@ -32,7 +32,14 @@ export default function Queue() {
                     {res?.error && <div className="max-w-sm truncate text-xs text-red-300" title={res.error}>{res.error}</div>}
                   </td>
                   <td className="p-3 text-xs text-zinc-500">{timeAgo(j.updated_at)}</td>
-                  <td className="p-3">{j.status === "failed" && <button className="text-xs text-brand hover:underline" onClick={async () => (await api.post(`/api/jobs/${j.id}/retry`), reload())}>retry</button>}</td>
+                  <td className="p-3">
+                    {j.status === "failed" && <button className="text-xs text-brand hover:underline" onClick={async () => (await api.post(`/api/jobs/${j.id}/retry`), reload())}>retry</button>}
+                    {j.problemId && (
+                      <a className="ml-2 text-xs text-zinc-400 hover:underline" href={`/api/problems/${j.problemId}`} download title="Exactly what happened (no passwords or buyer details). Send it with your feedback so it can be reproduced and fixed.">
+                        📋 report
+                      </a>
+                    )}
+                  </td>
                 </tr>
               );
             })}

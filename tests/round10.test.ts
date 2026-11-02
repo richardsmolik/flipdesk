@@ -76,7 +76,8 @@ describe("passwords", () => {
     process.env.PUBLIC_BASE_URL = "https://flip.example.com/";
     expect((await request(app).post("/api/auth/forgot").send({ email: "nobody@x.com" }).expect(200)).body).toEqual({ ok: true, emailed: true });
     expect(outbox()).toHaveLength(0);
-    await request(app).post("/api/auth/forgot").set("Host", "evil.example").send({ email: "friend@x.com" }).expect(200);
+    await request(app).post("/api/auth/forgot").set("Host", "evil.example").send({ email: "friend@x.com" }).expect(421); // round 16: unknown hosts refused outright
+    await request(app).post("/api/auth/forgot").send({ email: "friend@x.com" }).expect(200);
     expect(outbox()).toHaveLength(1);
     const link = outbox()[0].text.match(/https:\/\/flip\.example\.com\/reset\?token=([\w-]+)/)!;
     expect(link).toBeTruthy();

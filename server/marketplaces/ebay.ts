@@ -16,6 +16,7 @@ import type { Db, Item, ListingRow } from "../db.js";
 import { getSetting } from "../db.js";
 import { uploadUrl } from "../context.js";
 import { reportHealth } from "../health.js";
+import { recordExchange } from "../services/replay.js";
 
 const ENV = () => (process.env.EBAY_ENV === "production" ? "production" : "sandbox");
 const API = () => (ENV() === "production" ? "https://api.ebay.com" : "https://api.sandbox.ebay.com");
@@ -144,8 +145,12 @@ async function call<T>(db: Db, method: string, path: string, body?: unknown, use
   }
   // 5xx = eBay is having trouble; 4xx = eBay answered (the listing needs a fix), so eBay itself is fine.
   reportHealth("ebay", res.status < 500, res.status >= 500 ? `eBay error ${res.status} on ${method} ${path}` : undefined);
-  if (res.status === 204) return undefined as T;
+  if (res.status === 204) {
+    recordExchange({ method, path, status: 204, request: body, response: "" });
+    return undefined as T;
+  }
   const text = await res.text();
+  recordExchange({ method, path, status: res.status, request: body, response: text }); // for problem reports (no tokens)
   if (!res.ok) throw new Error(friendlyEbayError(res.status, text, `${method} ${path}`));
   return (text ? JSON.parse(text) : undefined) as T;
 }

@@ -121,6 +121,10 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX IF NOT EXISTS idx_listings_item ON listings(item_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, marketplace);
 CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales(sold_at);
+CREATE INDEX IF NOT EXISTS idx_sales_item ON sales(item_id);
+CREATE INDEX IF NOT EXISTS idx_photos_item ON photos(item_id, position);
+CREATE INDEX IF NOT EXISTS idx_items_status ON items(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status, marketplace);
 `;
 
 /**
@@ -489,6 +493,45 @@ export function hydrateItem(db: Db, row: ItemRow): Item {
     photos: photos.map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : uploadUrl(p.path), edited: Boolean(p.original_path) })),
     listings,
   };
+}
+
+/**
+ * Hydrate many items at once: 4 queries total instead of 4 per item (lists of hundreds of items stay fast).
+ * Same shape as hydrateItem.
+ */
+export function hydrateItems(db: Db, rows: ItemRow[]): Item[] {
+  if (!rows.length) return [];
+  const ids = rows.map((r) => r.id);
+  const marks = ids.map(() => "?").join(",");
+  const group = <T extends { item_id: number }>(list: T[]) => {
+    const m = new Map<number, T[]>();
+    for (const x of list) (m.get(x.item_id) ?? m.set(x.item_id, []).get(x.item_id)!).push(x);
+    return m;
+  };
+  const photos = group(db.prepare(`SELECT id, item_id, path, original_path FROM photos WHERE item_id IN (${marks}) ORDER BY position, id`).all(...ids) as { id: number; item_id: number; path: string; original_path: string | null }[]);
+  const listings = group(db.prepare(`SELECT * FROM listings WHERE item_id IN (${marks}) ORDER BY marketplace`).all(...ids) as unknown as ListingRow[]);
+  const sold = new Map((db.prepare(`SELECT item_id, COALESCE(SUM(quantity), 0) AS n FROM sales WHERE item_id IN (${marks}) GROUP BY item_id`).all(...ids) as { item_id: number; n: number }[]).map((r) => [r.item_id, Number(r.n)]));
+  const varRows = db
+    .prepare(
+      `SELECT v.*, (SELECT COALESCE(SUM(s.quantity), 0) FROM sales s WHERE s.variation_id = v.id) AS quantity_sold
+       FROM variations v WHERE v.item_id IN (${marks}) ORDER BY v.position, v.id`,
+    )
+    .all(...ids) as unknown as (Omit<Variation, "attrs" | "name"> & { attrs: string })[];
+  const vars = group(
+    varRows.map((r) => {
+      const attrs = JSON.parse(r.attrs || "{}");
+      return { ...r, quantity_sold: Number(r.quantity_sold), attrs, name: variationName(attrs) } as Variation;
+    }),
+  );
+  return rows.map((row) => ({
+    ...row,
+    quantity_sold: sold.get(row.id) ?? 0,
+    variations: vars.get(row.id) ?? [],
+    specifics: JSON.parse(row.specifics || "{}"),
+    keywords: JSON.parse(row.keywords || "[]"),
+    photos: (photos.get(row.id) ?? []).map((p) => ({ id: p.id, url: p.path.startsWith("http") ? p.path : uploadUrl(p.path), edited: Boolean(p.original_path) })),
+    listings: listings.get(row.id) ?? [],
+  }));
 }
 
 export function variationName(attrs: Record<string, string>) {

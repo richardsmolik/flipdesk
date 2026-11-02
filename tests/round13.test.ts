@@ -36,6 +36,7 @@ async function setup() {
   process.env.FLIPDESK_INVITE_CODE = "inv";
   const m = request.agent(app);
   await m.post("/api/auth/signup").send({ email: "mia@x.com", password: "member-pass-1", invite: "inv" }).expect(200);
+  clearOutbox(); // ignore the welcome email new members get (round 16)
   return { o, m };
 }
 

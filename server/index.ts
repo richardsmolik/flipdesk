@@ -4,6 +4,8 @@ import path from "node:path";
 import { extensionToken } from "./app.js";
 import { runInWorkspace } from "./context.js";
 import { Workspaces } from "./workspaces.js";
+import { hostGuard, securityHeaders } from "./security.js";
+import compression from "compression";
 import { processApiJobs } from "./services/jobs.js";
 import { pollEbaySales } from "./services/sync.js";
 import { applyAutoPriceDrops } from "./services/ebayTools.js";
@@ -25,6 +27,8 @@ const shops = new Workspaces();
 const app = express();
 app.set("trust proxy", 1); // behind Fly/Cloudflare/Render HTTPS proxies
 app.disable("x-powered-by");
+app.use(securityHeaders, hostGuard); // also for the app's own files (see security.ts)
+app.use(compression()); // inventory lists are large JSON; gzip makes them ~8x smaller on the wire
 
 if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
   // The service worker must never be cached, or app updates would get stuck.

@@ -5,6 +5,7 @@ import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
 import { GetStarted } from "../components/Onboarding";
 import { GoalsCard, TodayCard } from "../components/Today";
 import { AnnouncementBar } from "../components/Announcements";
+import { FirstWeekCard } from "../components/FirstWeek";
 import { useEffect as useEffect_, useReducer } from "react";
 
 interface Dash {
@@ -111,6 +112,8 @@ export default function Dashboard() {
       <AnnouncementBar />
 
       <GetStarted key={gsKey} onWelcome={() => window.dispatchEvent(new Event("fd-open-welcome"))} />
+
+      <FirstWeekCard />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2"><TodayCard /></div>

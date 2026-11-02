@@ -1,6 +1,8 @@
 import { getItem, logActivity, tx, type Db, type Item, type JobRow, type ListingRow } from "../db.js";
 import { adapterFor, isExtensionMarketplace } from "../marketplaces/adapters.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
+import { saveProblem, withRecording } from "./replay.js";
+import { ebayIsLive } from "../marketplaces/ebay.js";
 
 /** Units to offer on a marketplace: all remaining units, or 1 on single-quantity sites. */
 export function listingQty(m: MarketplaceId, remaining: number) {
@@ -159,10 +161,11 @@ export async function processApiJobs(db: Db, limit = 20) {
     }
     const adapter = adapterFor(m);
     const view = listingView(item, listing);
+    const rec = withRecording(async () => {
     try {
       if (job.type === "publish") {
         const r = await adapter.publish(db, view, listing.price);
-        if ("deferred" in r) continue;
+        if ("deferred" in r) return "deferred" as const;
         completeJob(db, job.id, true, r);
       } else if (job.type === "delist") {
         await adapter.delist(db, view, listing);
@@ -177,8 +180,17 @@ export async function processApiJobs(db: Db, limit = 20) {
         db.prepare("UPDATE jobs SET status = 'pending', result = ? WHERE id = ?").run(JSON.stringify({ error: msg }), job.id);
       } else {
         completeJob(db, job.id, false, { error: msg });
+        // Final failure: keep a replayable problem report (requests/answers recorded during this attempt).
+        try {
+          saveProblem(db, { job: { ...job, attempts: job.attempts + 1 }, item, listing, error: msg, exchanges: rec.log, mode: m === "ebay" ? (ebayIsLive(db) ? "live" : "demo") : "api" });
+        } catch {
+          /* never let reporting break syncing */
+        }
       }
     }
+    return "ok" as const;
+    });
+    if ((await rec.run()) !== "ok") continue;
   }
   return processed;
 }

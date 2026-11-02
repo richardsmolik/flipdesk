@@ -4,7 +4,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod/v4";
-import { getItem, getSetting, hydrateItem, logActivity, setSetting, tx, type Db, type ItemRow, type ListingRow } from "./db.js";
+import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting, tx, type Db, type ItemRow, type JobRow, type ListingRow } from "./db.js";
+import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
@@ -23,6 +24,7 @@ import { importInventory, previewInventory } from "./services/inventoryImport.js
 import { findDuplicates } from "./services/duplicates.js";
 import { onboarding, saveProfile } from "./services/onboarding.js";
 import { goalProgress, saveGoals } from "./services/goals.js";
+import { firstWeek, startFirstWeek } from "./services/firstWeek.js";
 import { candidates, skipToday, today } from "./services/today.js";
 import { aiStatus, scheduleAutoWrite } from "./services/autowrite.js";
 import { importSales, previewSales } from "./services/salesImport.js";
@@ -93,7 +95,7 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   const upload = multer({
     storage: multer.diskStorage({
       destination: uploadDir,
-      filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(4).toString("hex")}${path.extname(file.originalname).toLowerCase() || ".jpg"}`),
+      filename: (_req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(12).toString("hex")}${path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, "") || ".jpg"}`),
     }),
     limits: { fileSize: 30 * 1024 * 1024, files: 60 },
     fileFilter: (_req, file, cb) => cb(null, isImageUpload(file)), // HEIC often arrives as application/octet-stream
@@ -232,7 +234,16 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
       failed: n("SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND updated_at >= datetime('now','-7 days')"),
     });
   });
-  api.get("/reports", (req, res) => void res.json(profitReport(db, Number(req.query.days ?? 365))));
+  api.get("/reports", (req, res) => {
+    if (!getSetting(db, "reportsViewed", false)) setSetting(db, "reportsViewed", true); // first-week step 7
+    res.json(profitReport(db, Number(req.query.days ?? 365)));
+  });
+  api.get("/first-week", (_req, res) => {
+    // Starts the first time someone opens the dashboard in a real shop (sample shops are already "lived in").
+    if (!opts.workspace?.demo) startFirstWeek(db);
+    res.json(firstWeek(db));
+  });
+  api.post("/first-week/hide", (_req, res) => (setSetting(db, "firstWeekHidden", true), res.json(firstWeek(db))));
 
   // ---------------- Items ----------------
   api.get("/items", (req, res) => {
@@ -257,10 +268,14 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
       args.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
     if (marketplace) (where.push("EXISTS (SELECT 1 FROM listings l WHERE l.item_id = i.id AND l.marketplace = ? AND l.status = 'active')"), args.push(marketplace));
-    const rows = db
-      .prepare(`SELECT i.* FROM items i ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY ${order} LIMIT 500`)
-      .all(...args) as unknown as ItemRow[];
-    res.json(rows.map((r) => hydrateItem(db, r)));
+    // Paged: ?limit (default 500, max 5000) & ?offset; X-Total-Count says how many match in all.
+    const limit = Math.min(5000, Math.max(1, Number(req.query.limit) || 500));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    const total = (db.prepare(`SELECT COUNT(*) AS n FROM items i ${whereSql}`).get(...args) as { n: number }).n;
+    const rows = db.prepare(`SELECT i.* FROM items i ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...args, limit, offset) as unknown as ItemRow[];
+    res.setHeader("X-Total-Count", String(total));
+    res.json(hydrateItems(db, rows));
   });
 
   api.get("/items-counts", (_req, res) => {
@@ -826,6 +841,14 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     );
   });
 
+  // Problem reports (replayable): list, one as a JSON download.
+  api.get("/problems", (_req, res) => void res.json(listProblems(db)));
+  api.get("/problems/:id", (req, res) => {
+    const p = getProblem(db, Number(req.params.id));
+    if (!p) return void res.status(404).json({ error: "Not found" });
+    res.setHeader("Content-Disposition", `attachment; filename="flipdesk-problem-${req.params.id}.json"`);
+    res.json(p);
+  });
   api.get("/jobs", (_req, res) => {
     res.json(
       db
@@ -833,7 +856,8 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
           `SELECT j.*, i.sku, i.title FROM jobs j JOIN items i ON i.id = j.item_id
            ORDER BY CASE j.status WHEN 'pending' THEN 0 WHEN 'claimed' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END, j.id DESC LIMIT 200`,
         )
-        .all(),
+        .all()
+        .map((j) => ({ ...(j as Record<string, unknown>), problemId: (j as { status: string }).status === "failed" ? problemForJob(db, (j as { id: number }).id) : null })),
     );
   });
   api.post("/jobs/process", async (_req, res) => void res.json({ processed: await processApiJobs(db, 100) }));
@@ -983,9 +1007,14 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const rows = staleListings(db, Number(req.query.days ?? 30));
     const model = learn(db);
     const traffic = latestTraffic(db);
+    // One batch load for all the items behind these listings (an item is often stale on several sites).
+    const ids = [...new Set(rows.map((r) => r.itemId))];
+    const items = new Map(
+      hydrateItems(db, ids.length ? (db.prepare(`SELECT * FROM items WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids) as unknown as ItemRow[]) : []).map((i) => [i.id, i]),
+    );
     res.json(
       rows.map((r) => {
-        const item = getItem(db, r.itemId);
+        const item = items.get(r.itemId);
         const t = r.marketplace === "ebay" ? traffic.get(r.listingId) : undefined;
         return { ...r, advice: item ? advise(db, item, model, t) : null, traffic: t ?? null, diagnosis: t ? diagnose(t, r.daysListed) : null };
       }),
@@ -1114,7 +1143,9 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   const ext = express.Router();
   api.use("/ext", ext);
   ext.use((req, res, next) => {
-    if (req.headers["x-flipdesk-token"] !== extensionToken(db)) return void res.status(401).json({ error: "Bad extension token" });
+    const given = Buffer.from(String(req.headers["x-flipdesk-token"] ?? ""));
+    const want = Buffer.from(extensionToken(db));
+    if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return void res.status(401).json({ error: "Bad extension token" });
     next();
   });
   ext.use((_req, _res, next) => (touch("extension"), next())); // for the Status page: "extension last seen"
@@ -1131,6 +1162,18 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   ext.post("/jobs/:id/complete", (req, res) => {
     const b = z.object({ ok: z.boolean(), externalId: z.string().optional(), url: z.string().optional(), error: z.string().optional() }).parse(req.body);
     completeJob(db, Number(req.params.id), b.ok, b);
+    if (!b.ok) {
+      // Keep a problem report for extension failures too (what the extension saw, plus the item).
+      const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(Number(req.params.id)) as JobRow | undefined;
+      if (job)
+        try {
+          const item = getItem(db, job.item_id);
+          const listing = job.listing_id ? (db.prepare("SELECT * FROM listings WHERE id = ?").get(job.listing_id) as ListingRow | undefined) : undefined;
+          saveProblem(db, { job, item, listing, error: b.error ?? "failed", mode: "extension" });
+        } catch {
+          /* reporting never breaks syncing */
+        }
+    }
     res.json({ ok: true });
   });
   // Forwarded sale emails (mail rules, Zapier, Cloudflare Email Workers...): raw RFC822 or JSON.

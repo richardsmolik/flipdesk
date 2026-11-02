@@ -37,6 +37,7 @@ async function setup() {
   const m = request.agent(app);
   await m.post("/api/auth/signup").send({ email: "mia@x.com", password: "member-pass-1", invite: "inv" }).expect(200);
   setSetting(shops.get("u1")!.db, "weekly", { timezone: "UTC" });
+  clearOutbox(); // ignore the welcome email new members get (round 16)
   return { o, m };
 }
 const ebayFails = () => ["503", "503", "503"].forEach((c) => reportHealth("ebay", false, `eBay error ${c}`));
@@ -102,8 +103,8 @@ describe("quieter alerts", () => {
 
   it("owner can change quiet hours; members can't", async () => {
     const { o, m } = await setup();
-    await m.put("/api/alerts").send({ quiet: false, quietStart: 0, quietEnd: 0 }).expect(403);
-    const r = (await o.put("/api/alerts").send({ quiet: true, quietStart: 23, quietEnd: 6 }).expect(200)).body;
+    await m.put("/api/alert-settings").send({ quiet: false, quietStart: 0, quietEnd: 0 }).expect(403);
+    const r = (await o.put("/api/alert-settings").send({ quiet: true, quietStart: 23, quietEnd: 6 }).expect(200)).body;
     expect(r).toMatchObject({ quiet: true, quietStart: 23, quietEnd: 6, afterMinutes: 10, timezone: "UTC" });
   });
 });

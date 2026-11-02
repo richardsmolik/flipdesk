@@ -102,12 +102,15 @@ In the extension popup, set the server URL to your HTTPS address and paste the e
 
 ## Letting other resellers use it (accounts)
 
-Set two values and redeploy:
+Set these and redeploy:
 
 ```
 FLIPDESK_MULTIUSER=1
-FLIPDESK_INVITE_CODE=pick-a-long-code
+FLIPDESK_OWNER_EMAIL=you@example.com
+FLIPDESK_INVITE_CODE=pick-a-long-code   # optional: invite links work without it
 ```
+
+`FLIPDESK_OWNER_EMAIL` is required on a public server: only that email can create the first (owner) account, so nobody can sign up before you and take over.
 
 - **Sign up first.** The first account becomes the owner. Sign-ups after that need the invite code. Leave the code blank to close sign-ups.
 - **Every account is private.** Each has its own database and photo folder (`data/users/<id>/`) and its own sample shop. Photos have random, public addresses, because eBay and the extension need to fetch them.
@@ -141,6 +144,12 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **Help articles.** Next to each unanswered Help question: **✍️ Write an answer** drafts a short article from your docs (Claude with a key, a starter template without). Edit and save it: Help shows it first and the AI uses it from then on, and that question leaves the unanswered list. All your articles are listed there to edit or remove.
 - **Day-3 check-in** (needs SMTP): someone who hasn't added an item by day 3 gets one "need a hand?" email with the three quickest ways to start (Shoot mode, import, sample shop).
 - **Launch checklist** (Setup → Launch checklist, owner only): HTTPS address, sign-in, lasting disk, AI key, eBay keys/connection/policies, email (with a **Send test email** button), phone alerts, uptime monitor (✅ once UptimeRobot/Better Stack has checked `/healthz`), backups, off-site copy, restore check, invites, payments mode and webhook. Each item says how to fix it.
+
+## Security
+
+See `docs/SECURITY.md` for the review and what's protected. Two settings matter when hosting:
+- `FLIPDESK_OWNER_EMAIL` (accounts mode, above).
+- With a Cloudflare Tunnel (Option A) FlipDesk still listens only on your computer, so it only answers to `localhost` and the host in `PUBLIC_BASE_URL`. Set `PUBLIC_BASE_URL` to your tunnel address (or add the host to `FLIPDESK_ALLOWED_HOSTS`), or you'll see "FlipDesk doesn't answer to …".
 
 ## Uptime monitor (recommended)
 

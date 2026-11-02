@@ -55,7 +55,7 @@ function ShipRow({ r, selectable, selected, onToggle, onDone }: { r: Row; select
           <textarea className="input mt-2 min-h-20 text-xs" placeholder={"Jane Doe\n123 Main St\nApt 4\nAustin, TX 78701"} value={addr} onChange={(e) => setAddr(e.target.value)} />
         )}
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <input className="input w-20 py-1" type="number" step="0.01" placeholder="Label $" value={cost} onChange={(e) => setCost(e.target.value)} aria-label="Label cost" />
         <input className="input w-40 py-1" placeholder="Tracking #" value={tracking} onChange={(e) => setTracking(e.target.value)} aria-label="Tracking" />
         {editAddr && <button className="btn-ghost py-1 text-xs" onClick={() => save(false)}>Save</button>}
