@@ -33,7 +33,7 @@ if (process.env.NODE_ENV === "production" && fs.existsSync("dist")) {
     res.sendFile(path.resolve("dist/sw.js"));
   });
   app.use(express.static("dist"));
-  app.get(/^\/(?!api|uploads).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
+  app.get(/^\/(?!api|uploads|healthz).*/, (_req, res) => res.sendFile(path.resolve("dist/index.html")));
 }
 app.use(shops.handler());
 

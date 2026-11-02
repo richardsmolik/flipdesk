@@ -80,25 +80,103 @@ function OwnerReport() {
   );
 }
 
+interface Insights { total: number; days: number; helpfulPct: number | null; rated: number; topTopics: { topic: string; count: number; examples: string[] }[]; unanswered: { id: number; question: string; page: string; answered_by: string; helpful: number | null; created_at: string }[] }
+
+function HelpInsights() {
+  const [h, setH] = useState<Insights | null>(null);
+  const [days, setDays] = useState(7);
+  useEffect(() => void api.get<Insights>(`/api/admin/help-insights?days=${days}`).then(setH).catch(() => {}), [days]);
+  if (!h) return null;
+  const max = Math.max(1, ...h.topTopics.map((t) => t.count));
+  return (
+    <section className="card space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">❓ What people ask Help</h2>
+        <select className="input w-32 py-1 text-sm" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          <option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option>
+        </select>
+      </div>
+      {!h.total ? (
+        <p className="text-sm text-zinc-500">No questions yet. People ask from the ❓ Help button.</p>
+      ) : (
+        <>
+          <p className="text-sm text-zinc-400">{h.total} question{h.total === 1 ? "" : "s"}{h.helpfulPct !== null ? ` · ${h.helpfulPct}% found the answer helpful (${h.rated} rated)` : ""}. Topics people ask about most are the first things to explain better, record a help video for, or simplify.</p>
+          <ul className="space-y-1.5 text-sm">
+            {h.topTopics.map((t) => (
+              <li key={t.topic}>
+                <div className="flex justify-between gap-2"><span className="text-zinc-200">{t.topic}</span><span className="tabular-nums text-zinc-400">{t.count}</span></div>
+                <div className="h-1.5 rounded bg-zinc-800"><div className="h-1.5 rounded bg-brand" style={{ width: `${(t.count / max) * 100}%` }} /></div>
+                <div className="truncate text-xs text-zinc-500" title={t.examples.join(" · ")}>e.g. "{t.examples[0]}"</div>
+              </li>
+            ))}
+          </ul>
+          {h.unanswered.length > 0 && (
+            <div>
+              <div className="text-sm font-medium text-amber-300">Didn't get a good answer ({h.unanswered.length})</div>
+              <ul className="mt-1 space-y-0.5 text-sm text-zinc-300">
+                {h.unanswered.map((u) => (
+                  <li key={u.id}>"{u.question}" <span className="text-xs text-zinc-500">{u.helpful === 0 ? "👎" : u.answered_by === "none" ? "nothing in the guide" : "AI unsure"}{u.page ? ` · on ${u.page}` : ""} · {timeAgo(u.created_at)}</span></li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 interface Ann { id: number; title: string; body: string; link: string; created_at: string; ends_at: string | null; archived_at: string | null; seen: number; dismissed: number }
 
 function Announcements() {
   const [list, setList] = useState<Ann[] | null>(null);
   const [f, setF] = useState({ title: "", body: "", link: "", days: "14" });
+  const [commit, setCommit] = useState<string | null>(null);
+  const [drafting, setDrafting] = useState(false);
+  const [updates, setUpdates] = useState<{ sha: string; subject: string }[] | null>(null);
   useEffect(() => void api.get<Ann[]>("/api/admin/announcements").then(setList).catch(() => {}), []);
+  const draft = async () => {
+    setDrafting(true);
+    try {
+      const r = await api.get<{ source: string | null; changes: { sha: string; subject: string }[]; latest: string | null; draft: { title: string; body: string; link: string; ai: boolean } }>("/api/admin/whats-new");
+      setUpdates(r.changes);
+      if (!r.source) toast("No update history found. Set FLIPDESK_GITHUB_REPO=owner/repo on the server.", "err");
+      else if (!r.changes.length) toast("Nothing new since your last \"what's new\" announcement");
+      else {
+        setF({ title: r.draft.title, body: r.draft.body, link: r.draft.link, days: "14" });
+        setCommit(r.latest);
+        toast(r.draft.ai ? "Draft written from recent updates. Edit it, then Post." : "Draft made from recent update titles. Edit it, then Post.");
+      }
+    } catch (e) {
+      toast((e as Error).message, "err");
+    } finally {
+      setDrafting(false);
+    }
+  };
   if (!list) return null;
   const live = (a: Ann) => !a.archived_at && (!a.ends_at || Date.parse(a.ends_at.replace(" ", "T") + "Z") > Date.now());
   return (
     <section className="card space-y-3 p-4">
       <h2 className="font-semibold">📣 Announcements</h2>
-      <p className="text-sm text-zinc-400">Shows once at the top of everyone's dashboard until they close it. Good for "New: …" and "Heads up: eBay is slow today".</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-zinc-400">Shows once at the top of everyone's dashboard until they close it. Good for "New: …" and "Heads up: eBay is slow today".</p>
+        <button className="btn-ghost px-2 py-1 text-xs" disabled={drafting} onClick={draft}>{drafting ? "Reading updates…" : "✨ Draft from recent updates"}</button>
+      </div>
+      {updates && updates.length > 0 && (
+        <details className="text-xs text-zinc-500">
+          <summary className="cursor-pointer">Based on {updates.length} update{updates.length === 1 ? "" : "s"} since your last one</summary>
+          <ul className="mt-1 list-disc pl-5">{updates.map((u) => <li key={u.sha}>{u.subject}</li>)}</ul>
+        </details>
+      )}
       <form
         className="grid gap-2 md:grid-cols-[1fr_1fr_8rem_auto]"
         onSubmit={async (e) => {
           e.preventDefault();
           try {
-            setList(await api.post<Ann[]>("/api/admin/announcements", { title: f.title, body: f.body, link: f.link, days: f.days ? Number(f.days) : null }));
+            setList(await api.post<Ann[]>("/api/admin/announcements", { title: f.title, body: f.body, link: f.link, days: f.days ? Number(f.days) : null, ...(commit ? { commit } : {}) }));
             setF({ title: "", body: "", link: "", days: "14" });
+            setCommit(null);
+            setUpdates(null);
             toast("Posted");
           } catch (x) {
             toast((x as Error).message, "err");
@@ -231,6 +309,7 @@ export default function Accounts() {
       </div>
       <UsagePanel />
       <OwnerReport />
+      <HelpInsights />
       {link && (
         <div className="card space-y-2 border-amber-800 p-4 text-sm">
           <div>Reset link for <b>{link.email}</b> (works once, for 24 hours). Send it to them yourself:</div>

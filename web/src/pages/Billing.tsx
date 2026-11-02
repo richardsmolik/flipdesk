@@ -87,6 +87,11 @@ export default function Billing() {
           {b.price && <div className="text-zinc-400">{b.price}</div>}
         </div>
         {!b.enabled && <p className="text-sm text-zinc-400">This FlipDesk doesn't charge. Enjoy!</p>}
+        {b.offer && (
+          <div className="rounded-md border border-green-900 bg-green-950/40 p-3 text-sm text-green-200">
+            🎁 <b>{b.offer.pct}% off your first month</b>, applied automatically when you subscribe before {new Date(b.offer.endsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })}.
+          </div>
+        )}
         {b.enabled && b.status === "trial" && (
           <p className="text-sm text-zinc-300">
             {b.trialDaysLeft === 0 ? "Your trial ends today." : `${b.trialDaysLeft} day${b.trialDaysLeft === 1 ? "" : "s"} left in your free trial.`} Subscribing now won't charge you until the trial is over.

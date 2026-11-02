@@ -15,17 +15,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod/v4";
-import { openDb, setSetting, logActivity, type Db } from "./db.js";
+import { getSetting, openDb, setSetting, logActivity, type Db } from "./db.js";
 import { createApp } from "./app.js";
 import { runInWorkspace, setAiGate, type WorkspaceContext } from "./context.js";
 import { seedDemo } from "./demo.js";
 import { accountDeletionChallenge } from "./marketplaces/ebay.js";
 import { goalProgress } from "./services/goals.js";
 import { mailConfigured, sendMail } from "./services/mailer.js";
-import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, type BillingRow } from "./services/billing.js";
+import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, createWinbackCoupon, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, winbackPct, type BillingRow } from "./services/billing.js";
 import { backupAll, exportShop, listBackups, backupDir, s3Configured, verifyBackup, type BackupSource } from "./services/backup.js";
 import { weeklySlot } from "./services/digest.js";
 import { askHelp, type HelpTurn } from "./services/help.js";
+import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify } from "./services/alerts.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
 import { ebayIsLive } from "./marketplaces/ebay.js";
@@ -124,7 +125,16 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS announcement_seen (announcement_id INTEGER NOT NULL, viewer TEXT NOT NULL, seen_at TEXT NOT NULL DEFAULT (datetime('now')),
         dismissed_at TEXT, PRIMARY KEY (announcement_id, viewer));
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, service TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT,
-        last_error TEXT NOT NULL DEFAULT '', announcement_id INTEGER);`);
+        last_error TEXT NOT NULL DEFAULT '', announcement_id INTEGER);
+      CREATE TABLE IF NOT EXISTS help_questions (id INTEGER PRIMARY KEY, viewer TEXT NOT NULL, question TEXT NOT NULL, page TEXT NOT NULL DEFAULT '',
+        answered_by TEXT NOT NULL, top_source TEXT, helpful INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+    for (const col of ["notified_at TEXT", "summarized_at TEXT"]) {
+      try {
+        site.exec(`ALTER TABLE incidents ADD COLUMN ${col}`);
+      } catch {
+        /* already there */
+      }
+    }
     return site as unknown as Db;
   }
 
@@ -887,46 +897,130 @@ export class Workspaces {
 
   private static INCIDENT_LABEL: Record<string, string> = { ai: "The AI writer", ebay: "eBay", mail: "Email", backup: "Nightly backups" };
 
+  /** Owner's alert preferences: quiet hours (no pages at night) and how long a problem must last before you're told. */
+  alertSettings() {
+    const s = this.siteGet<{ quiet?: boolean; quietStart?: number; quietEnd?: number }>("alerts", {});
+    const env = process.env.FLIPDESK_ALERT_AFTER_MINUTES;
+    return {
+      quiet: s.quiet !== false,
+      quietStart: s.quietStart ?? 22,
+      quietEnd: s.quietEnd ?? 7,
+      afterMinutes: env !== undefined && env !== "" && Number.isFinite(Number(env)) ? Math.max(0, Number(env)) : 10,
+      timezone: this.ownerTimezone(),
+    };
+  }
+
+  private ownerTimezone() {
+    const o = this.ownerContact();
+    return (o && getSetting<{ timezone?: string }>(o.ws.db, "weekly", {}).timezone) || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  }
+
+  /** Is it the owner's quiet time right now (their time zone)? */
+  isQuiet(now = new Date()) {
+    const a = this.alertSettings();
+    if (!a.quiet || a.quietStart === a.quietEnd) return false;
+    const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: a.timezone, hour: "numeric", hour12: false }).format(now)) % 24;
+    return a.quietStart > a.quietEnd ? hour >= a.quietStart || hour < a.quietEnd : hour >= a.quietStart && hour < a.quietEnd;
+  }
+
   /**
-   * Every few minutes: when AI, eBay or email has failed several times in a row (FLIPDESK_INCIDENT_AFTER, default 3),
-   * tell the owner and (when hosted) post a "Heads up" announcement; when it works again, take it down and say so.
+   * Every couple of minutes. A problem = AI, eBay or email failing several times in a row (FLIPDESK_INCIDENT_AFTER,
+   * default 3), or a failed backup. To keep it calm:
+   * - short blips (fixed within FLIPDESK_ALERT_AFTER_MINUTES, default 10) never page you; they're only logged,
+   * - during your quiet hours (default 10pm-7am, your time zone) nothing pages you; problems that were fixed
+   *   overnight arrive as one "while you were away" note in the morning, ongoing ones as a normal alert,
+   * - several problems at once arrive as one message.
+   * Everyone sees a "Heads up" announcement once a problem has lasted past the blip window (hosted mode).
    */
-  async checkIncidents() {
+  async checkIncidents(now = new Date()) {
     const after = Math.max(1, Number(process.env.FLIPDESK_INCIDENT_AFTER) || 3);
+    const cfg = this.alertSettings();
     const lastBackup = this.siteGet<{ at?: string; failedAt?: string; error?: string | null } | null>("lastBackup", null);
-    const failing: Record<string, string | null> = {}; // service -> error when failing, null when fine
+    const failing: Record<string, string | null | undefined> = {}; // error = failing, null = fine, undefined = wait and see
     for (const svc of ["ai", "ebay", "mail"]) {
       const c = globalCheck(svc);
-      if (!c) continue;
-      failing[svc] = c.streak >= after ? c.lastError ?? "failing" : c.streak === 0 ? null : undefined!;
+      if (c) failing[svc] = c.streak >= after ? c.lastError ?? "failing" : c.streak === 0 ? null : undefined;
     }
     if (lastBackup?.failedAt && (!lastBackup.at || lastBackup.failedAt > lastBackup.at)) failing.backup = lastBackup.error ?? "backup failed";
     else if (lastBackup?.at) failing.backup = null;
 
-    const events: { service: string; kind: "opened" | "closed" }[] = [];
+    const iso = now.toISOString().replace("T", " ").slice(0, 19);
+    const ageMin = (started: string) => (now.getTime() - Date.parse(started.replace(" ", "T") + "Z")) / 60_000;
+    const events: { service: string; kind: "opened" | "alerted" | "closed" | "summarized" }[] = [];
+    type Inc = { id: number; service: string; started_at: string; ended_at: string | null; announcement_id: number | null; notified_at: string | null; last_error: string };
+
+    // 1. open / close
     for (const [svc, err] of Object.entries(failing)) {
-      if (err === undefined) continue; // a failure or two: wait and see
-      const open = this.site.prepare("SELECT * FROM incidents WHERE service = ? AND ended_at IS NULL").get(svc) as { id: number; started_at: string; announcement_id: number | null } | undefined;
-      const label = Workspaces.INCIDENT_LABEL[svc] ?? svc;
+      if (err === undefined) continue;
+      const open = this.site.prepare("SELECT * FROM incidents WHERE service = ? AND ended_at IS NULL").get(svc) as Inc | undefined;
       if (err && !open) {
-        let annId: number | null = null;
-        if (this.multiuser && svc !== "backup" && process.env.FLIPDESK_AUTO_ANNOUNCE !== "0") {
-          annId = Number(
-            this.site
-              .prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, '/status', datetime('now','+2 days'))")
-              .run(`Heads up: ${label} is having trouble right now`, `FlipDesk keeps retrying on its own, so nothing is lost. ${svc === "ebay" ? "eBay listings, price changes and delists may be delayed." : svc === "ai" ? "AI writing may fail; you can still write listings by hand." : "Emails may arrive late."} Tools → Status shows the latest.`).lastInsertRowid,
-          );
-        }
-        this.site.prepare("INSERT INTO incidents (service, last_error, announcement_id) VALUES (?, ?, ?)").run(svc, err.slice(0, 300), annId);
-        await this.tellOwner(`🔴 ${label} is failing`, `${label} has failed ${svc === "backup" ? "" : `${after}+ times in a row`}. Last error: ${err}\n${annId ? "A heads-up announcement was posted for everyone. " : ""}Details: Tools → Status.`);
+        this.site.prepare("INSERT INTO incidents (service, last_error, started_at) VALUES (?, ?, ?)").run(svc, err.slice(0, 300), iso);
         events.push({ service: svc, kind: "opened" });
+      } else if (err && open) {
+        this.site.prepare("UPDATE incidents SET last_error = ? WHERE id = ?").run(err.slice(0, 300), open.id);
       } else if (!err && open) {
-        this.site.prepare("UPDATE incidents SET ended_at = datetime('now') WHERE id = ?").run(open.id);
-        if (open.announcement_id) this.site.prepare("UPDATE announcements SET archived_at = datetime('now') WHERE id = ?").run(open.announcement_id);
-        const mins = Math.max(1, Math.round((Date.now() - Date.parse(open.started_at.replace(" ", "T") + "Z")) / 60_000));
-        await this.tellOwner(`✅ ${label} is working again`, `It was down for about ${mins < 120 ? `${mins} min` : `${Math.round(mins / 60)} h`}.${open.announcement_id ? " The heads-up announcement was taken down." : ""}`, { email: false });
+        this.site.prepare("UPDATE incidents SET ended_at = ? WHERE id = ?").run(iso, open.id);
+        if (open.announcement_id) this.site.prepare("UPDATE announcements SET archived_at = ? WHERE id = ?").run(iso, open.announcement_id);
         events.push({ service: svc, kind: "closed" });
       }
+    }
+
+    // 2. ongoing problems past the blip window: heads-up for everyone, and (outside quiet hours) one alert to you
+    const label = (svc: string) => Workspaces.INCIDENT_LABEL[svc] ?? svc;
+    const due = (this.site.prepare("SELECT * FROM incidents WHERE ended_at IS NULL").all() as unknown as Inc[]).filter((i) => i.service === "backup" || ageMin(i.started_at) >= cfg.afterMinutes);
+    for (const i of due) {
+      if (!i.announcement_id && this.multiuser && i.service !== "backup" && process.env.FLIPDESK_AUTO_ANNOUNCE !== "0") {
+        const annId = Number(
+          this.site
+            .prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, '/status', datetime('now','+2 days'))")
+            .run(`Heads up: ${label(i.service)} is having trouble right now`, `FlipDesk keeps retrying on its own, so nothing is lost. ${i.service === "ebay" ? "eBay listings, price changes and delists may be delayed." : i.service === "ai" ? "AI writing may fail; you can still write listings by hand." : "Emails may arrive late."} Tools → Status shows the latest.`).lastInsertRowid,
+        );
+        this.site.prepare("UPDATE incidents SET announcement_id = ? WHERE id = ?").run(annId, i.id);
+        i.announcement_id = annId;
+      }
+    }
+    const quiet = this.isQuiet(now);
+    const toAlert = due.filter((i) => !i.notified_at);
+    if (toAlert.length && !quiet) {
+      const lines = toAlert.map((i) => `🔴 ${label(i.service)}: ${i.service === "backup" ? "" : `failing for ${Math.max(1, Math.round(ageMin(i.started_at)))} min. `}Last error: ${i.last_error}`);
+      const title = toAlert.length === 1 ? `🔴 ${label(toAlert[0].service)} is failing` : `🔴 ${toAlert.length} things are failing`;
+      await this.tellOwner(title, `${lines.join("\n")}\n${toAlert.some((i) => i.announcement_id) ? "A heads-up announcement is up for everyone. " : ""}Details: Tools → Status.`);
+      for (const i of toAlert) {
+        this.site.prepare("UPDATE incidents SET notified_at = ? WHERE id = ?").run(iso, i.id);
+        events.push({ service: i.service, kind: "alerted" });
+      }
+    }
+
+    // 3. fixed: tell you it's back (only about things you were told about), bundled
+    const fixed = this.site.prepare("SELECT * FROM incidents WHERE ended_at IS NOT NULL AND notified_at IS NOT NULL AND summarized_at IS NULL").all() as unknown as Inc[];
+    if (fixed.length && !quiet) {
+      const dur = (i: Inc) => {
+        const m = Math.max(1, Math.round((Date.parse(i.ended_at!.replace(" ", "T") + "Z") - Date.parse(i.started_at.replace(" ", "T") + "Z")) / 60_000));
+        return m < 120 ? `${m} min` : `${Math.round(m / 60)} h`;
+      };
+      await this.tellOwner(
+        fixed.length === 1 ? `✅ ${label(fixed[0].service)} is working again` : `✅ ${fixed.length} problems fixed`,
+        fixed.map((i) => `✅ ${label(i.service)} works again (down about ${dur(i)})${i.announcement_id ? ", heads-up taken down" : ""}`).join("\n"),
+        { email: false },
+      );
+      for (const i of fixed) this.site.prepare("UPDATE incidents SET summarized_at = ? WHERE id = ?").run(iso, i.id);
+    }
+
+    // 4. the morning after: problems that started and ended during quiet hours (and outlasted the blip window)
+    if (!quiet) {
+      const overnight = (this.site.prepare("SELECT * FROM incidents WHERE ended_at IS NOT NULL AND notified_at IS NULL AND summarized_at IS NULL").all() as unknown as Inc[]).filter(
+        (i) => (Date.parse(i.ended_at!.replace(" ", "T") + "Z") - Date.parse(i.started_at.replace(" ", "T") + "Z")) / 60_000 >= cfg.afterMinutes,
+      );
+      if (overnight.length) {
+        const t = (x: string) => new Intl.DateTimeFormat("en-US", { timeZone: cfg.timezone, hour: "numeric", minute: "2-digit" }).format(new Date(x.replace(" ", "T") + "Z"));
+        await this.tellOwner("🌙 While you were away", overnight.map((i) => `${label(i.service)} had trouble ${t(i.started_at)}-${t(i.ended_at!)} (fixed on its own)`).join("\n"), { email: false });
+        for (const i of overnight) {
+          this.site.prepare("UPDATE incidents SET summarized_at = ? WHERE id = ?").run(iso, i.id);
+          events.push({ service: i.service, kind: "summarized" });
+        }
+      }
+      // blips: never paged, just marked so they aren't reconsidered
+      this.site.prepare("UPDATE incidents SET summarized_at = ? WHERE ended_at IS NOT NULL AND summarized_at IS NULL AND notified_at IS NULL").run(iso);
     }
     return events;
   }
@@ -964,6 +1058,9 @@ export class Workspaces {
     if (refs) lines.push(`🎁 ${refs} referral reward${refs === 1 ? "" : "s"} given`);
     const nudged = n(`SELECT COUNT(*) AS n FROM nudges WHERE sent_at >= ${weekAgo}`);
     if (nudged) lines.push(`✉️ ${nudged} reminder email${nudged === 1 ? "" : "s"} sent`);
+    const hi = this.helpInsights(7);
+    const topTopic = hi.topTopics.find((t) => t.topic !== "Other");
+    if (hi.total) lines.push(`❓ ${hi.total} Help question${hi.total === 1 ? "" : "s"}${topTopic ? `, most about "${topTopic.topic}" (${topTopic.count})` : ""}${hi.unanswered.length ? ` · ${hi.unanswered.length} without a good answer` : ""}`);
     const inc = this.site.prepare(`SELECT COUNT(*) AS n FROM incidents WHERE started_at >= ${weekAgo}`).get() as { n: number };
     if (inc.n) lines.push(`🩺 ${inc.n} outage${inc.n === 1 ? "" : "s"} this week (see Tools → Status)`);
     const lb = this.siteGet<{ at?: string; error?: string | null } | null>("lastBackup", null);
@@ -1029,6 +1126,28 @@ export class Workspaces {
         sent.push({ userId: u.id, kind: "trial_ending" });
         continue;
       }
+      // Trial ended 1-30 days ago without a plan: one "come back" offer (percent off the first month).
+      const pct = winbackPct();
+      const trialEnd = this.billingRow(u.id)!.trial_ends_at;
+      const sinceEnd = trialEnd ? (Date.now() - Date.parse(trialEnd.replace(" ", "T") + "Z")) / 86400_000 : -1;
+      if (pct && b.status === "expired" && sinceEnd >= 1 && sinceEnd <= 30 && !a.prepare("SELECT 1 FROM nudges WHERE user_id = ? AND kind = 'winback'").get(u.id)) {
+        try {
+          await this.winbackCoupon(pct); // made once in your Stripe account
+        } catch (e) {
+          console.error("[winback]", (e as Error).message);
+          continue;
+        }
+        if (once(u.id, "winback", String(trialEnd))) {
+          const ends = new Date(Date.now() + 14 * 86400_000).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+          await sendMail(
+            u.email,
+            `Come back to FlipDesk: ${pct}% off your first month`,
+            `Hi! Your free trial ended, and your shop is waiting for you, read-only and safe.\n\n${stats}\n\nAs a thank-you for trying FlipDesk: ${pct}% off your first month if you subscribe by ${ends}. It's applied automatically here: ${link("/billing")}\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
+          ).catch(() => {});
+          sent.push({ userId: u.id, kind: "winback" });
+          continue;
+        }
+      }
       const last = (a.prepare("SELECT MAX(day) AS d FROM activity_days WHERE user_id = ?").get(u.id) as { d: string | null }).d;
       if (!last) continue;
       const idleDays = Math.floor((Date.now() - Date.parse(last + "T00:00:00Z")) / 86400_000);
@@ -1044,6 +1163,61 @@ export class Workspaces {
       }
     }
     return sent;
+  }
+
+  // ---------------- Help insights ----------------
+
+  logHelp(viewer: string, question: string, page: string, answeredBy: string, topSource: string | null) {
+    return Number(this.site.prepare("INSERT INTO help_questions (viewer, question, page, answered_by, top_source) VALUES (?, ?, ?, ?, ?)").run(viewer, question.slice(0, 500), page.slice(0, 200), answeredBy, topSource).lastInsertRowid);
+  }
+
+  /** What people ask Help: top topics, questions without a good answer, and how often answers helped. */
+  helpInsights(days = 7) {
+    const since = `-${Math.max(1, days)} days`;
+    const rows = this.site.prepare("SELECT id, question, page, answered_by, top_source, helpful, created_at FROM help_questions WHERE created_at >= datetime('now', ?) ORDER BY id DESC").all(since) as {
+      id: number; question: string; page: string; answered_by: string; top_source: string | null; helpful: number | null; created_at: string;
+    }[];
+    const topics = new Map<string, { topic: string; count: number; examples: string[] }>();
+    for (const r of rows) {
+      const t = r.top_source ?? "Other";
+      const x = topics.get(t) ?? { topic: t, count: 0, examples: [] };
+      x.count++;
+      if (x.examples.length < 3 && !x.examples.includes(r.question)) x.examples.push(r.question);
+      topics.set(t, x);
+    }
+    const rated = rows.filter((r) => r.helpful !== null);
+    return {
+      days,
+      total: rows.length,
+      topTopics: [...topics.values()].sort((a, b) => Number(a.topic === "Other") - Number(b.topic === "Other") || b.count - a.count).slice(0, 8), // unmatched last
+      unanswered: rows.filter((r) => r.answered_by === "none" || r.answered_by === "ai-unsure" || r.helpful === 0).slice(0, 15),
+      helpfulPct: rated.length ? Math.round((rated.filter((r) => r.helpful === 1).length / rated.length) * 100) : null,
+      rated: rated.length,
+    };
+  }
+
+  // ---------------- Win-back offer ----------------
+
+  /** An active "come back" offer for this person, if they got one and it hasn't run out (14 days). */
+  winbackOffer(userId: number) {
+    const pct = winbackPct();
+    if (!pct || !billingEnabled() || !this.accounts) return null;
+    const r = this.accounts.prepare("SELECT sent_at FROM nudges WHERE user_id = ? AND kind = 'winback' ORDER BY sent_at DESC LIMIT 1").get(userId) as { sent_at: string } | undefined;
+    if (!r) return null;
+    const ends = new Date(Date.parse(r.sent_at.replace(" ", "T") + "Z") + 14 * 86400_000);
+    const st = planStatus(this.billingRow(userId)!);
+    if (ends.getTime() < Date.now() || st === "active" || st === "past_due") return null;
+    return { pct, endsAt: ends.toISOString(), coupon: this.siteGet<string | null>(`winbackCoupon:${pct}`, null) };
+  }
+
+  private async winbackCoupon(pct: number) {
+    const key = `winbackCoupon:${pct}`;
+    let id = this.siteGet<string | null>(key, null);
+    if (!id) {
+      id = await createWinbackCoupon(pct);
+      this.siteSet(key, id);
+    }
+    return id;
   }
 
   // ---------------- Backup restore check ----------------
@@ -1103,6 +1277,31 @@ export class Workspaces {
   handler() {
     const root = express.Router();
     const json = express.json({ limit: "100kb" });
+
+    // For uptime monitors (UptimeRobot, Better Stack…): no login. 200 when FlipDesk can serve, 503 when it can't.
+    // ?strict=1 also returns 503 while a service (AI, eBay, email, backups) has an open outage.
+    root.get("/healthz", (req, res) => {
+      const problems: string[] = [];
+      const ping = (name: string, db: Db | null) => {
+        try {
+          db?.prepare("SELECT 1").get();
+        } catch (e) {
+          problems.push(`${name}: ${(e as Error).message}`);
+        }
+      };
+      ping("site", this.site);
+      ping("accounts", this.accounts);
+      if (!this.multiuser) ping("shop", this.get("main")?.db ?? null);
+      let open: string[] = [];
+      try {
+        open = (this.site.prepare("SELECT service FROM incidents WHERE ended_at IS NULL").all() as { service: string }[]).map((i) => i.service);
+      } catch {
+        /* already reported by the site check */
+      }
+      const down = problems.length > 0 || (req.query.strict === "1" && open.length > 0);
+      res.setHeader("Cache-Control", "no-store");
+      res.status(down ? 503 : 200).json({ ok: !down, uptimeSeconds: Math.round((Date.now() - Date.parse(startedAt)) / 1000), outages: open, ...(problems.length ? { problems } : {}) });
+    });
 
     // Photos: /uploads/<shop>/<file> (public: marketplaces and the extension fetch them). Names are random.
     root.use("/uploads", (req, res, next) => {
@@ -1331,13 +1530,15 @@ export class Workspaces {
     root.get("/api/billing", (req: R, res) => {
       const u = req.fdUser;
       if (!u) return void res.json({ enabled: false, status: this.multiuser ? "free" : "owner" });
-      res.json({ ...billingSummary(this.billingRow(u.id)!), aiLimit: this.aiLimit(u.id), paidAiLimit: paidAiLimit(), trialDays: trialDays() });
+      const offer = this.winbackOffer(u.id);
+      res.json({ ...billingSummary(this.billingRow(u.id)!), aiLimit: this.aiLimit(u.id), paidAiLimit: paidAiLimit(), trialDays: trialDays(), offer: offer ? { pct: offer.pct, endsAt: offer.endsAt } : null });
     });
     root.post("/api/billing/checkout", async (req: R, res) => {
       const u = needUser(req, res);
       if (!u) return;
       if (!billingEnabled()) return void res.status(400).json({ error: "Billing isn't turned on for this FlipDesk." });
-      res.json({ url: await checkoutUrl(this.billingRow(u.id)!, base(req)) });
+      const offer = this.winbackOffer(u.id);
+      res.json({ url: await checkoutUrl(this.billingRow(u.id)!, base(req), { coupon: offer?.coupon ?? undefined }) });
     });
     root.post("/api/billing/portal", async (req: R, res) => {
       const u = needUser(req, res);
@@ -1374,6 +1575,18 @@ export class Workspaces {
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="flipdesk-${ws.demo ? "sample-" : ""}export-${day}.zip"`);
       await exportShop(ws.db, ws.uploadDir, res, ws.demo ? "Sample shop" : req.fdUser?.email ?? "My shop");
+    });
+
+    // ---- Alert settings (owner) ----
+    root.get("/api/alerts", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json({ ...this.alertSettings(), quietNow: this.isQuiet() });
+    });
+    root.put("/api/alerts", json, (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const b = z.object({ quiet: z.boolean(), quietStart: z.number().int().min(0).max(23), quietEnd: z.number().int().min(0).max(23) }).parse(req.body);
+      this.siteSet("alerts", b);
+      res.json({ ...this.alertSettings(), quietNow: this.isQuiet() });
     });
 
     // ---- Backups (owner) ----
@@ -1424,7 +1637,16 @@ export class Workspaces {
       // Shared read-only visitors get doc search only (no AI on someone else's allowance).
       if (req.fdShare) return void res.json({ answer: null, sources: (await import("./services/help.js")).searchDocs(b.question), demo: true });
       const ws = this.current(req, req.fdUser ?? null);
-      res.json(await runInWorkspace(ws!, () => askHelp(b.question, b.history as HelpTurn[], b.page)));
+      const r = await runInWorkspace(ws!, () => askHelp(b.question, b.history as HelpTurn[], b.page));
+      const unsure = r.answer !== null && /isn't covered|not covered|couldn't find|can't find|don't (see|have) (that|anything)|no information/i.test(r.answer);
+      const by = r.answer !== null ? (unsure ? "ai-unsure" : "ai") : r.sources.length ? "guide" : "none";
+      const id = this.logHelp(req.fdUser ? `u${req.fdUser.id}` : "main", b.question, b.page, by, r.sources[0]?.title ?? null);
+      res.json({ ...r, id });
+    });
+    root.post("/api/help/feedback", json, (req: R, res) => {
+      const b = z.object({ id: z.number().int(), helpful: z.boolean() }).parse(req.body);
+      this.site.prepare("UPDATE help_questions SET helpful = ? WHERE id = ? AND viewer = ?").run(b.helpful ? 1 : 0, b.id, req.fdUser ? `u${req.fdUser.id}` : "main");
+      res.json({ ok: true });
     });
 
     // ---- Status ----
@@ -1490,6 +1712,12 @@ export class Workspaces {
       res.json({ invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
     });
     root.get("/api/admin/owner-report", (_req, res) => void res.json(this.ownerReport()));
+    root.get("/api/admin/help-insights", (req, res) => void res.json(this.helpInsights(Math.min(90, Number(req.query.days) || 7))));
+    root.get("/api/admin/whats-new", async (_req, res) => {
+      const since = this.siteGet<string | null>("lastAnnouncedCommit", null);
+      const { changes, source } = await recentChanges(since);
+      res.json({ source, since, changes: changes.map((c) => ({ sha: c.sha.slice(0, 10), date: c.date, subject: c.subject })), latest: changes[0]?.sha ?? null, draft: await draftWhatsNew(changes) });
+    });
     root.post("/api/admin/owner-report", async (_req, res) => {
       const r = this.ownerReport();
       res.json({ ...r, ...(await this.tellOwner(r.title, r.body)) });
@@ -1503,8 +1731,10 @@ export class Workspaces {
           body: z.string().trim().max(1000).default(""),
           link: z.string().trim().max(300).default("").refine((v) => !v || /^(\/[^\s]*|https:\/\/[^\s]+)$/.test(v), "Link must start with / or https://"),
           days: z.number().int().min(1).max(365).nullable().default(14),
+          commit: z.string().regex(/^[0-9a-f]{7,40}$/).optional(), // posted from a "what's new" draft
         })
         .parse(req.body);
+      if (b.commit) this.siteSet("lastAnnouncedCommit", b.commit);
       this.site.prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)").run(b.title, b.body, b.link, b.days, `+${b.days ?? 0} days`);
       res.json(this.announcementList());
     });

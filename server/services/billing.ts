@@ -90,7 +90,7 @@ export async function stripeGet<T>(pathName: string): Promise<T> {
 }
 export const stripePost = <T>(pathName: string, body: Record<string, string | number | undefined>) => stripe<T>(pathName, form(body));
 
-export async function checkoutUrl(u: BillingRow, base: string) {
+export async function checkoutUrl(u: BillingRow, base: string, opts: { coupon?: string } = {}) {
   const trialEnd = Math.floor(parseTime(u.trial_ends_at) / 1000);
   // Subscribing early? Don't charge until the free trial would have ended (Stripe needs 48h+ notice).
   const keepTrial = Number.isFinite(trialEnd) && trialEnd > Date.now() / 1000 + 48 * 3600;
@@ -107,7 +107,9 @@ export async function checkoutUrl(u: BillingRow, base: string) {
       customer_email: u.stripe_customer_id ? undefined : u.email,
       "subscription_data[metadata][user_id]": String(u.id),
       "subscription_data[trial_end]": keepTrial ? trialEnd : undefined,
-      allow_promotion_codes: "true",
+      // A win-back offer applies its coupon automatically (Stripe allows either a discount or a code box, not both).
+      "discounts[0][coupon]": opts.coupon,
+      allow_promotion_codes: opts.coupon ? undefined : "true",
     }),
   );
   return s.url;
@@ -166,4 +168,17 @@ export function applyStripeEvent(accounts: Db, ev: { type: string; data: { objec
     return { userId: row.id, plan: status };
   }
   return null;
+}
+
+/** Win-back offer: percent off the first month for people whose trial ended (FLIPDESK_WINBACK_PCT, default 20; 0 = off). */
+export const winbackPct = () => {
+  const raw = process.env.FLIPDESK_WINBACK_PCT;
+  const n = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(n) ? Math.max(0, Math.min(90, n)) : 20;
+};
+
+/** Create (once) the Stripe coupon the win-back offer uses. */
+export async function createWinbackCoupon(pct: number) {
+  const c = await stripe<{ id: string }>("coupons", form({ percent_off: pct, duration: "once", name: `Come back: ${pct}% off your first month` }));
+  return c.id;
 }

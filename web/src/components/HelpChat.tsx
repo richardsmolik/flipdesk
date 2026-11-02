@@ -3,7 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 
 interface Source { title: string; text: string; source: string }
-interface Turn { role: "user" | "assistant"; content: string; sources?: Source[]; demo?: boolean }
+interface Turn { role: "user" | "assistant"; content: string; sources?: Source[]; demo?: boolean; id?: number; rated?: boolean }
 
 /** Tiny safe markdown: **bold**, `code`, [links](/path or https://), numbered/bulleted lines. No HTML. */
 function Md({ text }: { text: string }) {
@@ -73,8 +73,8 @@ export function HelpChat({ compact }: { compact?: boolean }) {
     setQ("");
     setBusy(true);
     try {
-      const r = await api.post<{ answer: string | null; sources: Source[]; demo: boolean }>("/api/help/ask", { question, page: loc.pathname, history });
-      setTurns((t) => [...t, { role: "assistant", content: r.answer ?? (r.sources.length ? "Here's what the guide says:" : "I couldn't find that in the guide. Try other words, or send feedback."), sources: r.answer ? undefined : r.sources, demo: r.demo }]);
+      const r = await api.post<{ answer: string | null; sources: Source[]; demo: boolean; id?: number }>("/api/help/ask", { question, page: loc.pathname, history });
+      setTurns((t) => [...t, { role: "assistant", content: r.answer ?? (r.sources.length ? "Here's what the guide says:" : "I couldn't find that in the guide. Try other words, or send feedback."), sources: r.answer ? undefined : r.sources, demo: r.demo, id: r.id }]);
     } catch (e) {
       setTurns((t) => [...t, { role: "assistant", content: (e as Error).message }]);
     } finally {
@@ -104,6 +104,30 @@ export function HelpChat({ compact }: { compact?: boolean }) {
               </details>
             ))}
             {t.demo && t.role === "assistant" && <div className="mt-1 text-[11px] text-zinc-500">AI answers need an Anthropic key on the server; showing the guide instead.</div>}
+            {t.role === "assistant" && t.id && (
+              <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-500">
+                {t.rated ? (
+                  "Thanks for the feedback"
+                ) : (
+                  <>
+                    Did this help?
+                    {[true, false].map((h) => (
+                      <button
+                        key={String(h)}
+                        className="rounded px-1 hover:bg-zinc-800"
+                        aria-label={h ? "Yes, helpful" : "No, not helpful"}
+                        onClick={() => {
+                          void api.post("/api/help/feedback", { id: t.id, helpful: h }).catch(() => {});
+                          setTurns((all) => all.map((x) => (x === t ? { ...x, rated: true } : x)));
+                        }}
+                      >
+                        {h ? "👍" : "👎"}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         ))}
         {busy && <div className="text-sm text-zinc-500">Looking it up…</div>}

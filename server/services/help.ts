@@ -62,11 +62,15 @@ const words = (s: string) =>
 const STOP = new Set(["the", "and", "for", "how", "can", "you", "what", "does", "with", "this", "that", "are", "why", "not", "get", "use", "from", "into", "when", "where", "there", "have", "want", "need"]);
 
 /** No-AI fallback: the doc sections that share the most words with the question. */
+/** Developer-facing README sections that never answer a seller's question. */
+const NOT_FOR_SELLERS = /^(status and known gaps|roadmap|how it fits together|quick start|tested)/i;
+
 export function searchDocs(q: string, limit = 3): Section[] {
   const qw = new Set(words(q));
   if (!qw.size) return [];
   return docs()
-    .sections.map((s) => {
+    .sections.filter((s) => !NOT_FOR_SELLERS.test(s.title))
+    .map((s) => {
       const tw = words(s.title);
       const bw = words(s.text);
       let score = 0;

@@ -34,7 +34,7 @@ export async function notify(db: Db, event: "sale" | "oversell" | "email_review"
     const res = await fetch(`${(s.ntfyServer || "https://ntfy.sh").replace(/\/$/, "")}/${encodeURIComponent(s.ntfyTopic)}`, {
       method: "POST",
       headers: {
-        Title: title.replace(/[^\x20-\x7E]/g, ""), // headers must be ASCII
+        Title: title.replace(/[^\x20-\x7E]/g, "").trim(), // headers must be ASCII (emoji dropped)
         Priority: event === "oversell" ? "urgent" : "default",
         Tags: event === "sale" ? "moneybag" : event === "oversell" ? "rotating_light" : event === "weekly" ? "bar_chart" : event === "feedback" ? "speech_balloon" : "envelope",
       },

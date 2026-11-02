@@ -268,6 +268,40 @@ function Backups() {
   );
 }
 
+interface Alerts { quiet: boolean; quietStart: number; quietEnd: number; afterMinutes: number; timezone: string; quietNow: boolean }
+const hourLabel = (h: number) => (h === 0 ? "12 am" : h < 12 ? `${h} am` : h === 12 ? "12 pm" : `${h - 12} pm`);
+
+function AlertSettings() {
+  const [a, setA] = useState<Alerts | null>(null);
+  useEffect(() => void api.get<Alerts>("/api/alerts").then(setA).catch(() => {}), []);
+  if (!a) return null;
+  const save = async (next: Partial<Alerts>) => {
+    const r = await api.put<Alerts>("/api/alerts", { quiet: next.quiet ?? a.quiet, quietStart: next.quietStart ?? a.quietStart, quietEnd: next.quietEnd ?? a.quietEnd });
+    setA(r);
+    toast("Saved");
+  };
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">🔕 Problem alerts</h2>
+      <p className="text-sm text-zinc-400">
+        When AI, eBay or email keeps failing, FlipDesk alerts you. Problems fixed within {a.afterMinutes} minutes are only logged (Tools → Status), several at once arrive as one message, and you hear "✅ working again" when they're fixed.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <label className="flex items-center gap-2"><input type="checkbox" checked={a.quiet} onChange={(e) => save({ quiet: e.target.checked })} /> Quiet hours from</label>
+        <select className="input w-28 py-1" value={a.quietStart} disabled={!a.quiet} onChange={(e) => save({ quietStart: Number(e.target.value) })}>
+          {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hourLabel(h)}</option>)}
+        </select>
+        to
+        <select className="input w-28 py-1" value={a.quietEnd} disabled={!a.quiet} onChange={(e) => save({ quietEnd: Number(e.target.value) })}>
+          {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{hourLabel(h)}</option>)}
+        </select>
+        <span className="text-xs text-zinc-500">({a.timezone}{a.quietNow ? ", quiet now" : ""})</span>
+      </div>
+      <p className="text-xs text-zinc-500">During quiet hours nothing pings you. Anything still broken when they end arrives then; anything that fixed itself overnight comes as one "while you were away" note.</p>
+    </section>
+  );
+}
+
 function SiteSections() {
   const a = useAccount();
   const w = useWorkspace();
@@ -276,6 +310,7 @@ function SiteSections() {
       {a?.user && <AccountSection email={a.user.email} optOut={Boolean(a.emailOptOut)} />}
       {!w?.shared && <YourData />}
       {a?.canEditSite && <Backups />}
+      {a?.canEditSite && <AlertSettings />}
       {a?.canEditSite && <HelpVideos />}
     </>
   );

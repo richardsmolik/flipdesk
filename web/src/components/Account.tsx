@@ -196,7 +196,7 @@ export function SharePage({ token }: { token: string }) {
   return <div className="flex min-h-screen items-center justify-center p-4 text-zinc-400">{err || "Opening the sample shop…"}</div>;
 }
 
-export interface BillingInfo { enabled: boolean; status: "owner" | "free" | "trial" | "active" | "past_due" | "expired"; canWrite?: boolean; trialDaysLeft?: number | null; renewsAt?: string | null; hasCustomer?: boolean; price?: string | null; aiLimit?: number | null; paidAiLimit?: number; trialDays?: number }
+export interface BillingInfo { offer?: { pct: number; endsAt: string } | null; enabled: boolean; status: "owner" | "free" | "trial" | "active" | "past_due" | "expired"; canWrite?: boolean; trialDaysLeft?: number | null; renewsAt?: string | null; hasCustomer?: boolean; price?: string | null; aiLimit?: number | null; paidAiLimit?: number; trialDays?: number }
 
 /** Trial ending soon / ended: a slim bar linking to the plan page. */
 export function PlanBanner({ b }: { b: BillingInfo | null }) {
@@ -204,7 +204,7 @@ export function PlanBanner({ b }: { b: BillingInfo | null }) {
   if (b.status === "expired")
     return (
       <a href="/billing" className="block border-b border-red-900 bg-red-950/90 px-4 py-2 text-center text-sm text-red-100 hover:bg-red-950">
-        Your free trial has ended. Your shop is read-only until you choose a plan. <b className="underline">See plans →</b>
+        Your free trial has ended. Your shop is read-only until you choose a plan.{b.offer ? ` 🎁 ${b.offer.pct}% off your first month until ${new Date(b.offer.endsAt).toLocaleDateString()}.` : ""} <b className="underline">See plans →</b>
       </a>
     );
   if (b.status === "trial" && (b.trialDaysLeft ?? 99) <= 3)

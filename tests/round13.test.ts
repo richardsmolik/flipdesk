@@ -13,7 +13,7 @@ import { setSetting } from "../server/db.js";
 let dir: string;
 let shops: Workspaces;
 let app: express.Express;
-const ENV = ["FLIPDESK_INVITE_CODE", "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "SMTP_HOST", "PUBLIC_BASE_URL", "ANTHROPIC_API_KEY", "FLIPDESK_INCIDENT_AFTER", "FLIPDESK_AUTO_ANNOUNCE"];
+const ENV = ["FLIPDESK_INVITE_CODE", "STRIPE_SECRET_KEY", "STRIPE_PRICE_ID", "SMTP_HOST", "PUBLIC_BASE_URL", "ANTHROPIC_API_KEY", "FLIPDESK_INCIDENT_AFTER", "FLIPDESK_AUTO_ANNOUNCE", "FLIPDESK_ALERT_AFTER_MINUTES"];
 
 beforeEach(() => {
   for (const k of ENV) delete process.env[k];
@@ -66,11 +66,13 @@ describe("automatic incident alerts", () => {
   it("3 failures in a row: owner told + heads-up for everyone; recovery takes it down", async () => {
     const { m } = await setup();
     process.env.EBAY_CLIENT_ID = "x";
+    process.env.FLIPDESK_ALERT_AFTER_MINUTES = "0"; // alert at once (round 14 adds the blip window + quiet hours)
+    shops.siteSet("alerts", { quiet: false });
     reportHealth("ebay", false, "eBay error 503");
     reportHealth("ebay", false, "eBay error 503");
     expect(await shops.checkIncidents()).toEqual([]); // 2 isn't enough
     reportHealth("ebay", false, "eBay error 503 on GET /sell/inventory");
-    expect(await shops.checkIncidents()).toEqual([{ service: "ebay", kind: "opened" }]);
+    expect(await shops.checkIncidents()).toEqual([{ service: "ebay", kind: "opened" }, { service: "ebay", kind: "alerted" }]);
     expect(await shops.checkIncidents()).toEqual([]); // no repeat alerts
     expect(outbox().find((x) => x.to === "owner@x.com")?.subject).toMatch(/eBay is failing/);
     const ann = (await m.get("/api/announcements")).body;
@@ -88,6 +90,8 @@ describe("automatic incident alerts", () => {
     const { m } = await setup();
     process.env.FLIPDESK_AUTO_ANNOUNCE = "0";
     process.env.FLIPDESK_INCIDENT_AFTER = "1";
+    process.env.FLIPDESK_ALERT_AFTER_MINUTES = "0";
+    shops.siteSet("alerts", { quiet: false });
     reportHealth("ai", false, "overloaded");
     await shops.checkIncidents();
     expect((await m.get("/api/announcements")).body).toHaveLength(0);
