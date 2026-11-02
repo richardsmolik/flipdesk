@@ -70,7 +70,7 @@ export function searchDocs(q: string, limit = 3): Section[] {
       const tw = words(s.title);
       const bw = words(s.text);
       let score = 0;
-      for (const w of qw) score += (tw.includes(w) ? 3 : 0) + Math.min(3, bw.filter((x) => x === w).length);
+      for (const w of qw) score += (tw.includes(w) ? 6 : 0) + Math.min(3, bw.filter((x) => x === w).length); // a matching heading beats a passing mention
       return { s, score };
     })
     .filter((x) => x.score > 0)
