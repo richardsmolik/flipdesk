@@ -12,7 +12,35 @@
 import crypto from "node:crypto";
 import type { Db } from "../db.js";
 
-export const billingEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID);
+// ---------------- Test vs live ----------------
+// Set STRIPE_SECRET_KEY / STRIPE_PRICE_ID / STRIPE_WEBHOOK_SECRET for live, and STRIPE_TEST_SECRET_KEY /
+// STRIPE_TEST_PRICE_ID / STRIPE_TEST_WEBHOOK_SECRET for test. The owner flips between them (Accounts page);
+// with only one set, that one is used. Subscriptions made in one mode never count in the other.
+export type StripeMode = "test" | "live";
+let chosenMode: StripeMode | null = null;
+export const setStripeMode = (m: StripeMode | null) => void (chosenMode = m);
+const hasLive = () => Boolean(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID);
+const hasTest = () => Boolean(process.env.STRIPE_TEST_SECRET_KEY && process.env.STRIPE_TEST_PRICE_ID);
+/** Which set of keys is in use. */
+export function stripeKeySet(): StripeMode {
+  if (chosenMode === "test" && hasTest()) return "test";
+  if (chosenMode === "live" && hasLive()) return "live";
+  return hasLive() ? "live" : "test";
+}
+export const stripeKey = () => (stripeKeySet() === "test" ? process.env.STRIPE_TEST_SECRET_KEY : process.env.STRIPE_SECRET_KEY);
+export const stripePriceId = () => (stripeKeySet() === "test" ? process.env.STRIPE_TEST_PRICE_ID : process.env.STRIPE_PRICE_ID);
+/** Is money real right now? Judged by the key itself (sk_test_ / rk_test_ never charge cards). */
+export const stripeIsTest = () => /^(sk|rk)_test_/.test(stripeKey() ?? "");
+/** The label stored with each customer/subscription. */
+export const currentStripeMode = (): StripeMode => (stripeIsTest() ? "test" : "live");
+export const webhookSecrets = () =>
+  [
+    { secret: process.env.STRIPE_WEBHOOK_SECRET, mode: (/^(sk|rk)_test_/.test(process.env.STRIPE_SECRET_KEY ?? "") ? "test" : "live") as StripeMode },
+    { secret: process.env.STRIPE_TEST_WEBHOOK_SECRET, mode: "test" as StripeMode },
+  ].filter((x): x is { secret: string; mode: StripeMode } => Boolean(x.secret));
+export const stripeModes = () => ({ live: hasLive(), test: hasTest(), using: stripeKeySet(), testing: stripeIsTest() });
+
+export const billingEnabled = () => Boolean(stripeKey() && stripePriceId());
 export const trialDays = () => {
   const n = Number(process.env.FLIPDESK_TRIAL_DAYS);
   return process.env.FLIPDESK_TRIAL_DAYS && Number.isFinite(n) && n >= 0 ? n : 14;
@@ -33,6 +61,7 @@ export interface BillingRow {
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   current_period_end: string | null;
+  stripe_mode?: string | null; // "test" | "live": where the customer/subscription lives
 }
 
 const parseTime = (s: string | null) => (s ? Date.parse(s.replace(" ", "T") + (s.includes("Z") ? "" : "Z")) : NaN);
@@ -40,6 +69,9 @@ const parseTime = (s: string | null) => (s ? Date.parse(s.replace(" ", "T") + (s
 export function planStatus(u: BillingRow, now = Date.now()): PlanStatus {
   if (u.is_owner) return "owner";
   if (u.plan === "comp") return "free";
+  // A subscription from the other Stripe mode (e.g. made while testing) doesn't count now.
+  const otherMode = Boolean(u.stripe_mode && u.stripe_mode !== currentStripeMode());
+  if (otherMode) u = { ...u, plan: null };
   if (u.plan === "active" || u.plan === "trialing") return "active";
   if (u.plan === "past_due") return "past_due"; // Stripe is retrying the card: keep working meanwhile
   if (!billingEnabled()) return "free";
@@ -58,7 +90,8 @@ export function billingSummary(u: BillingRow, now = Date.now()) {
     trialEndsAt: u.trial_ends_at,
     trialDaysLeft: status === "trial" ? Math.max(0, Math.ceil((trialEnd - now) / 86400_000)) : null,
     renewsAt: u.current_period_end,
-    hasCustomer: Boolean(u.stripe_customer_id),
+    hasCustomer: Boolean(u.stripe_customer_id) && (!u.stripe_mode || u.stripe_mode === currentStripeMode()),
+    testMode: billingEnabled() && stripeIsTest(),
     price: process.env.FLIPDESK_PRICE_LABEL || null, // e.g. "$19/month", shown on the plan page
   };
 }
@@ -74,7 +107,7 @@ function form(obj: Record<string, string | number | undefined>) {
 async function stripe<T>(path: string, body: URLSearchParams): Promise<T> {
   const r = await fetch(`https://api.stripe.com/v1/${path}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    headers: { Authorization: `Bearer ${stripeKey()}`, "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
   const j = (await r.json()) as T & { error?: { message?: string } };
@@ -83,12 +116,14 @@ async function stripe<T>(path: string, body: URLSearchParams): Promise<T> {
 }
 
 export async function stripeGet<T>(pathName: string): Promise<T> {
-  const r = await fetch(`https://api.stripe.com/v1/${pathName}`, { headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` } });
+  const r = await fetch(`https://api.stripe.com/v1/${pathName}`, { headers: { Authorization: `Bearer ${stripeKey()}` } });
   const j = (await r.json()) as T & { error?: { message?: string } };
   if (!r.ok) throw Object.assign(new Error(`Stripe: ${j.error?.message ?? r.status}`), { status: 502 });
   return j;
 }
 export const stripePost = <T>(pathName: string, body: Record<string, string | number | undefined>) => stripe<T>(pathName, form(body));
+
+const sameMode = (u: BillingRow) => !u.stripe_mode || u.stripe_mode === currentStripeMode();
 
 export async function checkoutUrl(u: BillingRow, base: string, opts: { coupon?: string } = {}) {
   const trialEnd = Math.floor(parseTime(u.trial_ends_at) / 1000);
@@ -98,13 +133,13 @@ export async function checkoutUrl(u: BillingRow, base: string, opts: { coupon?: 
     "checkout/sessions",
     form({
       mode: "subscription",
-      "line_items[0][price]": process.env.STRIPE_PRICE_ID,
+      "line_items[0][price]": stripePriceId(),
       "line_items[0][quantity]": 1,
       success_url: `${base}/billing?done=1`,
       cancel_url: `${base}/billing`,
       client_reference_id: String(u.id),
-      customer: u.stripe_customer_id ?? undefined,
-      customer_email: u.stripe_customer_id ? undefined : u.email,
+      customer: sameMode(u) ? u.stripe_customer_id ?? undefined : undefined,
+      customer_email: sameMode(u) && u.stripe_customer_id ? undefined : u.email,
       "subscription_data[metadata][user_id]": String(u.id),
       "subscription_data[trial_end]": keepTrial ? trialEnd : undefined,
       // A win-back offer applies its coupon automatically (Stripe allows either a discount or a code box, not both).
@@ -116,7 +151,7 @@ export async function checkoutUrl(u: BillingRow, base: string, opts: { coupon?: 
 }
 
 export async function portalUrl(u: BillingRow, base: string) {
-  if (!u.stripe_customer_id) throw Object.assign(new Error("No billing account yet. Subscribe first."), { status: 400 });
+  if (!u.stripe_customer_id || !sameMode(u)) throw Object.assign(new Error("No billing account yet. Subscribe first."), { status: 400 });
   const s = await stripe<{ url: string }>("billing_portal/sessions", form({ customer: u.stripe_customer_id, return_url: `${base}/billing` }));
   return s.url;
 }
@@ -135,7 +170,7 @@ export function verifyWebhook(raw: Buffer, header: string | undefined, secret: s
 const iso = (unix: number | undefined | null) => (unix ? new Date(unix * 1000).toISOString().replace("T", " ").slice(0, 19) : null);
 
 /** Apply a Stripe event to the accounts database. Returns what changed (for logs/tests). */
-export function applyStripeEvent(accounts: Db, ev: { type: string; data: { object: Record<string, unknown> } }) {
+export function applyStripeEvent(accounts: Db, ev: { type: string; data: { object: Record<string, unknown> } }, mode: StripeMode = currentStripeMode()) {
   const o = ev.data.object as {
     id?: string;
     customer?: string;
@@ -143,15 +178,17 @@ export function applyStripeEvent(accounts: Db, ev: { type: string; data: { objec
     client_reference_id?: string;
     status?: string;
     current_period_end?: number;
+    cancel_at_period_end?: boolean;
     items?: { data?: { current_period_end?: number }[] };
     metadata?: { user_id?: string };
+    cancellation_details?: { reason?: string | null; feedback?: string | null; comment?: string | null };
   };
   if (ev.type === "checkout.session.completed") {
     const id = Number(o.client_reference_id);
     if (!id) return null;
     accounts
-      .prepare("UPDATE users SET stripe_customer_id = COALESCE(?, stripe_customer_id), stripe_subscription_id = COALESCE(?, stripe_subscription_id), plan = CASE WHEN plan = 'trialing' THEN plan ELSE 'active' END WHERE id = ?")
-      .run(o.customer ?? null, o.subscription ?? null, id);
+      .prepare("UPDATE users SET stripe_customer_id = COALESCE(?, stripe_customer_id), stripe_subscription_id = COALESCE(?, stripe_subscription_id), plan = CASE WHEN plan = 'trialing' THEN plan ELSE 'active' END, stripe_mode = ? WHERE id = ?")
+      .run(o.customer ?? null, o.subscription ?? null, mode, id);
     return { userId: id, plan: "active" };
   }
   if (ev.type.startsWith("customer.subscription.")) {
@@ -163,9 +200,13 @@ export function applyStripeEvent(accounts: Db, ev: { type: string; data: { objec
     const status = ev.type === "customer.subscription.deleted" ? "canceled" : (o.status ?? "active");
     const periodEnd = o.current_period_end ?? o.items?.data?.[0]?.current_period_end;
     accounts
-      .prepare("UPDATE users SET plan = ?, stripe_subscription_id = ?, stripe_customer_id = COALESCE(stripe_customer_id, ?), current_period_end = ? WHERE id = ?")
-      .run(status, o.id ?? null, o.customer ?? null, iso(periodEnd), row.id);
-    return { userId: row.id, plan: status };
+      .prepare("UPDATE users SET plan = ?, stripe_subscription_id = ?, stripe_customer_id = COALESCE(?, stripe_customer_id), current_period_end = ?, stripe_mode = ? WHERE id = ?")
+      .run(status, o.id ?? null, o.customer ?? null, iso(periodEnd), mode, row.id);
+    // Why they left (Stripe's cancel page can ask; enable "cancellation reason" in the customer portal settings).
+    const cd = o.cancellation_details;
+    const canceling = status === "canceled" || o.cancel_at_period_end === true;
+    const cancellation = canceling && cd && (cd.feedback || cd.comment) ? { reason: cd.feedback ?? "other", comment: cd.comment ?? "" } : null;
+    return { userId: row.id, plan: status, canceling, cancellation };
   }
   return null;
 }

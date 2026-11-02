@@ -138,6 +138,10 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **What people ask Help.** Accounts → shows the topics people ask about most, the questions with no good answer (nothing in the guide, the AI unsure, or a 👎), and how often answers helped. It's in your weekly report too. Use it to decide what to explain better, record a help video for, or simplify.
 - **"What's new" drafts.** Accounts → Announcements → **✨ Draft from recent updates** reads the updates since your last "what's new" post (from git, or GitHub via `FLIPDESK_GITHUB_REPO` on Fly/Docker, plus `GITHUB_TOKEN` for a private repo), skips internal ones (tests, chores), and writes a seller-friendly announcement (Claude with a key, a plain list without). Edit it, then Post.
 
+- **Help articles.** Next to each unanswered Help question: **✍️ Write an answer** drafts a short article from your docs (Claude with a key, a starter template without). Edit and save it: Help shows it first and the AI uses it from then on, and that question leaves the unanswered list. All your articles are listed there to edit or remove.
+- **Day-3 check-in** (needs SMTP): someone who hasn't added an item by day 3 gets one "need a hand?" email with the three quickest ways to start (Shoot mode, import, sample shop).
+- **Launch checklist** (Setup → Launch checklist, owner only): HTTPS address, sign-in, lasting disk, AI key, eBay keys/connection/policies, email (with a **Send test email** button), phone alerts, uptime monitor (✅ once UptimeRobot/Better Stack has checked `/healthz`), backups, off-site copy, restore check, invites, payments mode and webhook. Each item says how to fix it.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:
@@ -157,6 +161,10 @@ Fly.io's own health check also uses `/healthz` (see `fly.toml`).
 5. Set `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, and optionally `FLIPDESK_TRIAL_DAYS` (14), `FLIPDESK_PRICE_LABEL` ("$19/month"), `FLIPDESK_AI_PAID_LIMIT` (200).
 
 **Referrals:** members get their own invite links (Your plan → Invite a friend; on by default when billing is on, `FLIPDESK_MEMBER_INVITES=0` to turn off). When someone they invited **starts paying**, they get one free month, once per friend: a Stripe credit worth one month on their next bill if they're subscribed, otherwise 30 more days of trial. They get an email about it when email is set up.
+
+**Test mode first:** set `STRIPE_TEST_SECRET_KEY`, `STRIPE_TEST_PRICE_ID` and `STRIPE_TEST_WEBHOOK_SECRET` (a second webhook endpoint in Stripe's test mode, same URL) next to the live ones. The Accounts page has a **Test / Live** switch; while in test mode everyone sees a purple "TEST mode: no real charges" bar and the plan page shows the test card (4242 4242 4242 4242). Subscriptions made in test mode never count once you switch to live.
+
+**Why people cancel:** turn on "Cancellation reasons" in Stripe → Settings → Billing → Customer portal, and FlipDesk records them. People who cancel without giving one get a one-tap "what's the main reason?" on their plan page. Reasons show on the Accounts page and in your weekly report.
 
 **Win-back offer:** when someone's trial ended 1-30 days ago without a plan, they get one email with 20% off their first month (`FLIPDESK_WINBACK_PCT`, 0 = off), good for 14 days. FlipDesk creates the coupon in your Stripe account once and applies it automatically at checkout, and the plan page and banner show the offer.
 

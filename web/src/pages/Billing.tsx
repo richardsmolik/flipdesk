@@ -61,6 +61,30 @@ function InviteFriends() {
   );
 }
 
+/** After someone cancels: one tap to say why (helps the owner fix the right thing). */
+function CancelReason({ reasons, onDone }: { reasons: { key: string; label: string }[]; onDone: () => void }) {
+  const [pick, setPick] = useState("");
+  const [comment, setComment] = useState("");
+  return (
+    <div className="card space-y-3 border-amber-900 p-5">
+      <h2 className="font-semibold">Sorry to see you go. What's the main reason?</h2>
+      <div className="flex flex-wrap gap-1.5">
+        {reasons.map((r) => (
+          <button key={r.key} onClick={() => setPick(r.key)} className={`rounded-full border px-3 py-1 text-sm ${pick === r.key ? "border-brand bg-blue-950/50 text-zinc-100" : "border-zinc-700 text-zinc-300"}`} aria-pressed={pick === r.key}>
+            {r.label}
+          </button>
+        ))}
+      </div>
+      {pick && <textarea className="input" maxLength={1000} placeholder="Anything we could have done better? (optional)" value={comment} onChange={(e) => setComment(e.target.value)} />}
+      <div className="flex gap-2">
+        <button className="btn-primary" disabled={!pick} onClick={async () => (await api.post("/api/billing/cancel-reason", { reason: pick, comment }), toast("Thank you, that really helps"), onDone())}>Send</button>
+        <button className="btn-ghost" onClick={onDone}>Skip</button>
+      </div>
+      <p className="text-xs text-zinc-500">Your data stays here. You can come back any time.</p>
+    </div>
+  );
+}
+
 /** Your plan: trial days left, subscribe (Stripe Checkout), manage or cancel (Stripe portal). */
 export default function Billing() {
   const [b, setB] = useState<BillingInfo | null>(null);
@@ -80,6 +104,8 @@ export default function Billing() {
   return (
     <div className="max-w-2xl space-y-5">
       <h1 className="text-2xl font-semibold">💳 Your plan</h1>
+      {b.askCancelReason && b.cancelReasons && <CancelReason reasons={b.cancelReasons} onDone={() => setB({ ...b, askCancelReason: false })} />}
+      {b.testMode && <div className="rounded-md border border-fuchsia-900 bg-fuchsia-950/40 p-3 text-sm text-fuchsia-200">🧪 Test mode: use card 4242 4242 4242 4242, any future date, any CVC. Nothing is charged.</div>}
       {done && <div className="rounded-md border border-green-900 bg-green-950/40 p-3 text-sm text-green-200">🎉 Thanks for subscribing! It can take a few seconds to show here.</div>}
       <div className="card space-y-3 p-5">
         <div className="flex items-baseline justify-between">

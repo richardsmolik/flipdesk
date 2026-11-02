@@ -3,7 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { api } from "../api";
 
 /** Navigation grouped by job, with live badges; on phones, a bottom tab bar + "More" sheet. */
-type Entry = { to: string; label: string; icon: string; badge?: keyof Counts; only?: "accounts" | "owner" | "member" };
+type Entry = { to: string; label: string; icon: string; badge?: keyof Counts; only?: "accounts" | "owner" | "member" | "siteOwner" };
 type Group = { key: string; label: string; items: Entry[] };
 export interface Counts { inbox: number; toShip: number; drafts: number; failed: number }
 
@@ -39,6 +39,7 @@ export const GROUPS: Group[] = [
       { to: "/connections", label: "Marketplaces", icon: "🔌" },
       { to: "/switch", label: "Switch to FlipDesk", icon: "🔀" },
       { to: "/settings", label: "Settings", icon: "⚙️" },
+      { to: "/launch", label: "Launch checklist", icon: "🚀", only: "siteOwner" },
       { to: "/accounts", label: "Accounts", icon: "👥", only: "owner" },
       { to: "/billing", label: "Your plan", icon: "💳", only: "member" },
     ],
@@ -53,7 +54,13 @@ export function groupsFor(shop?: NavShop | null) {
     items: g.items.filter(
       (e) =>
         !e.only ||
-        (e.only === "accounts" ? shop?.mode === "accounts" && !shop.shared : e.only === "member" ? shop?.mode === "accounts" && Boolean(shop.user) && !shop.user!.owner : Boolean(shop?.user?.owner)),
+        (e.only === "accounts"
+          ? shop?.mode === "accounts" && !shop.shared
+          : e.only === "member"
+            ? shop?.mode === "accounts" && Boolean(shop.user) && !shop.user!.owner
+            : e.only === "siteOwner"
+              ? !shop?.shared && (shop?.mode === "single" || Boolean(shop?.user?.owner))
+              : Boolean(shop?.user?.owner)),
     ),
   }));
 }

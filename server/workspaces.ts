@@ -22,10 +22,10 @@ import { seedDemo } from "./demo.js";
 import { accountDeletionChallenge } from "./marketplaces/ebay.js";
 import { goalProgress } from "./services/goals.js";
 import { mailConfigured, sendMail } from "./services/mailer.js";
-import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, createWinbackCoupon, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, winbackPct, type BillingRow } from "./services/billing.js";
+import { applyStripeEvent, currentStripeMode, setStripeMode, stripeIsTest, stripeModes, stripePriceId, webhookSecrets, type StripeMode, billingEnabled, billingSummary, checkoutUrl, createWinbackCoupon, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, winbackPct, type BillingRow } from "./services/billing.js";
 import { backupAll, exportShop, listBackups, backupDir, s3Configured, verifyBackup, type BackupSource } from "./services/backup.js";
 import { weeklySlot } from "./services/digest.js";
-import { askHelp, type HelpTurn } from "./services/help.js";
+import { askHelp, draftArticle, setExtraArticles, type HelpTurn } from "./services/help.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify } from "./services/alerts.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
@@ -84,6 +84,16 @@ export class Workspaces {
       setAiGate((ws, kind) => this.chargeAi(ws, kind));
     } else setAiGate(null);
     this.site = this.openSite();
+    setStripeMode(this.siteGet<StripeMode | null>("stripeMode", null));
+    setExtraArticles(() => this.helpArticles());
+  }
+
+  helpArticles() {
+    try {
+      return this.site.prepare("SELECT id, title, body, from_question, created_at, updated_at FROM help_articles WHERE archived_at IS NULL ORDER BY id").all() as { id: number; title: string; body: string; from_question: string | null; created_at: string; updated_at: string }[];
+    } catch {
+      return [];
+    }
   }
 
   private openAccounts(): Db {
@@ -102,8 +112,10 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS activity_days (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day));
       CREATE TABLE IF NOT EXISTS referral_rewards (id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL UNIQUE,
         kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      CREATE TABLE IF NOT EXISTS nudges (user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, kind, ref));`);
-    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER", "email_opt_out INTEGER NOT NULL DEFAULT 0"]) {
+      CREATE TABLE IF NOT EXISTS nudges (user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, kind, ref));
+      CREATE TABLE IF NOT EXISTS cancellations (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, reason TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER", "email_opt_out INTEGER NOT NULL DEFAULT 0", "stripe_mode TEXT", "canceling INTEGER NOT NULL DEFAULT 0"]) {
       try {
         a.exec(`ALTER TABLE users ADD COLUMN ${col}`);
       } catch {
@@ -127,7 +139,14 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, service TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT,
         last_error TEXT NOT NULL DEFAULT '', announcement_id INTEGER);
       CREATE TABLE IF NOT EXISTS help_questions (id INTEGER PRIMARY KEY, viewer TEXT NOT NULL, question TEXT NOT NULL, page TEXT NOT NULL DEFAULT '',
-        answered_by TEXT NOT NULL, top_source TEXT, helpful INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+        answered_by TEXT NOT NULL, top_source TEXT, helpful INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE IF NOT EXISTS help_articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, from_question TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), archived_at TEXT);`);
+    try {
+      site.exec("ALTER TABLE help_questions ADD COLUMN article_id INTEGER");
+    } catch {
+      /* already there */
+    }
     for (const col of ["notified_at TEXT", "summarized_at TEXT"]) {
       try {
         site.exec(`ALTER TABLE incidents ADD COLUMN ${col}`);
@@ -152,7 +171,7 @@ export class Workspaces {
   }
 
   billingRow(userId: number) {
-    return this.accounts!.prepare("SELECT id, email, is_owner, plan, trial_ends_at, stripe_customer_id, stripe_subscription_id, current_period_end FROM users WHERE id = ?").get(userId) as unknown as
+    return this.accounts!.prepare("SELECT id, email, is_owner, plan, trial_ends_at, stripe_customer_id, stripe_subscription_id, current_period_end, stripe_mode FROM users WHERE id = ?").get(userId) as unknown as
       | BillingRow
       | undefined;
   }
@@ -648,7 +667,7 @@ export class Workspaces {
     let detail = "";
     if (st === "free") (kind = "none"), (detail = "already free");
     else if (ref.stripe_customer_id && (st === "active" || st === "past_due")) {
-      const price = await stripeGet<{ unit_amount: number; currency: string }>(`prices/${process.env.STRIPE_PRICE_ID}`);
+      const price = await stripeGet<{ unit_amount: number; currency: string }>(`prices/${stripePriceId()}`);
       await stripePost("customers/" + ref.stripe_customer_id + "/balance_transactions", {
         amount: -price.unit_amount,
         currency: price.currency,
@@ -1058,6 +1077,8 @@ export class Workspaces {
     if (refs) lines.push(`🎁 ${refs} referral reward${refs === 1 ? "" : "s"} given`);
     const nudged = n(`SELECT COUNT(*) AS n FROM nudges WHERE sent_at >= ${weekAgo}`);
     if (nudged) lines.push(`✉️ ${nudged} reminder email${nudged === 1 ? "" : "s"} sent`);
+    const cx = this.cancellationSummary(7);
+    if (cx.total) lines.push(`💔 ${cx.total} cancellation${cx.total === 1 ? "" : "s"}: ${cx.reasons.map((r) => `${r.label.toLowerCase()} (${r.count})`).join(", ")}`);
     const hi = this.helpInsights(7);
     const topTopic = hi.topTopics.find((t) => t.topic !== "Other");
     if (hi.total) lines.push(`❓ ${hi.total} Help question${hi.total === 1 ? "" : "s"}${topTopic ? `, most about "${topTopic.topic}" (${topTopic.count})` : ""}${hi.unanswered.length ? ` · ${hi.unanswered.length} without a good answer` : ""}`);
@@ -1126,6 +1147,18 @@ export class Workspaces {
         sent.push({ userId: u.id, kind: "trial_ending" });
         continue;
       }
+      // Day 3 with nothing added yet: a short "need a hand?" with the three quickest wins.
+      const created = (a.prepare("SELECT created_at FROM users WHERE id = ?").get(u.id) as { created_at: string }).created_at;
+      const ageDays = (Date.now() - Date.parse(created.replace(" ", "T") + "Z")) / 86400_000;
+      if (ageDays >= 3 && ageDays < 7 && nums && nums.items === 0 && once(u.id, "day3", "1")) {
+        await sendMail(
+          u.email,
+          "Need a hand getting started with FlipDesk?",
+          `Hi! You signed up a few days ago but haven't added an item yet. Three quick ways to start:\n\n1. Snap it: open Shoot mode on your phone (${link("/shoot")}), take 3-4 photos per item, and the AI writes the listing.\n2. Bring your stock over: import from Vendoo, List Perfectly, eBay or a spreadsheet (${link("/switch")}).\n3. Just look around: open the sample shop (Settings) to see everything with fake data.\n\nStuck on something? The ❓ Help button answers how-to questions, or just reply here.\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
+        ).catch(() => {});
+        sent.push({ userId: u.id, kind: "day3" });
+        continue;
+      }
       // Trial ended 1-30 days ago without a plan: one "come back" offer (percent off the first month).
       const pct = winbackPct();
       const trialEnd = this.billingRow(u.id)!.trial_ends_at;
@@ -1165,6 +1198,145 @@ export class Workspaces {
     return sent;
   }
 
+  // ---------------- Cancellations ----------------
+
+  static CANCEL_REASONS: Record<string, string> = {
+    too_expensive: "Too expensive",
+    not_selling: "Not selling enough right now",
+    missing_features: "Missing something I need",
+    too_complex: "Too complicated",
+    switched_service: "Switching to another tool",
+    unused: "Not using it enough",
+    customer_service: "Support wasn't helpful",
+    low_quality: "Something didn't work right",
+    too_slow: "Too slow",
+    other: "Other",
+  };
+
+  recordCancellation(userId: number, reason: string, comment: string, source: "stripe" | "app") {
+    const r = Workspaces.CANCEL_REASONS[reason] ? reason : "other";
+    // Stripe and the app may both report the same cancellation: keep one per person per day, app wording wins.
+    const today = this.accounts!.prepare("SELECT id, source FROM cancellations WHERE user_id = ? AND created_at >= datetime('now','-1 day')").get(userId) as { id: number; source: string } | undefined;
+    if (today && (source === "stripe" || today.source === "app")) return today.id;
+    if (today) this.accounts!.prepare("DELETE FROM cancellations WHERE id = ?").run(today.id);
+    this.accounts!.prepare("UPDATE users SET canceling = 0 WHERE id = ?").run(userId);
+    return Number(this.accounts!.prepare("INSERT INTO cancellations (user_id, reason, comment, source) VALUES (?, ?, ?, ?)").run(userId, r, comment.slice(0, 1000), source).lastInsertRowid);
+  }
+
+  /** Ask why, once, after someone cancels (or schedules a cancel) and hasn't said. */
+  shouldAskCancelReason(userId: number) {
+    const u = this.accounts!.prepare("SELECT plan, canceling FROM users WHERE id = ?").get(userId) as { plan: string | null; canceling: number } | undefined;
+    if (!u || !(u.canceling || u.plan === "canceled")) return false;
+    return !this.accounts!.prepare("SELECT 1 FROM cancellations WHERE user_id = ? AND created_at >= datetime('now','-90 days')").get(userId);
+  }
+
+  cancellationSummary(days = 30) {
+    const rows = this.accounts!.prepare(
+      "SELECT c.reason, c.comment, c.source, c.created_at, u.email FROM cancellations c LEFT JOIN users u ON u.id = c.user_id WHERE c.created_at >= datetime('now', ?) ORDER BY c.id DESC",
+    ).all(`-${days} days`) as { reason: string; comment: string; source: string; created_at: string; email: string | null }[];
+    const counts: Record<string, number> = {};
+    for (const r of rows) counts[r.reason] = (counts[r.reason] ?? 0) + 1;
+    return {
+      total: rows.length,
+      reasons: Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([reason, count]) => ({ reason, label: Workspaces.CANCEL_REASONS[reason] ?? reason, count })),
+      recent: rows.slice(0, 20).map((r) => ({ ...r, label: Workspaces.CANCEL_REASONS[r.reason] ?? r.reason })),
+    };
+  }
+
+  // ---------------- Pre-launch checklist ----------------
+
+  lastMonitorHit: { at: string; agent: string } | null = null;
+
+  launchChecks(req: Request & { fdUser?: Account | null }) {
+    type Check = { key: string; group: string; label: string; state: "ok" | "warn" | "fail" | "optional"; detail: string; fix?: string; href?: string };
+    const out: Check[] = [];
+    const add = (c: Check) => out.push(c);
+    const base = process.env.PUBLIC_BASE_URL ?? "";
+    const o = this.ownerContact();
+    const ownerDb = o?.ws.db;
+    const age = (iso?: string | null) => (iso ? (Date.now() - Date.parse(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z")) / 3600_000 : null);
+
+    // Address & safety
+    add(base.startsWith("https://")
+      ? { key: "https", group: "Address & safety", label: "HTTPS address", state: "ok", detail: base }
+      : { key: "https", group: "Address & safety", label: "HTTPS address", state: "fail", detail: base ? `${base} isn't https` : "PUBLIC_BASE_URL isn't set", fix: "Set PUBLIC_BASE_URL=https://your-address (docs/DEPLOY.md)" });
+    add(this.multiuser || this.password
+      ? { key: "login", group: "Address & safety", label: "Sign-in required", state: "ok", detail: this.multiuser ? "Accounts mode (email + password)" : "Password set" }
+      : { key: "login", group: "Address & safety", label: "Sign-in required", state: "fail", detail: "Anyone with the address could open your shop", fix: "Set FLIPDESK_PASSWORD, or FLIPDESK_MULTIUSER=1 for accounts" });
+    const onVolume = /^\/data\//.test(path.resolve(this.dataDir) + "/") || !process.env.FLY_APP_NAME;
+    add({ key: "volume", group: "Address & safety", label: "Data on a lasting disk", state: onVolume ? "ok" : "fail", detail: process.env.FLY_APP_NAME ? `Data folder: ${path.resolve(this.dataDir)}` : "Running on your own machine", fix: onVolume ? undefined : "On Fly, mount a volume at /data and set FLIPDESK_DB=/data/flipdesk.db" });
+
+    // AI & marketplaces
+    const ai = globalCheck("ai");
+    add(!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
+      ? { key: "ai", group: "Selling", label: "AI listing writer", state: "warn", detail: "No Anthropic key: the demo writer is used", fix: "Set ANTHROPIC_API_KEY (console.anthropic.com)" }
+      : stateOf(ai) === "down"
+        ? { key: "ai", group: "Selling", label: "AI listing writer", state: "fail", detail: `Last try failed: ${ai!.lastError}`, href: "/status" }
+        : { key: "ai", group: "Selling", label: "AI listing writer", state: "ok", detail: ai ? "Key set and answering" : "Key set (not used since the server started)" });
+    const ebayKeys = Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET);
+    add(!ebayKeys
+      ? { key: "ebay-keys", group: "Selling", label: "eBay developer keys", state: "warn", detail: "eBay is in demo mode", fix: "Follow docs/EBAY_SETUP.md" }
+      : { key: "ebay-keys", group: "Selling", label: "eBay developer keys", state: "ok", detail: process.env.EBAY_ENV === "sandbox" ? "Sandbox keys (not real listings)" : "Production keys" });
+    if (ebayKeys && ownerDb) {
+      const live = runInWorkspace(o!.ws, () => ebayIsLive(ownerDb));
+      const policies = getSetting<{ fulfillmentPolicyId?: string; paymentPolicyId?: string; returnPolicyId?: string }>(ownerDb, "ebay", {});
+      add(live
+        ? { key: "ebay-connected", group: "Selling", label: "Your eBay account connected", state: "ok", detail: "Connected" }
+        : { key: "ebay-connected", group: "Selling", label: "Your eBay account connected", state: "fail", detail: "Not connected yet", href: "/connections" });
+      if (live) add(policies.fulfillmentPolicyId && policies.paymentPolicyId && policies.returnPolicyId
+        ? { key: "ebay-policies", group: "Selling", label: "eBay shipping/payment/return policies", state: "ok", detail: "Chosen" }
+        : { key: "ebay-policies", group: "Selling", label: "eBay shipping/payment/return policies", state: "fail", detail: "Pick them before listing", href: "/settings#ebay" });
+    }
+
+    // Staying informed
+    const mail = globalCheck("mail");
+    add(!mailConfigured()
+      ? { key: "email", group: "Staying informed", label: "Email", state: this.multiuser ? "fail" : "optional", detail: this.multiuser ? "Needed for password resets and reminders" : "Optional: weekly summary by email", fix: "Set SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_FROM" }
+      : stateOf(mail) === "down"
+        ? { key: "email", group: "Staying informed", label: "Email", state: "fail", detail: `Last send failed: ${mail!.lastError}` }
+        : { key: "email", group: "Staying informed", label: "Email", state: "ok", detail: mail ? "Sending" : "Set (use Send test email to be sure)" });
+    const topic = ownerDb ? getSetting<{ ntfyTopic?: string }>(ownerDb, "notify", {}).ntfyTopic : undefined;
+    add(topic
+      ? { key: "push", group: "Staying informed", label: "Phone alerts (ntfy)", state: "ok", detail: `Topic set` }
+      : { key: "push", group: "Staying informed", label: "Phone alerts (ntfy)", state: "fail", detail: "You won't hear about sales, oversells or outages", href: "/settings" });
+    const mon = this.lastMonitorHit;
+    add(mon && (age(mon.at) ?? 99) < 0.5
+      ? { key: "uptime", group: "Staying informed", label: "Uptime monitor", state: "ok", detail: `${mon.agent} checked in ${Math.max(0, Math.round((age(mon.at) ?? 0) * 60))} min ago` }
+      : { key: "uptime", group: "Staying informed", label: "Uptime monitor", state: base ? "warn" : "optional", detail: mon ? `Last seen ${Math.round(age(mon.at)!)} h ago` : "No monitor has checked /healthz yet", fix: `Add ${base || "your address"}/healthz in UptimeRobot or Better Stack (free)` });
+
+    // Data safety
+    const lb = this.siteGet<{ at?: string; uploaded?: string | null; error?: string | null } | null>("lastBackup", null);
+    const lbAge = age(lb?.at);
+    add(lbAge !== null && lbAge < 30
+      ? { key: "backup", group: "Data safety", label: "Nightly backup", state: "ok", detail: `Last one ${Math.round(lbAge)} h ago` }
+      : { key: "backup", group: "Data safety", label: "Nightly backup", state: "fail", detail: lb?.at ? `Last one ${Math.round(lbAge!)} h ago` : "None yet", href: "/settings" });
+    add(s3Configured()
+      ? { key: "offsite", group: "Data safety", label: "Off-site copy", state: lb?.uploaded ? "ok" : "warn", detail: lb?.uploaded ? "Last backup uploaded" : lb?.error ?? "Set, waiting for the next backup" }
+      : { key: "offsite", group: "Data safety", label: "Off-site copy", state: "fail", detail: "Backups only live on this server", fix: "Set BACKUP_S3_* (Cloudflare R2 is free up to 10 GB)" });
+    const chk = this.siteGet<{ at: string; ok: boolean } | null>("lastBackupCheck", null);
+    add(chk?.ok
+      ? { key: "restore-check", group: "Data safety", label: "Backup restore check", state: "ok", detail: `Passed ${Math.round((age(chk.at) ?? 0) / 24)} days ago` }
+      : { key: "restore-check", group: "Data safety", label: "Backup restore check", state: chk ? "fail" : "warn", detail: chk ? "Last check failed" : "Not run yet", href: "/settings" });
+
+    // Others using it
+    if (this.multiuser) {
+      const anyInvite = Boolean(process.env.FLIPDESK_INVITE_CODE) || Boolean(this.accounts!.prepare("SELECT 1 FROM invites WHERE used_at IS NULL AND revoked_at IS NULL").get());
+      add({ key: "invites", group: "Others using it", label: "Invites ready", state: anyInvite ? "ok" : "warn", detail: anyInvite ? "People can join" : "Nobody can sign up yet", href: "/accounts" });
+      if (billingEnabled()) {
+        const evt = this.siteGet<string | null>("lastStripeEvent", null);
+        add(stripeIsTest()
+          ? { key: "stripe", group: "Others using it", label: "Payments", state: "warn", detail: "TEST mode: no real money", fix: "Set your live keys and switch to Live on the Accounts page", href: "/accounts" }
+          : { key: "stripe", group: "Others using it", label: "Payments", state: "ok", detail: "Live" });
+        add(evt
+          ? { key: "stripe-webhook", group: "Others using it", label: "Stripe webhook", state: "ok", detail: `Last event ${Math.round(age(evt)! * 10) / 10} h ago` }
+          : { key: "stripe-webhook", group: "Others using it", label: "Stripe webhook", state: "fail", detail: "Stripe hasn't reached FlipDesk yet", fix: `Add ${base || "your address"}/api/billing/webhook in Stripe → Webhooks` });
+      } else add({ key: "stripe", group: "Others using it", label: "Payments", state: "optional", detail: "Off: everyone is free" });
+      add(process.env.ANTHROPIC_API_KEY ? { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "ok", detail: `${this.defaultAiLimit()} requests/day per person` } : { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "optional", detail: "No AI key" });
+    }
+    const counted = out.filter((c) => c.state !== "optional");
+    return { checks: out, ready: counted.filter((c) => c.state === "ok").length, total: counted.length, blockers: counted.filter((c) => c.state === "fail").length };
+  }
+
   // ---------------- Help insights ----------------
 
   logHelp(viewer: string, question: string, page: string, answeredBy: string, topSource: string | null) {
@@ -1174,8 +1346,8 @@ export class Workspaces {
   /** What people ask Help: top topics, questions without a good answer, and how often answers helped. */
   helpInsights(days = 7) {
     const since = `-${Math.max(1, days)} days`;
-    const rows = this.site.prepare("SELECT id, question, page, answered_by, top_source, helpful, created_at FROM help_questions WHERE created_at >= datetime('now', ?) ORDER BY id DESC").all(since) as {
-      id: number; question: string; page: string; answered_by: string; top_source: string | null; helpful: number | null; created_at: string;
+    const rows = this.site.prepare("SELECT id, question, page, answered_by, top_source, helpful, created_at, article_id FROM help_questions WHERE created_at >= datetime('now', ?) ORDER BY id DESC").all(since) as {
+      id: number; question: string; page: string; answered_by: string; top_source: string | null; helpful: number | null; created_at: string; article_id: number | null;
     }[];
     const topics = new Map<string, { topic: string; count: number; examples: string[] }>();
     for (const r of rows) {
@@ -1190,7 +1362,7 @@ export class Workspaces {
       days,
       total: rows.length,
       topTopics: [...topics.values()].sort((a, b) => Number(a.topic === "Other") - Number(b.topic === "Other") || b.count - a.count).slice(0, 8), // unmatched last
-      unanswered: rows.filter((r) => r.answered_by === "none" || r.answered_by === "ai-unsure" || r.helpful === 0).slice(0, 15),
+      unanswered: rows.filter((r) => !r.article_id && (r.answered_by === "none" || r.answered_by === "ai-unsure" || r.helpful === 0)).slice(0, 15),
       helpfulPct: rated.length ? Math.round((rated.filter((r) => r.helpful === 1).length / rated.length) * 100) : null,
       rated: rated.length,
     };
@@ -1264,6 +1436,7 @@ export class Workspaces {
     if (shared) return { mode: this.multiuser ? "accounts" : "single", current: "demo", demoExists: true, user: null, signupsOpen: this.signupsOpen(), needsInvite: true, shared: true };
     const ws = this.current(req, user);
     return {
+      paymentsTest: this.multiuser && billingEnabled() && stripeIsTest(),
       shared: false,
       mode: this.multiuser ? "accounts" : "single",
       current: ws?.demo ? "demo" : "real",
@@ -1299,6 +1472,9 @@ export class Workspaces {
         /* already reported by the site check */
       }
       const down = problems.length > 0 || (req.query.strict === "1" && open.length > 0);
+      const agent = String(req.headers["user-agent"] ?? "");
+      const known = agent.match(/UptimeRobot|Better ?(Stack|Uptime)|Pingdom|StatusCake|Uptime[- ]?Kuma|Hetrix|Freshping|Cronitor|Checkly/i);
+      if (known) this.lastMonitorHit = { at: new Date().toISOString(), agent: known[0] };
       res.setHeader("Cache-Control", "no-store");
       res.status(down ? 503 : 200).json({ ok: !down, uptimeSeconds: Math.round((Date.now() - Date.parse(startedAt)) / 1000), outages: open, ...(problems.length ? { problems } : {}) });
     });
@@ -1412,11 +1588,15 @@ export class Workspaces {
 
     // Stripe → FlipDesk (signed; raw body needed for the signature).
     root.post("/api/billing/webhook", express.raw({ type: "*/*", limit: "1mb" }), (req, res) => {
-      const secret = process.env.STRIPE_WEBHOOK_SECRET;
-      if (!this.accounts || !secret) return void res.status(400).json({ error: "Billing webhook not configured" });
-      if (!verifyWebhook(req.body as Buffer, req.headers["stripe-signature"] as string | undefined, secret)) return void res.status(400).json({ error: "Bad signature" });
+      const secrets = webhookSecrets();
+      if (!this.accounts || !secrets.length) return void res.status(400).json({ error: "Billing webhook not configured" });
+      // Live and test endpoints have different signing secrets: the one that matches tells us the mode.
+      const match = secrets.find((x) => verifyWebhook(req.body as Buffer, req.headers["stripe-signature"] as string | undefined, x.secret));
+      if (!match) return void res.status(400).json({ error: "Bad signature" });
       const ev = JSON.parse((req.body as Buffer).toString("utf8"));
-      const r = applyStripeEvent(this.accounts, ev);
+      const r = applyStripeEvent(this.accounts, ev, (ev as { livemode?: boolean }).livemode === true ? "live" : (ev as { livemode?: boolean }).livemode === false ? "test" : match.mode);
+      if (r && "canceling" in r) this.accounts.prepare("UPDATE users SET canceling = ? WHERE id = ?").run(r.canceling ? 1 : 0, r.userId);
+      if (r && "cancellation" in r && r.cancellation) this.recordCancellation(r.userId, r.cancellation.reason, r.cancellation.comment, "stripe");
       this.siteSet("lastStripeEvent", new Date().toISOString());
       if (r) console.log(`[billing] user ${r.userId} -> ${r.plan}`);
       // Their friend gets a free month once they're actually paying.
@@ -1531,7 +1711,15 @@ export class Workspaces {
       const u = req.fdUser;
       if (!u) return void res.json({ enabled: false, status: this.multiuser ? "free" : "owner" });
       const offer = this.winbackOffer(u.id);
-      res.json({ ...billingSummary(this.billingRow(u.id)!), aiLimit: this.aiLimit(u.id), paidAiLimit: paidAiLimit(), trialDays: trialDays(), offer: offer ? { pct: offer.pct, endsAt: offer.endsAt } : null });
+      res.json({
+        ...billingSummary(this.billingRow(u.id)!),
+        aiLimit: this.aiLimit(u.id),
+        paidAiLimit: paidAiLimit(),
+        trialDays: trialDays(),
+        offer: offer ? { pct: offer.pct, endsAt: offer.endsAt } : null,
+        askCancelReason: this.shouldAskCancelReason(u.id),
+        cancelReasons: Object.entries(Workspaces.CANCEL_REASONS).map(([key, label]) => ({ key, label })),
+      });
     });
     root.post("/api/billing/checkout", async (req: R, res) => {
       const u = needUser(req, res);
@@ -1539,6 +1727,13 @@ export class Workspaces {
       if (!billingEnabled()) return void res.status(400).json({ error: "Billing isn't turned on for this FlipDesk." });
       const offer = this.winbackOffer(u.id);
       res.json({ url: await checkoutUrl(this.billingRow(u.id)!, base(req), { coupon: offer?.coupon ?? undefined }) });
+    });
+    root.post("/api/billing/cancel-reason", json, (req: R, res) => {
+      const u = needUser(req, res);
+      if (!u) return;
+      const b = z.object({ reason: z.enum(Object.keys(Workspaces.CANCEL_REASONS) as [string, ...string[]]), comment: z.string().trim().max(1000).default("") }).parse(req.body);
+      this.recordCancellation(u.id, b.reason, b.comment, "app");
+      res.json({ ok: true });
     });
     root.post("/api/billing/portal", async (req: R, res) => {
       const u = needUser(req, res);
@@ -1575,6 +1770,23 @@ export class Workspaces {
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="flipdesk-${ws.demo ? "sample-" : ""}export-${day}.zip"`);
       await exportShop(ws.db, ws.uploadDir, res, ws.demo ? "Sample shop" : req.fdUser?.email ?? "My shop");
+    });
+
+    // ---- Pre-launch checklist (owner) ----
+    root.get("/api/launch", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json(this.launchChecks(req));
+    });
+    root.post("/api/launch/test-email", async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const to = this.ownerContact()?.email ?? z.object({ to: z.email() }).parse(req.body ?? {}).to;
+      if (!mailConfigured() && process.env.SMTP_HOST !== "test") return void res.status(400).json({ error: "Email isn't set up (SMTP_* in .env)" });
+      try {
+        await sendMail(to, "FlipDesk test email ✅", "If you can read this, FlipDesk can send email (password resets, reminders, reports).");
+        res.json({ ok: true, to });
+      } catch (e) {
+        res.status(502).json({ error: `Couldn't send: ${(e as Error).message}` });
+      }
     });
 
     // ---- Alert settings (owner) ----
@@ -1637,7 +1849,7 @@ export class Workspaces {
       // Shared read-only visitors get doc search only (no AI on someone else's allowance).
       if (req.fdShare) return void res.json({ answer: null, sources: (await import("./services/help.js")).searchDocs(b.question), demo: true });
       const ws = this.current(req, req.fdUser ?? null);
-      const r = await runInWorkspace(ws!, () => askHelp(b.question, b.history as HelpTurn[], b.page));
+      const r = await runInWorkspace(ws!, () => askHelp(b.question, b.history as HelpTurn[], b.page, { owner: owner(req) }));
       const unsure = r.answer !== null && /isn't covered|not covered|couldn't find|can't find|don't (see|have) (that|anything)|no information/i.test(r.answer);
       const by = r.answer !== null ? (unsure ? "ai-unsure" : "ai") : r.sources.length ? "guide" : "none";
       const id = this.logHelp(req.fdUser ? `u${req.fdUser.id}` : "main", b.question, b.page, by, r.sources[0]?.title ?? null);
@@ -1712,6 +1924,42 @@ export class Workspaces {
       res.json({ invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
     });
     root.get("/api/admin/owner-report", (_req, res) => void res.json(this.ownerReport()));
+    root.get("/api/admin/cancellations", (req, res) => void res.json(this.cancellationSummary(Math.min(365, Number(req.query.days) || 30))));
+    root.get("/api/admin/stripe-mode", (_req, res) => void res.json(stripeModes()));
+    root.put("/api/admin/stripe-mode", json, (req, res) => {
+      const mode = z.object({ mode: z.enum(["test", "live"]) }).parse(req.body).mode;
+      const m = stripeModes();
+      if (!m[mode]) return void res.status(400).json({ error: mode === "live" ? "Set STRIPE_SECRET_KEY and STRIPE_PRICE_ID (live) first." : "Set STRIPE_TEST_SECRET_KEY and STRIPE_TEST_PRICE_ID first." });
+      this.siteSet("stripeMode", mode);
+      setStripeMode(mode);
+      res.json(stripeModes());
+    });
+    root.get("/api/admin/help-articles", (_req, res) => void res.json(this.helpArticles()));
+    root.post("/api/admin/help-articles/draft", json, async (req, res) => {
+      const b = z.object({ questionId: z.number().int().optional(), question: z.string().max(500).optional() }).parse(req.body);
+      const q = b.questionId ? (this.site.prepare("SELECT question, page FROM help_questions WHERE id = ?").get(b.questionId) as { question: string; page: string } | undefined) : b.question ? { question: b.question, page: "" } : undefined;
+      if (!q) return void res.status(404).json({ error: "Question not found" });
+      const o = this.ownerContact();
+      res.json({ ...(await (o ? runInWorkspace(o.ws, () => draftArticle(q.question, q.page)) : draftArticle(q.question, q.page))), question: q.question });
+    });
+    const Article = z.object({ title: z.string().trim().min(5, "Give it a title").max(160), body: z.string().trim().min(10, "Write the answer").max(5000), questionId: z.number().int().optional(), question: z.string().max(500).optional() });
+    root.post("/api/admin/help-articles", json, (req, res) => {
+      const b = Article.parse(req.body);
+      const id = Number(this.site.prepare("INSERT INTO help_articles (title, body, from_question) VALUES (?, ?, ?)").run(b.title, b.body, b.question ?? null).lastInsertRowid);
+      // Mark the question (and identical ones) as answered by this article.
+      const q = b.questionId ? (this.site.prepare("SELECT question FROM help_questions WHERE id = ?").get(b.questionId) as { question: string } | undefined)?.question : b.question;
+      if (q) this.site.prepare("UPDATE help_questions SET article_id = ? WHERE lower(question) = lower(?)").run(id, q);
+      res.json(this.helpArticles());
+    });
+    root.put("/api/admin/help-articles/:id", json, (req, res) => {
+      const b = Article.parse(req.body);
+      this.site.prepare("UPDATE help_articles SET title = ?, body = ?, updated_at = datetime('now') WHERE id = ?").run(b.title, b.body, Number(req.params.id));
+      res.json(this.helpArticles());
+    });
+    root.delete("/api/admin/help-articles/:id", (req, res) => {
+      this.site.prepare("UPDATE help_articles SET archived_at = datetime('now') WHERE id = ?").run(Number(req.params.id));
+      res.json(this.helpArticles());
+    });
     root.get("/api/admin/help-insights", (req, res) => void res.json(this.helpInsights(Math.min(90, Number(req.query.days) || 7))));
     root.get("/api/admin/whats-new", async (_req, res) => {
       const since = this.siteGet<string | null>("lastAnnouncedCommit", null);

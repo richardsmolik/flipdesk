@@ -82,10 +82,50 @@ function OwnerReport() {
 
 interface Insights { total: number; days: number; helpfulPct: number | null; rated: number; topTopics: { topic: string; count: number; examples: string[] }[]; unanswered: { id: number; question: string; page: string; answered_by: string; helpful: number | null; created_at: string }[] }
 
+interface Article { id: number; title: string; body: string; from_question: string | null; updated_at: string }
+
+function ArticleEditor({ init, onSaved, onCancel }: { init: { id?: number; title: string; body: string; questionId?: number; question?: string; ai?: boolean }; onSaved: () => void; onCancel: () => void }) {
+  const [f, setF] = useState(init);
+  return (
+    <div className="space-y-2 rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+      {init.question && <div className="text-xs text-zinc-500">Answering: "{init.question}"{init.ai ? " · drafted by AI from your docs, check it" : ""}</div>}
+      <input className="input" maxLength={160} placeholder="Title (as a seller would ask it)" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+      <textarea className="input min-h-32 font-mono text-xs" maxLength={5000} placeholder="1. Open [Inventory](/inventory)…" value={f.body} onChange={(e) => setF({ ...f, body: e.target.value })} />
+      <div className="flex gap-2">
+        <button
+          className="btn-primary"
+          onClick={async () => {
+            try {
+              if (f.id) await api.put(`/api/admin/help-articles/${f.id}`, { title: f.title, body: f.body });
+              else await api.post("/api/admin/help-articles", { title: f.title, body: f.body, questionId: f.questionId, question: f.question });
+              toast("Saved. Help uses it right away.");
+              onSaved();
+            } catch (e) {
+              toast((e as Error).message, "err");
+            }
+          }}
+        >
+          Save article
+        </button>
+        <button className="btn-ghost" onClick={onCancel}>Cancel</button>
+      </div>
+      <p className="text-[11px] text-zinc-500">Steps as "1. …", links as [Page name](/path). Help shows this to sellers and the AI uses it first.</p>
+    </div>
+  );
+}
+
 function HelpInsights() {
   const [h, setH] = useState<Insights | null>(null);
   const [days, setDays] = useState(7);
-  useEffect(() => void api.get<Insights>(`/api/admin/help-insights?days=${days}`).then(setH).catch(() => {}), [days]);
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [editing, setEditing] = useState<{ id?: number; title: string; body: string; questionId?: number; question?: string; ai?: boolean } | null>(null);
+  const [drafting, setDrafting] = useState<number | null>(null);
+  const reload = () => {
+    void api.get<Insights>(`/api/admin/help-insights?days=${days}`).then(setH).catch(() => {});
+    void api.get<Article[]>("/api/admin/help-articles").then(setArticles).catch(() => {});
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(reload, [days]);
   if (!h) return null;
   const max = Math.max(1, ...h.topTopics.map((t) => t.count));
   return (
@@ -115,13 +155,109 @@ function HelpInsights() {
               <div className="text-sm font-medium text-amber-300">Didn't get a good answer ({h.unanswered.length})</div>
               <ul className="mt-1 space-y-0.5 text-sm text-zinc-300">
                 {h.unanswered.map((u) => (
-                  <li key={u.id}>"{u.question}" <span className="text-xs text-zinc-500">{u.helpful === 0 ? "👎" : u.answered_by === "none" ? "nothing in the guide" : "AI unsure"}{u.page ? ` · on ${u.page}` : ""} · {timeAgo(u.created_at)}</span></li>
+                  <li key={u.id} className="flex flex-wrap items-center justify-between gap-2">
+                    <span>"{u.question}" <span className="text-xs text-zinc-500">{u.helpful === 0 ? "👎" : u.answered_by === "none" ? "nothing in the guide" : "AI unsure"}{u.page ? ` · on ${u.page}` : ""} · {timeAgo(u.created_at)}</span></span>
+                    <button
+                      className="btn-ghost px-2 py-0.5 text-xs"
+                      disabled={drafting === u.id}
+                      onClick={async () => {
+                        setDrafting(u.id);
+                        try {
+                          const d = await api.post<{ title: string; body: string; ai: boolean; question: string }>("/api/admin/help-articles/draft", { questionId: u.id });
+                          setEditing({ title: d.title, body: d.body, questionId: u.id, question: d.question, ai: d.ai });
+                        } catch (e) {
+                          toast((e as Error).message, "err");
+                        } finally {
+                          setDrafting(null);
+                        }
+                      }}
+                    >
+                      {drafting === u.id ? "Drafting…" : "✍️ Write an answer"}
+                    </button>
+                  </li>
                 ))}
               </ul>
             </div>
           )}
         </>
       )}
+      {editing && <ArticleEditor init={editing} onCancel={() => setEditing(null)} onSaved={() => (setEditing(null), reload())} />}
+      <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
+        <div className="text-sm font-medium">📄 Your help articles ({articles.length})</div>
+        {!editing && <button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => setEditing({ title: "", body: "" })}>+ New article</button>}
+      </div>
+      {articles.length > 0 && (
+        <ul className="divide-y divide-zinc-800 text-sm">
+          {articles.map((a) => (
+            <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+              <span className="text-zinc-200">{a.title}</span>
+              <span className="flex gap-1">
+                <button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => setEditing({ id: a.id, title: a.title, body: a.body })}>Edit</button>
+                <button className="btn-ghost px-2 py-0.5 text-xs text-red-300" onClick={async () => confirm(`Remove "${a.title}"?`) && (setArticles(await api.del(`/api/admin/help-articles/${a.id}`).then(() => api.get<Article[]>("/api/admin/help-articles"))))}>Remove</button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+interface Cancels { total: number; reasons: { reason: string; label: string; count: number }[]; recent: { label: string; comment: string; email: string | null; created_at: string; source: string }[] }
+
+function Cancellations() {
+  const [c, setC] = useState<Cancels | null>(null);
+  useEffect(() => void api.get<Cancels>("/api/admin/cancellations?days=90").then(setC).catch(() => {}), []);
+  if (!c?.total) return null;
+  return (
+    <section className="card space-y-2 p-4">
+      <h2 className="font-semibold">💔 Why people cancel (90 days)</h2>
+      <div className="flex flex-wrap gap-2 text-sm">
+        {c.reasons.map((r) => <span key={r.reason} className="rounded-full border border-zinc-700 px-2.5 py-0.5">{r.label} <b>{r.count}</b></span>)}
+      </div>
+      <ul className="space-y-1 text-sm">
+        {c.recent.filter((r) => r.comment).map((r, i) => (
+          <li key={i} className="text-zinc-300">"{r.comment}" <span className="text-xs text-zinc-500">{r.email} · {r.label} · {timeAgo(r.created_at)}</span></li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+interface Modes { live: boolean; test: boolean; using: "test" | "live"; testing: boolean }
+
+function StripeModeSwitch() {
+  const [m, setM] = useState<Modes | null>(null);
+  useEffect(() => void api.get<Modes>("/api/admin/stripe-mode").then(setM).catch(() => {}), []);
+  if (!m || (!m.live && !m.test)) return null;
+  return (
+    <section className={`card flex flex-wrap items-center justify-between gap-3 p-4 ${m.testing ? "border-fuchsia-900" : ""}`}>
+      <div>
+        <h2 className="font-semibold">💳 Payments: {m.testing ? "🧪 TEST mode" : "✅ LIVE"}</h2>
+        <p className="text-xs text-zinc-400">{m.testing ? "No real money moves. Use Stripe's test card 4242 4242 4242 4242." : "Real cards are charged."} Subscriptions made in one mode never count in the other.</p>
+      </div>
+      <div className="flex gap-1 rounded-md bg-zinc-900 p-1 text-sm">
+        {(["test", "live"] as const).map((x) => (
+          <button
+            key={x}
+            disabled={!m[x]}
+            title={m[x] ? "" : x === "live" ? "Set STRIPE_SECRET_KEY and STRIPE_PRICE_ID" : "Set STRIPE_TEST_SECRET_KEY and STRIPE_TEST_PRICE_ID"}
+            className={`rounded px-3 py-1 ${m.using === x ? (x === "test" ? "bg-fuchsia-800 text-white" : "bg-green-800 text-white") : "text-zinc-400 disabled:opacity-40"}`}
+            onClick={async () => {
+              if (x === "live" && !confirm("Switch to LIVE payments? Real cards will be charged.")) return;
+              try {
+                setM(await api.put<Modes>("/api/admin/stripe-mode", { mode: x }));
+                toast(x === "live" ? "Live payments on" : "Test mode on");
+                setTimeout(() => location.reload(), 600);
+              } catch (e) {
+                toast((e as Error).message, "err");
+              }
+            }}
+          >
+            {x === "test" ? "Test" : "Live"}
+          </button>
+        ))}
+      </div>
     </section>
   );
 }
@@ -307,8 +443,10 @@ export default function Accounts() {
           {s.inviteCode ? "Anyone with your shared invite code (FLIPDESK_INVITE_CODE) can sign up, plus anyone you send an invite link below." : "Only people you send an invite link (below) can sign up."} Everyone except you gets {s.defaultAiLimit} AI requests a day (FLIPDESK_AI_DAILY_LIMIT); change it per person below.
         </p>
       </div>
+      <StripeModeSwitch />
       <UsagePanel />
       <OwnerReport />
+      <Cancellations />
       <HelpInsights />
       {link && (
         <div className="card space-y-2 border-amber-800 p-4 text-sm">
@@ -386,7 +524,7 @@ export default function Accounts() {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-zinc-500">Plan checkbox = free forever for that person (only when billing is on: STRIPE_SECRET_KEY + STRIPE_PRICE_ID).</p>
+      <p className="text-xs text-zinc-500">Plan checkbox = free forever for that person (only when payments are set up).</p>
       <Announcements />
       <Invites />
       <FeedbackInbox />

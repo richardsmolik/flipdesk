@@ -10,6 +10,7 @@ export interface WorkspaceState {
   signupsOpen: boolean;
   needsInvite: boolean;
   shared?: boolean;
+  paymentsTest?: boolean;
 }
 
 export interface AccountInfo { user: { email: string; owner: boolean } | null; ai: { used: number; limit: number | null } | null; email: boolean; canEditSite: boolean; emailOptOut?: boolean }
@@ -196,7 +197,7 @@ export function SharePage({ token }: { token: string }) {
   return <div className="flex min-h-screen items-center justify-center p-4 text-zinc-400">{err || "Opening the sample shop…"}</div>;
 }
 
-export interface BillingInfo { offer?: { pct: number; endsAt: string } | null; enabled: boolean; status: "owner" | "free" | "trial" | "active" | "past_due" | "expired"; canWrite?: boolean; trialDaysLeft?: number | null; renewsAt?: string | null; hasCustomer?: boolean; price?: string | null; aiLimit?: number | null; paidAiLimit?: number; trialDays?: number }
+export interface BillingInfo { askCancelReason?: boolean; cancelReasons?: { key: string; label: string }[]; testMode?: boolean; offer?: { pct: number; endsAt: string } | null; enabled: boolean; status: "owner" | "free" | "trial" | "active" | "past_due" | "expired"; canWrite?: boolean; trialDaysLeft?: number | null; renewsAt?: string | null; hasCustomer?: boolean; price?: string | null; aiLimit?: number | null; paidAiLimit?: number; trialDays?: number }
 
 /** Trial ending soon / ended: a slim bar linking to the plan page. */
 export function PlanBanner({ b }: { b: BillingInfo | null }) {

@@ -11,6 +11,7 @@ import { AuthScreen, DemoBanner, PlanBanner, ResetPage, SharePage, ShopSwitch, u
 import Billing from "./pages/Billing";
 import StatusPage from "./pages/Status";
 import Help from "./pages/Help";
+import LaunchPage from "./pages/Launch";
 import { HelpButton } from "./components/HelpChat";
 import { useParams } from "react-router-dom";
 import Leaderboard from "./pages/Leaderboard";
@@ -78,6 +79,7 @@ function Shell() {
         }
       />
       <main className="min-w-0 flex-1 pb-24">
+        {shop?.paymentsTest && <div className="border-b border-fuchsia-900 bg-fuchsia-950/80 px-4 py-1 text-center text-xs text-fuchsia-100">🧪 Payments are in <b>TEST mode</b>: no real charges{shop.user?.owner ? " (switch to Live on the Accounts page)" : ""}.</div>}
         <PlanBanner b={plan} />
         <DemoBanner w={shop} />
         <div className="p-4 md:p-8">
@@ -107,6 +109,7 @@ function Shell() {
           <Route path="/billing" element={<Billing />} />
           <Route path="/status" element={<StatusPage />} />
           <Route path="/help" element={<Help />} />
+          <Route path="/launch" element={<LaunchPage />} />
         </Routes>
         </div>
       </main>
