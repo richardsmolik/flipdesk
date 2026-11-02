@@ -1921,6 +1921,8 @@ export class Workspaces {
       return { label: "owner" };
     };
     root.get("/api/2fa", (req: R, res) => {
+      // No password yet (single mode): not an error, just not available. Settings shows how to turn it on.
+      if (!this.multiuser && !req.fdShare && !this.password) return void res.json({ enabled: false, recoveryLeft: 0, unavailable: "Set FLIPDESK_PASSWORD first: two-step sign-in adds to a password." });
       const w = who2fa(req, res);
       if (!w) return;
       const t = this.twofa(w.userId);

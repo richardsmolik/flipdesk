@@ -271,3 +271,13 @@ describe("eBay smoke test", () => {
     expect((await ebaySmokeTest(db, path.join(dir, "up"), { allowProduction: true })).ok).toBe(true);
   });
 });
+
+describe("two-step sign-in without a password (single mode)", () => {
+  it("Settings asks politely instead of getting an error", async () => {
+    const shops = new Workspaces({ dataDir: dir, mainDb: path.join(dir, "main.db"), mainUploads: path.join(dir, "up"), password: "" });
+    const a = request(express().use(shops.handler()));
+    const r = (await a.get("/api/2fa").expect(200)).body;
+    expect(r).toMatchObject({ enabled: false, unavailable: expect.stringMatching(/FLIPDESK_PASSWORD/) });
+    await a.post("/api/2fa/setup").expect(400); // turning it on still needs a password
+  });
+});

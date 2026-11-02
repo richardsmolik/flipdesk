@@ -304,11 +304,11 @@ function AlertSettings() {
 }
 
 function TwoStep() {
-  const [st, setSt] = useState<{ enabled: boolean; recoveryLeft: number } | null>(null);
+  const [st, setSt] = useState<{ enabled: boolean; recoveryLeft: number; unavailable?: string } | null>(null);
   const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState<string[] | null>(null);
-  useEffect(() => void api.get<{ enabled: boolean; recoveryLeft: number }>("/api/2fa").then(setSt).catch(() => setSt(null)), []);
+  useEffect(() => void api.get<{ enabled: boolean; recoveryLeft: number; unavailable?: string }>("/api/2fa").then(setSt).catch(() => setSt(null)), []);
   if (!st) return null;
   const err = (e: unknown) => toast((e as Error).message, "err");
   return (
@@ -326,7 +326,8 @@ function TwoStep() {
           </div>
         </div>
       )}
-      {!st.enabled && !setup && (
+      {st.unavailable && <p className="text-sm text-amber-300">{st.unavailable}</p>}
+      {!st.enabled && !setup && !st.unavailable && (
         <button
           className="btn-primary"
           onClick={async () => {

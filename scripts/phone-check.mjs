@@ -13,11 +13,15 @@ const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceSc
 const p = await ctx.newPage();
 const errors = [];
 p.on("pageerror", (e) => errors.push(e.message));
-p.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+let at = "/";
+p.on("console", (m) => m.type() === "error" && !/^Failed to load resource/.test(m.text()) && errors.push(`${at}: ${m.text()}`));
+// say which screen and which address failed (the browser's own message doesn't)
+p.on("response", (r) => r.status() >= 400 && errors.push(`${at}: ${r.status()} from ${r.url().replace(B, "")}`));
 await p.goto(B + "/");
 await p.evaluate(() => fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "enter_demo" }) }));
 let problems = 0;
 for (const r of ROUTES) {
+  at = r;
   await p.goto(B + r);
   await p.waitForTimeout(900);
   const res = await p.evaluate(() => {
