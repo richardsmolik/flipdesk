@@ -1,0 +1,161 @@
+/**
+ * Paid plans with Stripe (hosted / accounts mode only). Off until STRIPE_SECRET_KEY and STRIPE_PRICE_ID are set;
+ * until then everyone uses FlipDesk free.
+ *
+ * - New accounts get a free trial (FLIPDESK_TRIAL_DAYS, default 14).
+ * - Subscribe = Stripe Checkout (Stripe hosts the card form; FlipDesk never sees card numbers).
+ * - Manage / cancel = Stripe's customer portal.
+ * - Stripe tells FlipDesk about changes through a signed webhook (STRIPE_WEBHOOK_SECRET).
+ * - When a trial ends without a plan, the shop turns read-only: data stays viewable and exportable,
+ *   and selling-safety jobs (delist when sold) keep running.
+ */
+import crypto from "node:crypto";
+import type { Db } from "../db.js";
+
+export const billingEnabled = () => Boolean(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID);
+export const trialDays = () => {
+  const n = Number(process.env.FLIPDESK_TRIAL_DAYS);
+  return process.env.FLIPDESK_TRIAL_DAYS && Number.isFinite(n) && n >= 0 ? n : 14;
+};
+export const paidAiLimit = () => {
+  const n = Number(process.env.FLIPDESK_AI_PAID_LIMIT);
+  return process.env.FLIPDESK_AI_PAID_LIMIT && Number.isFinite(n) && n >= 0 ? n : 200;
+};
+
+export type PlanStatus = "owner" | "free" | "trial" | "active" | "past_due" | "expired";
+
+export interface BillingRow {
+  id: number;
+  email: string;
+  is_owner: number;
+  plan: string | null; // Stripe subscription status, or "comp" (owner gave it free)
+  trial_ends_at: string | null;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  current_period_end: string | null;
+}
+
+const parseTime = (s: string | null) => (s ? Date.parse(s.replace(" ", "T") + (s.includes("Z") ? "" : "Z")) : NaN);
+
+export function planStatus(u: BillingRow, now = Date.now()): PlanStatus {
+  if (u.is_owner) return "owner";
+  if (u.plan === "comp") return "free";
+  if (u.plan === "active" || u.plan === "trialing") return "active";
+  if (u.plan === "past_due") return "past_due"; // Stripe is retrying the card: keep working meanwhile
+  if (!billingEnabled()) return "free";
+  const trialEnd = parseTime(u.trial_ends_at);
+  if (!u.trial_ends_at) return "free"; // joined before billing existed
+  return trialEnd > now ? "trial" : "expired";
+}
+
+export function billingSummary(u: BillingRow, now = Date.now()) {
+  const status = planStatus(u, now);
+  const trialEnd = parseTime(u.trial_ends_at);
+  return {
+    enabled: billingEnabled(),
+    status,
+    canWrite: status !== "expired",
+    trialEndsAt: u.trial_ends_at,
+    trialDaysLeft: status === "trial" ? Math.max(0, Math.ceil((trialEnd - now) / 86400_000)) : null,
+    renewsAt: u.current_period_end,
+    hasCustomer: Boolean(u.stripe_customer_id),
+    price: process.env.FLIPDESK_PRICE_LABEL || null, // e.g. "$19/month", shown on the plan page
+  };
+}
+
+// ---------------- Stripe API (form-encoded REST, no SDK needed) ----------------
+
+function form(obj: Record<string, string | number | undefined>) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj)) if (v !== undefined && v !== "") p.append(k, String(v));
+  return p;
+}
+
+async function stripe<T>(path: string, body: URLSearchParams): Promise<T> {
+  const r = await fetch(`https://api.stripe.com/v1/${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const j = (await r.json()) as T & { error?: { message?: string } };
+  if (!r.ok) throw Object.assign(new Error(`Stripe: ${j.error?.message ?? r.status}`), { status: 502 });
+  return j;
+}
+
+export async function checkoutUrl(u: BillingRow, base: string) {
+  const trialEnd = Math.floor(parseTime(u.trial_ends_at) / 1000);
+  // Subscribing early? Don't charge until the free trial would have ended (Stripe needs 48h+ notice).
+  const keepTrial = Number.isFinite(trialEnd) && trialEnd > Date.now() / 1000 + 48 * 3600;
+  const s = await stripe<{ url: string }>(
+    "checkout/sessions",
+    form({
+      mode: "subscription",
+      "line_items[0][price]": process.env.STRIPE_PRICE_ID,
+      "line_items[0][quantity]": 1,
+      success_url: `${base}/billing?done=1`,
+      cancel_url: `${base}/billing`,
+      client_reference_id: String(u.id),
+      customer: u.stripe_customer_id ?? undefined,
+      customer_email: u.stripe_customer_id ? undefined : u.email,
+      "subscription_data[metadata][user_id]": String(u.id),
+      "subscription_data[trial_end]": keepTrial ? trialEnd : undefined,
+      allow_promotion_codes: "true",
+    }),
+  );
+  return s.url;
+}
+
+export async function portalUrl(u: BillingRow, base: string) {
+  if (!u.stripe_customer_id) throw Object.assign(new Error("No billing account yet. Subscribe first."), { status: 400 });
+  const s = await stripe<{ url: string }>("billing_portal/sessions", form({ customer: u.stripe_customer_id, return_url: `${base}/billing` }));
+  return s.url;
+}
+
+/** Stripe-Signature check: HMAC-SHA256 of "<t>.<raw body>" with the webhook secret, within 5 minutes. */
+export function verifyWebhook(raw: Buffer, header: string | undefined, secret: string, now = Date.now()) {
+  if (!header) return false;
+  const parts = Object.fromEntries(header.split(",").map((kv) => kv.split("=") as [string, string]).filter((x) => x.length === 2).map(([k, v]) => [k, v]));
+  const t = Number(parts.t);
+  if (!t || Math.abs(now / 1000 - t) > 300) return false;
+  const expected = crypto.createHmac("sha256", secret).update(`${t}.`).update(raw).digest("hex");
+  const sigs = header.split(",").filter((x) => x.startsWith("v1=")).map((x) => x.slice(3));
+  return sigs.some((s) => s.length === expected.length && crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected)));
+}
+
+const iso = (unix: number | undefined | null) => (unix ? new Date(unix * 1000).toISOString().replace("T", " ").slice(0, 19) : null);
+
+/** Apply a Stripe event to the accounts database. Returns what changed (for logs/tests). */
+export function applyStripeEvent(accounts: Db, ev: { type: string; data: { object: Record<string, unknown> } }) {
+  const o = ev.data.object as {
+    id?: string;
+    customer?: string;
+    subscription?: string;
+    client_reference_id?: string;
+    status?: string;
+    current_period_end?: number;
+    items?: { data?: { current_period_end?: number }[] };
+    metadata?: { user_id?: string };
+  };
+  if (ev.type === "checkout.session.completed") {
+    const id = Number(o.client_reference_id);
+    if (!id) return null;
+    accounts
+      .prepare("UPDATE users SET stripe_customer_id = COALESCE(?, stripe_customer_id), stripe_subscription_id = COALESCE(?, stripe_subscription_id), plan = CASE WHEN plan = 'trialing' THEN plan ELSE 'active' END WHERE id = ?")
+      .run(o.customer ?? null, o.subscription ?? null, id);
+    return { userId: id, plan: "active" };
+  }
+  if (ev.type.startsWith("customer.subscription.")) {
+    const byMeta = Number(o.metadata?.user_id) || 0;
+    const row = (byMeta
+      ? accounts.prepare("SELECT id FROM users WHERE id = ?").get(byMeta)
+      : accounts.prepare("SELECT id FROM users WHERE stripe_customer_id = ?").get(o.customer ?? "")) as { id: number } | undefined;
+    if (!row) return null;
+    const status = ev.type === "customer.subscription.deleted" ? "canceled" : (o.status ?? "active");
+    const periodEnd = o.current_period_end ?? o.items?.data?.[0]?.current_period_end;
+    accounts
+      .prepare("UPDATE users SET plan = ?, stripe_subscription_id = ?, stripe_customer_id = COALESCE(stripe_customer_id, ?), current_period_end = ? WHERE id = ?")
+      .run(status, o.id ?? null, o.customer ?? null, iso(periodEnd), row.id);
+    return { userId: row.id, plan: status };
+  }
+  return null;
+}

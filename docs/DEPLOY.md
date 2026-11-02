@@ -122,7 +122,31 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **Leaderboard (opt-in).** People who join with a nickname are ranked each week by how close they are to their goals, then return on cost. Only percentages and counts are shown, never dollars.
 - **Help videos.** Settings → Help videos: paste a Loom/YouTube link per "Get started" step, and everyone sees "▶ Watch" under it.
 
-Still to do before charging money: Stripe billing, and moving to Postgres + object storage once you have more than a few dozen sellers.
+- **Invite links.** Accounts → Invite links: one link per person (with a note like "Sam"). Each works once, the Accounts list shows who invited whom, and you can turn off unused links. The shared `FLIPDESK_INVITE_CODE` still works if you set it.
+- **Feedback.** Everyone has "💬 Send feedback" in the sidebar. It lands on your Accounts page with the page they were on and any recent errors, and pings your phone (your ntfy topic) and email.
+
+## Charging for it (Stripe)
+
+1. In Stripe: **Products → Add product**, monthly price (e.g. $19). Copy the price id (`price_...`).
+2. **Developers → API keys**: copy the secret key (`sk_live_...`, or `sk_test_...` to try it with test cards).
+3. **Developers → Webhooks → Add endpoint**: `https://<your address>/api/billing/webhook`, events `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`. Copy the signing secret (`whsec_...`).
+4. **Settings → Billing → Customer portal**: turn it on (lets people update cards and cancel).
+5. Set `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, `STRIPE_WEBHOOK_SECRET`, `PUBLIC_BASE_URL`, and optionally `FLIPDESK_TRIAL_DAYS` (14), `FLIPDESK_PRICE_LABEL` ("$19/month"), `FLIPDESK_AI_PAID_LIMIT` (200).
+
+How it behaves:
+- New accounts start a free trial. Subscribing during the trial doesn't charge until the trial ends.
+- When a trial ends without a plan, the shop turns **read-only**: everything stays viewable and downloadable, nothing new can be listed or edited, and sales still delist everywhere (no overselling). Subscribing turns it back on within seconds.
+- People who joined before billing was turned on, and anyone you tick "free" for on the Accounts page, stay free.
+- FlipDesk never sees card numbers: Stripe Checkout and the Stripe portal handle them.
+
+## Backups
+
+- **Nightly**, FlipDesk saves a .zip of every real shop (database + photos), the accounts and server settings to `data/backups/` and keeps the newest 7 (`BACKUP_KEEP`). Settings → Nightly backups shows the last one, has **Back up now**, and lets you download any copy.
+- **Off-site:** set `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY` (and `BACKUP_S3_REGION`, "auto" for R2). Cloudflare R2 is free up to 10 GB: create a bucket, then an R2 API token with write access; the endpoint is `https://<account id>.r2.cloudflarestorage.com`.
+- **Restore:** stop FlipDesk, unzip the backup, copy `shop/flipdesk.db` to `data/flipdesk.db` and `shop/uploads/` to `data/uploads/` (accounts mode: `users/<id>/…` to `data/users/<id>/…`, plus `accounts.db` and `site.db` to `data/`), then start FlipDesk.
+- **Everyone can download their own data** any time: Settings → Download all my data (spreadsheets, photos and the database in one .zip).
+
+Still to do as it grows: moving to Postgres + object storage once you have more than a few dozen sellers.
 
 ## Becoming a product (later)
 

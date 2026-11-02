@@ -37,6 +37,15 @@ export function AuthScreen() {
   const [mode, setMode] = useState<WorkspaceState | null>(null);
   const [tab, setTab] = useState<"in" | "up" | "forgot">("in");
   const [sent, setSent] = useState<null | { emailed: boolean }>(null);
+  // /join?invite=... : a personal invite link fills in the code and opens "Create account".
+  const inviteFromLink = location.pathname === "/join" ? new URLSearchParams(location.search).get("invite") ?? "" : "";
+  const [inviteOk, setInviteOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!inviteFromLink) return;
+    setTab("up");
+    setF((x) => ({ ...x, invite: inviteFromLink }));
+    api.get<{ valid: boolean }>(`/api/auth/invite/${encodeURIComponent(inviteFromLink)}`).then((r) => setInviteOk(r.valid), () => setInviteOk(false));
+  }, [inviteFromLink]);
   const [f, setF] = useState({ email: "", password: "", invite: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -51,7 +60,7 @@ export function AuthScreen() {
       if (!accounts) await api.post("/api/login", { password: f.password });
       else if (tab === "in") await api.post("/api/auth/login", { email: f.email, password: f.password });
       else await api.post("/api/auth/signup", { email: f.email, password: f.password, invite: f.invite || undefined });
-      location.assign("/");
+      location.assign(location.pathname === "/join" ? "/" : location.pathname + location.search);
     } catch (x) {
       setErr((x as Error).message);
     } finally {
@@ -87,7 +96,9 @@ export function AuthScreen() {
         <input className="input" type="password" autoFocus={!accounts} autoComplete={tab === "up" ? "new-password" : "current-password"} placeholder={tab === "up" ? "Password (8+ characters)" : "Password"} required value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
         )}
         {accounts && tab === "in" && <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => setTab("forgot")}>Forgot password?</button>}
-        {accounts && tab === "up" && mode?.needsInvite && <input className="input" placeholder="Invite code" required value={f.invite} onChange={(e) => setF({ ...f, invite: e.target.value })} />}
+        {accounts && tab === "up" && mode?.needsInvite && !inviteFromLink && <input className="input" placeholder="Invite code" required value={f.invite} onChange={(e) => setF({ ...f, invite: e.target.value })} />}
+        {inviteFromLink && tab === "up" && inviteOk === true && <p className="text-xs text-green-400">🎟️ You've been invited. Pick an email and password to create your shop.</p>}
+        {inviteFromLink && inviteOk === false && <p className="text-xs text-red-400">This invite link was already used or turned off. Ask for a new one.</p>}
         {accounts && tab === "up" && !mode?.needsInvite && <p className="text-xs text-zinc-500">You're the first account, so you'll be the owner of this FlipDesk.</p>}
         {accounts && !mode?.signupsOpen && <p className="text-xs text-zinc-500">New accounts need an invite from the owner.</p>}
         {err && <div className="text-sm text-red-400">{err}</div>}
@@ -136,6 +147,7 @@ export function ShopSwitch({ w }: { w: WorkspaceState | null }) {
       ) : (
         <button className="block hover:text-zinc-300" onClick={() => switchShop("enter_demo")}>🧪 {w.demoExists ? "Open" : "Try"} the sample shop</button>
       )}
+      {w.mode === "accounts" && <FeedbackButton />}
       {w.user && (
         <button className="block hover:text-zinc-300" onClick={async () => (await api.post("/api/auth/logout"), location.assign("/"))}>Sign out</button>
       )}
@@ -182,4 +194,85 @@ export function SharePage({ token }: { token: string }) {
     api.post(`/api/share/${encodeURIComponent(token)}/open`).then(() => location.assign("/"), (x: Error) => setErr(x.message));
   }, [token]);
   return <div className="flex min-h-screen items-center justify-center p-4 text-zinc-400">{err || "Opening the sample shop…"}</div>;
+}
+
+export interface BillingInfo { enabled: boolean; status: "owner" | "free" | "trial" | "active" | "past_due" | "expired"; canWrite?: boolean; trialDaysLeft?: number | null; renewsAt?: string | null; hasCustomer?: boolean; price?: string | null; aiLimit?: number | null; paidAiLimit?: number; trialDays?: number }
+
+/** Trial ending soon / ended: a slim bar linking to the plan page. */
+export function PlanBanner({ b }: { b: BillingInfo | null }) {
+  if (!b?.enabled) return null;
+  if (b.status === "expired")
+    return (
+      <a href="/billing" className="block border-b border-red-900 bg-red-950/90 px-4 py-2 text-center text-sm text-red-100 hover:bg-red-950">
+        Your free trial has ended. Your shop is read-only until you choose a plan. <b className="underline">See plans →</b>
+      </a>
+    );
+  if (b.status === "trial" && (b.trialDaysLeft ?? 99) <= 3)
+    return (
+      <a href="/billing" className="block border-b border-amber-900 bg-amber-950/80 px-4 py-1.5 text-center text-sm text-amber-100 hover:bg-amber-950">
+        {b.trialDaysLeft === 0 ? "Your free trial ends today." : `${b.trialDaysLeft} day${b.trialDaysLeft === 1 ? "" : "s"} left in your free trial.`} <b className="underline">Choose a plan</b>
+      </a>
+    );
+  if (b.status === "past_due")
+    return <a href="/billing" className="block border-b border-amber-900 bg-amber-950/80 px-4 py-1.5 text-center text-sm text-amber-100">Your last payment didn't go through. <b className="underline">Update your card</b></a>;
+  return null;
+}
+
+export function useBilling(enabled: boolean) {
+  const [b, setB] = useState<BillingInfo | null>(null);
+  useEffect(() => void (enabled && api.get<BillingInfo>("/api/billing").then(setB).catch(() => {})), [enabled]);
+  return b;
+}
+
+/** Recent errors in this tab, attached to feedback so the owner can see what went wrong. */
+const recentErrors: string[] = [];
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (e) => recentErrors.push(String(e.message).slice(0, 300)) > 5 && recentErrors.shift());
+  window.addEventListener("unhandledrejection", (e) => recentErrors.push(String((e.reason as Error)?.message ?? e.reason).slice(0, 300)) > 5 && recentErrors.shift());
+}
+
+/** "Send feedback": a note to the owner with the page you're on and recent errors. */
+export function FeedbackButton() {
+  const [open, setOpen] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <button className="block hover:text-zinc-300" onClick={() => setOpen(true)}>💬 Send feedback</button>
+      {open && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={() => setOpen(false)}>
+          <form
+            className="card w-full max-w-md space-y-3 bg-zinc-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setBusy(true);
+              try {
+                await api.post("/api/feedback", {
+                  message: msg,
+                  page: location.pathname + location.search,
+                  context: { browser: navigator.userAgent, screen: `${innerWidth}x${innerHeight}`, errors: [...recentErrors], at: new Date().toString() },
+                });
+                setMsg("");
+                setOpen(false);
+                toast("Thanks! Sent to the owner.");
+              } catch (x) {
+                toast((x as Error).message, "err");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <h2 className="font-semibold">💬 Send feedback</h2>
+            <p className="text-xs text-zinc-500">A bug, an idea, something confusing? It goes straight to the person who runs this FlipDesk, with the page you're on ({location.pathname}) and any recent errors.</p>
+            <textarea className="input min-h-32" autoFocus value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="What happened, or what would make this better?" />
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
+              <button className="btn-primary" disabled={busy || msg.trim().length < 3}>{busy ? "Sending…" : "Send"}</button>
+            </div>
+          </form>
+        </div>
+      )}
+    </>
+  );
 }

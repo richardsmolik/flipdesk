@@ -4,6 +4,7 @@ import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { notify, type NotifySettings } from "./alerts.js";
 import { suggestBundles } from "./bundles.js";
 import { goalLine } from "./goals.js";
+import { mailConfigured, sendMail } from "./mailer.js";
 
 const money = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 
@@ -12,6 +13,8 @@ export interface WeeklySettings {
   day?: number; // 0=Sun ... 1=Mon
   hour?: number; // 0-23 local
   timezone?: string; // IANA, e.g. America/Chicago
+  email?: boolean; // also email it (needs SMTP_* on the server)
+  emailTo?: string; // where to (default: your account email when hosted)
 }
 
 function localParts(date: Date, tz: string) {
@@ -106,6 +109,16 @@ export async function sendDigest(db: Db, opts: { force?: boolean; now?: Date } =
   }
   const d = buildDigest(db);
   const pushed = await notify(db, "weekly", d.title, d.body);
+  let emailed = false;
+  const to = ws.emailTo || getSetting<string>(db, "accountEmail", "");
+  if (ws.email && to && (mailConfigured() || process.env.SMTP_HOST === "test")) {
+    const link = process.env.PUBLIC_BASE_URL ? `\n\nOpen FlipDesk: ${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/` : "";
+    try {
+      emailed = await sendMail(to, d.title, `${d.body}${link}\n\nTurn this email off in FlipDesk → Settings → Weekly summary.`);
+    } catch (e) {
+      console.warn("[weekly email]", (e as Error).message);
+    }
+  }
   if (!opts.force) db.prepare("INSERT OR IGNORE INTO digests (week, body) VALUES (?, ?)").run(week, `${d.title}\n${d.body}`);
-  return { sent: true, pushed, week, ...d, ntfy: Boolean(getSetting<NotifySettings>(db, "notify", {}).ntfyTopic) };
+  return { sent: true, pushed, emailed, week, ...d, ntfy: Boolean(getSetting<NotifySettings>(db, "notify", {}).ntfyTopic) };
 }

@@ -66,3 +66,8 @@ every(2 * 60_000, "email", (db) => pollImap(db)); // sale emails from every mark
 every(15 * 60_000, "weekly", (db) => sendDigest(db)); // Monday-morning summary (once per week)
 every(30 * 60_000, "ebay-labels", (db) => syncEbayLabelCosts(db)); // exact eBay label costs -> profit
 every(12 * 60 * 60_000, "ebay-traffic", (db) => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"
+
+// Nightly backup of every shop (data/backups, plus cloud storage when BACKUP_S3_* is set).
+const backup = () => shops.backupIfDue().then((r) => r && console.log(`[backup] ${r.file} (${Math.round(r.bytes / 1e6)} MB)${r.uploaded ? " uploaded" : ""}${r.error ? ` - ${r.error}` : ""}`)).catch((e) => console.error("[backup]", (e as Error).message));
+setInterval(backup, 60 * 60_000).unref();
+setTimeout(backup, 5 * 60_000).unref();

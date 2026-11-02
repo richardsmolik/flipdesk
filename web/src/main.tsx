@@ -7,7 +7,8 @@ import { Toaster } from "./ui";
 import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
 import { Welcome, type OnboardingState } from "./components/Onboarding";
 import { Shortcuts } from "./components/Shortcuts";
-import { AuthScreen, DemoBanner, ResetPage, SharePage, ShopSwitch, useWorkspace } from "./components/Account";
+import { AuthScreen, DemoBanner, PlanBanner, ResetPage, SharePage, ShopSwitch, useBilling, useWorkspace } from "./components/Account";
+import Billing from "./pages/Billing";
 import { useParams } from "react-router-dom";
 import Leaderboard from "./pages/Leaderboard";
 import Accounts from "./pages/Accounts";
@@ -55,6 +56,7 @@ function Shell() {
   }, []);
   useEffect(() => void api.get<{ ai: string; ebay: string }>("/api/health").then(setHealth).catch(() => {}), []);
   const shop = useWorkspace();
+  const plan = useBilling(Boolean(shop?.user && !shop.user.owner));
   if (needLogin) return <AuthScreen />;
   return (
     <div className="flex min-h-screen">
@@ -73,6 +75,7 @@ function Shell() {
         }
       />
       <main className="min-w-0 flex-1 pb-24">
+        <PlanBanner b={plan} />
         <DemoBanner w={shop} />
         <div className="p-4 md:p-8">
         <Routes>
@@ -98,6 +101,7 @@ function Shell() {
           <Route path="/bins/:name" element={<BinDetail />} />
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/billing" element={<Billing />} />
         </Routes>
         </div>
       </main>
@@ -124,6 +128,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/print/labels" element={<Labels />} />
         <Route path="/m/:token" element={<PhoneCapture />} />
         <Route path="/reset" element={<ResetPage />} />
+        <Route path="/join" element={<AuthScreen />} />
         <Route path="/s/:token" element={<ShareRoute />} />
         <Route path="*" element={<Shell />} />
       </Routes>

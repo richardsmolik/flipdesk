@@ -24,11 +24,11 @@ export function raiseAlert(
   return Number(r.lastInsertRowid);
 }
 
-export async function notify(db: Db, event: "sale" | "oversell" | "email_review" | "weekly", title: string, message: string) {
+export async function notify(db: Db, event: "sale" | "oversell" | "email_review" | "weekly" | "feedback", title: string, message: string) {
   const s = getSetting<NotifySettings>(db, "notify", {});
   if (!s.ntfyTopic) return false;
   const enabled =
-    event === "sale" ? s.onSale !== false : event === "oversell" ? s.onOversell !== false : event === "weekly" ? s.onWeekly !== false : s.onEmailReview !== false;
+    event === "sale" ? s.onSale !== false : event === "oversell" ? s.onOversell !== false : event === "weekly" ? s.onWeekly !== false : event === "feedback" ? true : s.onEmailReview !== false;
   if (!enabled) return false;
   try {
     const res = await fetch(`${(s.ntfyServer || "https://ntfy.sh").replace(/\/$/, "")}/${encodeURIComponent(s.ntfyTopic)}`, {
@@ -36,7 +36,7 @@ export async function notify(db: Db, event: "sale" | "oversell" | "email_review"
       headers: {
         Title: title.replace(/[^\x20-\x7E]/g, ""), // headers must be ASCII
         Priority: event === "oversell" ? "urgent" : "default",
-        Tags: event === "sale" ? "moneybag" : event === "oversell" ? "rotating_light" : event === "weekly" ? "bar_chart" : "envelope",
+        Tags: event === "sale" ? "moneybag" : event === "oversell" ? "rotating_light" : event === "weekly" ? "bar_chart" : event === "feedback" ? "speech_balloon" : "envelope",
       },
       body: message,
     });

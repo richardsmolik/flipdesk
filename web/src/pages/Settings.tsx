@@ -101,11 +101,78 @@ function AccountSection({ email }: { email: string }) {
   );
 }
 
+interface BackupState { last: { at?: string; bytes?: number; uploaded?: string | null; error?: string | null; failedAt?: string } | null; files: { name: string; bytes: number }[]; offsite: boolean; disabled: boolean }
+const mb = (b: number) => (b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`);
+
+function YourData() {
+  return (
+    <section className="card space-y-2 p-4">
+      <h2 className="font-semibold">📦 Download all my data</h2>
+      <p className="text-sm text-zinc-400">One .zip with spreadsheets (items, sales, listings, expenses, mileage), every photo, and the full database. Your data is always yours.</p>
+      <a className="btn-ghost inline-block" href="/api/export" download>Download .zip</a>
+    </section>
+  );
+}
+
+function Backups() {
+  const [b, setB] = useState<BackupState | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => void api.get<BackupState>("/api/backups").then(setB).catch(() => {}), []);
+  if (!b) return null;
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">🛟 Nightly backups</h2>
+      <p className="text-sm text-zinc-400">
+        {b.disabled ? "Turned off (BACKUP_DISABLED=1). " : "Every night FlipDesk saves a copy of every shop and its photos on the server (newest 7 kept). "}
+        {b.offsite ? "Each copy is also uploaded to your cloud storage." : "Add cloud storage (BACKUP_S3_* in .env: Cloudflare R2, Backblaze B2 or AWS S3) so a lost server doesn't mean lost data."}
+      </p>
+      {b.last?.at && (
+        <div className="text-sm">
+          Last backup: <b>{new Date(b.last.at).toLocaleString()}</b>{b.last.bytes ? ` · ${mb(b.last.bytes)}` : ""}{b.last.uploaded ? " · ☁️ uploaded" : ""}
+          {b.last.error && <div className="text-amber-400">{b.last.error}</div>}
+        </div>
+      )}
+      {!b.last?.at && <div className="text-sm text-amber-400">No backup yet.</div>}
+      <div className="flex flex-wrap gap-2">
+        <button
+          className="btn-primary"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await api.post<BackupState & { result: { error: string | null } }>("/api/backups");
+              setB(r);
+              toast(r.result.error ? r.result.error : "Backup saved", r.result.error ? "err" : "ok");
+            } catch (e) {
+              toast((e as Error).message, "err");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Backing up…" : "Back up now"}
+        </button>
+      </div>
+      {b.files.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {b.files.map((f) => (
+            <li key={f.name} className="flex justify-between gap-2"><a className="text-brand hover:underline" href={`/api/backups/${f.name}`}>{f.name}</a><span className="text-zinc-500">{mb(f.bytes)}</span></li>
+          ))}
+        </ul>
+      )}
+      <p className="text-xs text-zinc-500">To restore: stop FlipDesk, unzip a backup and copy its files back into the data folder (see docs/DEPLOY.md).</p>
+    </section>
+  );
+}
+
 function SiteSections() {
   const a = useAccount();
+  const w = useWorkspace();
   return (
     <>
       {a?.user && <AccountSection email={a.user.email} />}
+      {!w?.shared && <YourData />}
+      {a?.canEditSite && <Backups />}
       {a?.canEditSite && <HelpVideos />}
     </>
   );
@@ -137,7 +204,7 @@ interface S {
   mileage: { rate?: number } | null;
   shop: { name?: string; thankYou?: string } | null;
   shipping: { defaultProvider?: string; perMarketplace?: Record<string, string>; defaultPackage?: { weightOz?: number; length?: number; width?: number; height?: number } } | null;
-  weekly: { enabled?: boolean; day?: number; hour?: number; timezone?: string } | null;
+  weekly: { enabled?: boolean; day?: number; hour?: number; timezone?: string; email?: boolean; emailTo?: string } | null;
   notify: { ntfyTopic?: string; onSale?: boolean; onOversell?: boolean; onEmailReview?: boolean; onWeekly?: boolean } | null;
   minutesPerItem: number | null;
   sourcing: { minProfit: number; minRoiPct: number } | null;
@@ -241,7 +308,7 @@ export default function Settings() {
           <h2 className="font-semibold">📊 Weekly summary</h2>
           <div className="flex gap-2">
             <button className="btn-ghost text-xs" onClick={async () => { const d = await api.get<{ title: string; body: string }>("/api/digest/preview"); setDigest(`${d.title}\n\n${d.body}`); }}>Preview</button>
-            <button className="btn-ghost text-xs" onClick={async () => { await save(); const r = await api.post<{ pushed: boolean; title: string; body: string }>("/api/digest/send"); setDigest(`${r.title}\n\n${r.body}`); toast(r.pushed ? "Sent to your phone" : "Set an ntfy topic above to get it on your phone", r.pushed ? "ok" : "err"); }}>Send now</button>
+            <button className="btn-ghost text-xs" onClick={async () => { await save(); const r = await api.post<{ pushed: boolean; emailed?: boolean; title: string; body: string }>("/api/digest/send"); setDigest(`${r.title}\n\n${r.body}`); toast(r.pushed || r.emailed ? `Sent${r.pushed ? " to your phone" : ""}${r.emailed ? (r.pushed ? " and email" : " by email") : ""}` : "Set an ntfy topic above (or turn on email) to receive it", r.pushed || r.emailed ? "ok" : "err"); }}>Send now</button>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
@@ -253,6 +320,11 @@ export default function Settings() {
             {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{h === 0 ? "12 am" : h < 12 ? `${h} am` : h === 12 ? "12 pm" : `${h - 12} pm`}</option>)}
           </select>
           <input className="input" value={weekly.timezone ?? ""} placeholder="America/Chicago" onChange={(e) => setS({ ...s, weekly: { ...weekly, timezone: e.target.value } })} />
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <label className="flex items-center gap-2"><input type="checkbox" checked={Boolean(weekly.email)} onChange={(e) => setS({ ...s, weekly: { ...weekly, email: e.target.checked } })} /> Also email it to me</label>
+          {weekly.email && <input className="input max-w-xs" type="email" placeholder="you@example.com (blank = your account email)" value={weekly.emailTo ?? ""} onChange={(e) => setS({ ...s, weekly: { ...weekly, emailTo: e.target.value } })} />}
+          {weekly.email && <span className="text-xs text-zinc-500">Needs email set up on the server (SMTP_* in .env).</span>}
         </div>
         {digest && <pre className="whitespace-pre-wrap rounded bg-zinc-950 p-3 text-sm text-zinc-200">{digest}</pre>}
       </section>
