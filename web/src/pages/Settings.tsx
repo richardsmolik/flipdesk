@@ -72,12 +72,25 @@ function HelpVideos() {
   );
 }
 
-function AccountSection({ email }: { email: string }) {
+function AccountSection({ email, optOut }: { email: string; optOut: boolean }) {
   const [f, setF] = useState({ current: "", next: "" });
+  const [off, setOff] = useState(optOut);
   return (
     <section className="card space-y-3 p-4">
       <h2 className="font-semibold">👤 Your account</h2>
       <p className="text-sm text-zinc-400">Signed in as {email}.</p>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={!off}
+          onChange={async (e) => {
+            const r = await api.post<{ emailOptOut: boolean }>("/api/account/emails", { optOut: !e.target.checked });
+            setOff(r.emailOptOut);
+            toast(r.emailOptOut ? "No more reminder emails" : "Reminder emails on");
+          }}
+        />
+        Friendly reminder emails (trial ending, haven't stopped by in a while)
+      </label>
       <div className="grid gap-2 sm:grid-cols-3">
         <input className="input" type="password" autoComplete="current-password" placeholder="Current password" value={f.current} onChange={(e) => setF({ ...f, current: e.target.value })} />
         <input className="input" type="password" autoComplete="new-password" placeholder="New password (8+)" value={f.next} onChange={(e) => setF({ ...f, next: e.target.value })} />
@@ -101,7 +114,8 @@ function AccountSection({ email }: { email: string }) {
   );
 }
 
-interface BackupState { last: { at?: string; bytes?: number; uploaded?: string | null; error?: string | null; failedAt?: string } | null; files: { name: string; bytes: number }[]; offsite: boolean; disabled: boolean }
+interface BackupCheckInfo { name: string; at: string; ok: boolean; photosChecked: number; photosTotal: number; problems: string[]; databases: { name: string; ok: boolean; detail: string }[] }
+interface BackupState { check?: BackupCheckInfo | null; last: { at?: string; bytes?: number; uploaded?: string | null; error?: string | null; failedAt?: string } | null; files: { name: string; bytes: number }[]; offsite: boolean; disabled: boolean }
 const mb = (b: number) => (b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`);
 
 function YourData() {
@@ -198,6 +212,11 @@ function Backups() {
         </div>
       )}
       {!b.last?.at && <div className="text-sm text-amber-400">No backup yet.</div>}
+      {b.check && (
+        <div className={`text-sm ${b.check.ok ? "text-green-400" : "text-red-400"}`}>
+          {b.check.ok ? "✓" : "✕"} Restore check {new Date(b.check.at).toLocaleDateString()}: {b.check.ok ? `${backupWhen(b.check.name)} restores fine (${b.check.databases.length} databases, ${b.check.photosChecked} of ${b.check.photosTotal} photos verified). Runs monthly.` : b.check.problems.slice(0, 2).join("; ")}
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
         <button
           className="btn-primary"
@@ -223,7 +242,22 @@ function Backups() {
           {b.files.map((f) => (
             <li key={f.name} className="flex items-center justify-between gap-2">
               <a className="text-brand hover:underline" href={`/api/backups/${f.name}`}>{backupWhen(f.name)}</a>
-              <span className="flex items-center gap-2 text-zinc-500">{mb(f.bytes)}<button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => setRestoring(f.name)}>Restore…</button></span>
+              <span className="flex items-center gap-2 text-zinc-500">
+                {mb(f.bytes)}
+                <button
+                  className="btn-ghost px-2 py-0.5 text-xs"
+                  title="Unpack it in a scratch folder and make sure it would restore"
+                  onClick={async () => {
+                    toast("Checking…");
+                    const c = await api.post<BackupCheckInfo>(`/api/backups/${f.name}/check`);
+                    setB({ ...b, check: c });
+                    toast(c.ok ? `✓ Restores fine (${c.databases.length} databases, ${c.photosChecked} photos checked)` : `Problem: ${c.problems[0]}`, c.ok ? "ok" : "err");
+                  }}
+                >
+                  Check
+                </button>
+                <button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => setRestoring(f.name)}>Restore…</button>
+              </span>
             </li>
           ))}
         </ul>
@@ -239,7 +273,7 @@ function SiteSections() {
   const w = useWorkspace();
   return (
     <>
-      {a?.user && <AccountSection email={a.user.email} />}
+      {a?.user && <AccountSection email={a.user.email} optOut={Boolean(a.emailOptOut)} />}
       {!w?.shared && <YourData />}
       {a?.canEditSite && <Backups />}
       {a?.canEditSite && <HelpVideos />}

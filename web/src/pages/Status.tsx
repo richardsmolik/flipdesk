@@ -4,7 +4,8 @@ import { api } from "../api";
 import { timeAgo } from "../ui";
 
 interface Row { key: string; label: string; state: "ok" | "warn" | "down" | "off"; detail: string; lastOk?: string | null }
-interface Status { overall: "ok" | "warn" | "down"; checkedAt: string; services: Row[]; yours: Row[] }
+interface Incident { service: string; label: string; started_at: string; ended_at: string | null; last_error: string }
+interface Status { overall: "ok" | "warn" | "down"; checkedAt: string; services: Row[]; yours: Row[]; incidents?: Incident[] }
 
 // Status colors carry an icon + word, never color alone.
 const BADGE: Record<Row["state"], [string, string, string]> = {
@@ -13,7 +14,7 @@ const BADGE: Record<Row["state"], [string, string, string]> = {
   down: ["✕", "Problem", "bg-red-950 text-red-300 border-red-900"],
   off: ["–", "Not set up", "bg-zinc-900 text-zinc-400 border-zinc-800"],
 };
-const FIX: Record<string, string> = { ebay: "/connections", sync: "/queue", extension: "/connections", "ai-allowance": "/billing", backup: "/settings" };
+const FIX: Record<string, string> = { ebay: "/connections", sync: "/queue", extension: "/connections", "ai-allowance": "/billing", backup: "/settings", "backup-check": "/settings" };
 
 function List({ rows }: { rows: Row[] }) {
   return (
@@ -61,6 +62,23 @@ export default function StatusPage() {
         <h2 className="font-semibold">FlipDesk services</h2>
         <List rows={s.services} />
       </section>
+      {!!s.incidents?.length && (
+        <section className="card p-4">
+          <h2 className="font-semibold">Recent problems</h2>
+          <ul className="mt-2 space-y-1 text-sm">
+            {s.incidents.map((i) => {
+              const at = (x: string) => new Date(x.replace(" ", "T") + "Z");
+              const mins = Math.round(((i.ended_at ? at(i.ended_at) : new Date()).getTime() - at(i.started_at).getTime()) / 60_000);
+              return (
+                <li key={i.started_at + i.service} className="flex flex-wrap justify-between gap-2">
+                  <span>{i.ended_at ? "✅" : "🔴"} {i.label} {i.ended_at ? "had trouble" : "is having trouble"} <span className="text-xs text-zinc-500">{i.last_error}</span></span>
+                  <span className="text-xs text-zinc-500">{timeAgo(at(i.started_at).toISOString())} · {i.ended_at ? `fixed after ${mins < 120 ? `${Math.max(1, mins)} min` : `${Math.round(mins / 60)} h`}` : "ongoing"}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
       <p className="text-xs text-zinc-500">Updates every 30 seconds. Still stuck? Use 💬 Send feedback in the sidebar (it includes this page).</p>
     </div>
   );

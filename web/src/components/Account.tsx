@@ -12,7 +12,7 @@ export interface WorkspaceState {
   shared?: boolean;
 }
 
-export interface AccountInfo { user: { email: string; owner: boolean } | null; ai: { used: number; limit: number | null } | null; email: boolean; canEditSite: boolean }
+export interface AccountInfo { user: { email: string; owner: boolean } | null; ai: { used: number; limit: number | null } | null; email: boolean; canEditSite: boolean; emailOptOut?: boolean }
 export function useAccount() {
   const [a, setA] = useState<AccountInfo | null>(null);
   useEffect(() => void api.get<AccountInfo>("/api/account").then(setA).catch(() => {}), []);

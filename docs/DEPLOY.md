@@ -129,6 +129,11 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **How FlipDesk is doing.** The top of the Accounts page: members, active sellers per week, paying vs trial, trial → paid %, monthly revenue estimate (`FLIPDESK_PRICE_MONTHLY`), and AI requests per week with a cost estimate (`FLIPDESK_AI_COST_PER_CALL`, default $0.04).
 - **Status page.** Tools → Status answers "is it me or FlipDesk?": your eBay connection, sync queue, Chrome extension check-ins, AI allowance, plus AI, eBay, email, backups and payments. It uses real results from the last calls and refreshes every 30 seconds. The feedback form points there first.
 
+- **Your weekly report.** On your weekly-summary day and hour you get a push + email: members and new sign-ups, active sellers vs last week, paying and trials ending, AI requests and cost, open feedback, referrals, reminder emails sent, outages, and the last backup and restore check. Accounts page shows it live, with **Send it now**.
+- **Outage alerts.** When AI, eBay or email fails 3 times in a row (`FLIPDESK_INCIDENT_AFTER`), you get a push and email, and everyone sees a "Heads up: eBay is having trouble right now" announcement pointing to Status (`FLIPDESK_AUTO_ANNOUNCE=0` to keep it to you). When it works again, the announcement comes down and you get "✅ working again (down for 12 min)". Status shows recent problems. A failed nightly backup alerts you too.
+- **Reminder emails** (needs SMTP): a heads-up 3 days before a free trial ends, and a "we miss you" note after 14 days away (at most once a month). Both include the person's own numbers ("you added 34 items, sold 12, made $412") and the latest announcement. Each person can turn them off in Settings → Your account.
+- **Ask FlipDesk.** The ❓ Help button (and Tools → Help) answers how-to questions from FlipDesk's own docs (this file, the README and the eBay guide). With an Anthropic key, Claude answers in plain steps with links to the right page; each question counts as one AI request. Without a key, it shows the best-matching guide sections.
+
 ## Charging for it (Stripe)
 
 1. In Stripe: **Products → Add product**, monthly price (e.g. $19). Copy the price id (`price_...`).
@@ -149,6 +154,7 @@ How it behaves:
 
 - **Nightly**, FlipDesk saves a .zip of every real shop (database + photos), the accounts and server settings to `data/backups/` and keeps the newest 7 (`BACKUP_KEEP`). Settings → Nightly backups shows the last one, has **Back up now**, and lets you download any copy.
 - **Off-site:** set `BACKUP_S3_ENDPOINT`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY`, `BACKUP_S3_SECRET_KEY` (and `BACKUP_S3_REGION`, "auto" for R2). Cloudflare R2 is free up to 10 GB: create a bucket, then an R2 API token with write access; the endpoint is `https://<account id>.r2.cloudflarestorage.com`.
+- **Restore check (monthly):** FlipDesk unpacks the newest backup in a scratch folder, opens every database and runs SQLite's integrity check, and verifies photo checksums (up to 300). The result shows in Settings and on Status, and you're alerted if it fails. **Check** next to any backup runs it on demand.
 - **Restore in the app:** Settings → Nightly backups → **Restore…** on any backup. Pick what to put back (your shop, one person's shop, sign-ins, server settings), type RESTORE. FlipDesk first makes a fresh backup (your undo) and moves the replaced files to `data/restore-trash/` instead of deleting them.
 - **Restore by hand** (if the server won't start): stop FlipDesk, unzip the backup, copy `shop/flipdesk.db` to `data/flipdesk.db` and `shop/uploads/` to `data/uploads/` (accounts mode: `users/<id>/…` to `data/users/<id>/…`, plus `accounts.db` and `site.db` to `data/`), then start FlipDesk.
 - **Everyone can download their own data** any time: Settings → Download all my data (spreadsheets, photos and the database in one .zip).

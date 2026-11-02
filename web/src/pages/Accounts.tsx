@@ -52,6 +52,34 @@ function UsagePanel() {
   );
 }
 
+function OwnerReport() {
+  const [r, setR] = useState<{ title: string; body: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => void api.get<{ title: string; body: string }>("/api/admin/owner-report").then(setR).catch(() => {}), []);
+  if (!r) return null;
+  return (
+    <section className="card space-y-2 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">🗞️ Your weekly report</h2>
+        <button
+          className="btn-ghost px-2 py-1 text-xs"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            const x = await api.post<{ pushed: boolean; emailed: boolean }>("/api/admin/owner-report");
+            setBusy(false);
+            toast(x.pushed || x.emailed ? `Sent${x.pushed ? " to your phone" : ""}${x.emailed ? (x.pushed ? " and email" : " by email") : ""}` : "Set an ntfy topic (Settings) or email (SMTP_*) to receive it", x.pushed || x.emailed ? "ok" : "err");
+          }}
+        >
+          Send it now
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500">Arrives on your weekly-summary day and hour (Settings → Weekly summary), by phone push and email. This is what it says right now:</p>
+      <pre className="whitespace-pre-wrap rounded bg-zinc-950 p-3 font-sans text-sm text-zinc-200">{r.title}{"\n\n"}{r.body}</pre>
+    </section>
+  );
+}
+
 interface Ann { id: number; title: string; body: string; link: string; created_at: string; ends_at: string | null; archived_at: string | null; seen: number; dismissed: number }
 
 function Announcements() {
@@ -202,6 +230,7 @@ export default function Accounts() {
         </p>
       </div>
       <UsagePanel />
+      <OwnerReport />
       {link && (
         <div className="card space-y-2 border-amber-800 p-4 text-sm">
           <div>Reset link for <b>{link.email}</b> (works once, for 24 hours). Send it to them yourself:</div>

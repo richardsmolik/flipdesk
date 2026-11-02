@@ -13,7 +13,8 @@ import path from "node:path";
 import { Readable, type Writable } from "node:stream";
 import type { Db } from "../db.js";
 import { toCsv } from "./reports.js";
-import { ZipWriter } from "./zip.js";
+import { extractEntry, ZipWriter, zipEntries } from "./zip.js";
+import { DatabaseSync } from "node:sqlite";
 
 /** Consistent copy of a live SQLite database (safe while the app is running). */
 export function snapshot(db: Db, file: string) {
@@ -169,4 +170,59 @@ export function listBackups(dataDir: string) {
     .sort()
     .reverse()
     .map((f) => ({ name: f, bytes: fs.statSync(path.join(dir, f)).size }));
+}
+
+export interface BackupCheck { name: string; at: string; ok: boolean; databases: { name: string; ok: boolean; detail: string }[]; photosChecked: number; photosTotal: number; problems: string[] }
+
+/**
+ * Restore drill: unpack a backup into a scratch folder and prove it would work. Every database must open and
+ * pass SQLite's integrity check; photos are read back and their checksums verified (up to 300 of them).
+ */
+export function verifyBackup(file: string): BackupCheck {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fd-check-"));
+  const res: BackupCheck = { name: path.basename(file), at: new Date().toISOString(), ok: true, databases: [], photosChecked: 0, photosTotal: 0, problems: [] };
+  try {
+    const entries = zipEntries(file);
+    const photos = entries.filter((e) => e.name.includes("/uploads/"));
+    res.photosTotal = photos.length;
+    for (const e of entries.filter((x) => x.name.endsWith(".db"))) {
+      const out = path.join(tmp, e.name.replace(/[\\/]/g, "_"));
+      try {
+        fs.writeFileSync(out, extractEntry(file, e));
+        const db = new DatabaseSync(out, { readOnly: true });
+        try {
+          const check = (db.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check;
+          const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((t) => t.name));
+          const count = (t: string) => (tables.has(t) ? Number((db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n) : null);
+          const items = count("items");
+          const users = count("users");
+          const ok = check === "ok";
+          res.databases.push({ name: e.name, ok, detail: ok ? (items !== null ? `${items} items, ${count("sales")} sales` : users !== null ? `${users} accounts` : "opens fine") : `integrity check: ${check}` });
+          if (!ok) res.problems.push(`${e.name}: ${check}`);
+        } finally {
+          db.close();
+        }
+      } catch (err) {
+        res.databases.push({ name: e.name, ok: false, detail: (err as Error).message });
+        res.problems.push(`${e.name}: ${(err as Error).message}`);
+      }
+    }
+    // Spread the photo sample across the whole backup.
+    const step = Math.max(1, Math.ceil(photos.length / 300));
+    for (let i = 0; i < photos.length; i += step) {
+      try {
+        extractEntry(file, photos[i]);
+        res.photosChecked++;
+      } catch (err) {
+        res.problems.push(`${photos[i].name}: ${(err as Error).message}`);
+      }
+    }
+    if (!res.databases.length) res.problems.push("No databases in this backup");
+  } catch (err) {
+    res.problems.push((err as Error).message);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  res.ok = res.problems.length === 0;
+  return res;
 }

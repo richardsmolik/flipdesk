@@ -23,7 +23,9 @@ import { accountDeletionChallenge } from "./marketplaces/ebay.js";
 import { goalProgress } from "./services/goals.js";
 import { mailConfigured, sendMail } from "./services/mailer.js";
 import { applyStripeEvent, billingEnabled, billingSummary, checkoutUrl, paidAiLimit, planStatus, portalUrl, stripeGet, stripePost, trialDays, verifyWebhook, type BillingRow } from "./services/billing.js";
-import { backupAll, exportShop, listBackups, backupDir, s3Configured, type BackupSource } from "./services/backup.js";
+import { backupAll, exportShop, listBackups, backupDir, s3Configured, verifyBackup, type BackupSource } from "./services/backup.js";
+import { weeklySlot } from "./services/digest.js";
+import { askHelp, type HelpTurn } from "./services/help.js";
 import { notify } from "./services/alerts.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
 import { ebayIsLive } from "./marketplaces/ebay.js";
@@ -98,8 +100,9 @@ export class Workspaces {
         created_at TEXT NOT NULL DEFAULT (datetime('now')), used_by INTEGER, used_at TEXT, revoked_at TEXT);
       CREATE TABLE IF NOT EXISTS activity_days (user_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (user_id, day));
       CREATE TABLE IF NOT EXISTS referral_rewards (id INTEGER PRIMARY KEY, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL UNIQUE,
-        kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
-    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER"]) {
+        kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE IF NOT EXISTS nudges (user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, kind, ref));`);
+    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER", "email_opt_out INTEGER NOT NULL DEFAULT 0"]) {
       try {
         a.exec(`ALTER TABLE users ADD COLUMN ${col}`);
       } catch {
@@ -119,7 +122,9 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS announcements (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', link TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL DEFAULT (datetime('now')), ends_at TEXT, archived_at TEXT);
       CREATE TABLE IF NOT EXISTS announcement_seen (announcement_id INTEGER NOT NULL, viewer TEXT NOT NULL, seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-        dismissed_at TEXT, PRIMARY KEY (announcement_id, viewer));`);
+        dismissed_at TEXT, PRIMARY KEY (announcement_id, viewer));
+      CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY, service TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT (datetime('now')), ended_at TEXT,
+        last_error TEXT NOT NULL DEFAULT '', announcement_id INTEGER);`);
     return site as unknown as Db;
   }
 
@@ -794,7 +799,17 @@ export class Workspaces {
         : backupAgeH === null
           ? upH < 2 ? "First backup runs within the hour" : "No backup yet"
           : `Last one ${backupAgeH < 1 ? "less than an hour" : `${Math.round(backupAgeH)} h`} ago${lastBackup?.error ? `. ${lastBackup.error}` : ""}`;
-    if (isOwner) services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupDetail });
+    if (isOwner) {
+      services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupDetail });
+      const chk = this.siteGet<{ at: string; ok: boolean; problems: string[]; photosChecked: number } | null>("lastBackupCheck", null);
+      services.push(
+        !chk
+          ? { key: "backup-check", label: "Backup restore check", state: "off", detail: "Runs monthly after a backup (or Settings → Check)" }
+          : chk.ok
+            ? { key: "backup-check", label: "Backup restore check", state: "ok", detail: `Passed ${Math.max(0, Math.round((Date.now() - Date.parse(chk.at)) / 86400_000))} days ago (${chk.photosChecked} photos verified)` }
+            : { key: "backup-check", label: "Backup restore check", state: "down", detail: `Failed: ${chk.problems.slice(0, 2).join("; ")}` },
+      );
+    }
     else if (backupState === "ok" || backupState === "off") services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupState === "ok" ? "Your shop is backed up every night" : "Turned off by the owner" });
     if (this.multiuser) services.push({ key: "payments", label: "Payments (Stripe)", state: billingEnabled() ? "ok" : "off", detail: billingEnabled() ? `Last update from Stripe: ${this.siteGet<string | null>("lastStripeEvent", null) ?? "none yet"}` : "Not set up (everyone is free)" });
 
@@ -846,6 +861,211 @@ export class Workspaces {
     const all = [...services, ...yours];
     const overall = all.some((r) => r.state === "down") ? "down" : all.some((r) => r.state === "warn") ? "warn" : "ok";
     return { overall, checkedAt: new Date().toISOString(), services, yours };
+  }
+
+  // ---------------- Owner alerts ----------------
+
+  /** The owner's real shop (for push notifications) and email. */
+  ownerContact() {
+    const id = this.multiuser ? (this.accounts!.prepare("SELECT id FROM users WHERE is_owner = 1").get() as { id: number } | undefined)?.id : undefined;
+    if (this.multiuser && !id) return null;
+    const ws = this.get(this.realKey(id));
+    const email = id ? (this.accounts!.prepare("SELECT email FROM users WHERE id = ?").get(id) as { email: string }).email : null;
+    return ws ? { ws, email } : null;
+  }
+
+  async tellOwner(title: string, body: string, opts: { email?: boolean } = {}) {
+    const o = this.ownerContact();
+    if (!o) return { pushed: false, emailed: false };
+    const pushed = await runInWorkspace(o.ws, () => notify(o.ws.db, "weekly", title, body)).catch(() => false);
+    let emailed = false;
+    if (opts.email !== false && o.email && (mailConfigured() || process.env.SMTP_HOST === "test")) emailed = await sendMail(o.email, title, body).catch(() => false);
+    return { pushed, emailed };
+  }
+
+  // ---------------- Automatic incident alerts ----------------
+
+  private static INCIDENT_LABEL: Record<string, string> = { ai: "The AI writer", ebay: "eBay", mail: "Email", backup: "Nightly backups" };
+
+  /**
+   * Every few minutes: when AI, eBay or email has failed several times in a row (FLIPDESK_INCIDENT_AFTER, default 3),
+   * tell the owner and (when hosted) post a "Heads up" announcement; when it works again, take it down and say so.
+   */
+  async checkIncidents() {
+    const after = Math.max(1, Number(process.env.FLIPDESK_INCIDENT_AFTER) || 3);
+    const lastBackup = this.siteGet<{ at?: string; failedAt?: string; error?: string | null } | null>("lastBackup", null);
+    const failing: Record<string, string | null> = {}; // service -> error when failing, null when fine
+    for (const svc of ["ai", "ebay", "mail"]) {
+      const c = globalCheck(svc);
+      if (!c) continue;
+      failing[svc] = c.streak >= after ? c.lastError ?? "failing" : c.streak === 0 ? null : undefined!;
+    }
+    if (lastBackup?.failedAt && (!lastBackup.at || lastBackup.failedAt > lastBackup.at)) failing.backup = lastBackup.error ?? "backup failed";
+    else if (lastBackup?.at) failing.backup = null;
+
+    const events: { service: string; kind: "opened" | "closed" }[] = [];
+    for (const [svc, err] of Object.entries(failing)) {
+      if (err === undefined) continue; // a failure or two: wait and see
+      const open = this.site.prepare("SELECT * FROM incidents WHERE service = ? AND ended_at IS NULL").get(svc) as { id: number; started_at: string; announcement_id: number | null } | undefined;
+      const label = Workspaces.INCIDENT_LABEL[svc] ?? svc;
+      if (err && !open) {
+        let annId: number | null = null;
+        if (this.multiuser && svc !== "backup" && process.env.FLIPDESK_AUTO_ANNOUNCE !== "0") {
+          annId = Number(
+            this.site
+              .prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, '/status', datetime('now','+2 days'))")
+              .run(`Heads up: ${label} is having trouble right now`, `FlipDesk keeps retrying on its own, so nothing is lost. ${svc === "ebay" ? "eBay listings, price changes and delists may be delayed." : svc === "ai" ? "AI writing may fail; you can still write listings by hand." : "Emails may arrive late."} Tools → Status shows the latest.`).lastInsertRowid,
+          );
+        }
+        this.site.prepare("INSERT INTO incidents (service, last_error, announcement_id) VALUES (?, ?, ?)").run(svc, err.slice(0, 300), annId);
+        await this.tellOwner(`🔴 ${label} is failing`, `${label} has failed ${svc === "backup" ? "" : `${after}+ times in a row`}. Last error: ${err}\n${annId ? "A heads-up announcement was posted for everyone. " : ""}Details: Tools → Status.`);
+        events.push({ service: svc, kind: "opened" });
+      } else if (!err && open) {
+        this.site.prepare("UPDATE incidents SET ended_at = datetime('now') WHERE id = ?").run(open.id);
+        if (open.announcement_id) this.site.prepare("UPDATE announcements SET archived_at = datetime('now') WHERE id = ?").run(open.announcement_id);
+        const mins = Math.max(1, Math.round((Date.now() - Date.parse(open.started_at.replace(" ", "T") + "Z")) / 60_000));
+        await this.tellOwner(`✅ ${label} is working again`, `It was down for about ${mins < 120 ? `${mins} min` : `${Math.round(mins / 60)} h`}.${open.announcement_id ? " The heads-up announcement was taken down." : ""}`, { email: false });
+        events.push({ service: svc, kind: "closed" });
+      }
+    }
+    return events;
+  }
+
+  recentIncidents(limit = 5) {
+    return (this.site.prepare("SELECT service, started_at, ended_at, last_error FROM incidents ORDER BY id DESC LIMIT ?").all(limit) as { service: string; started_at: string; ended_at: string | null; last_error: string }[]).map((i) => ({
+      ...i,
+      label: Workspaces.INCIDENT_LABEL[i.service] ?? i.service,
+    }));
+  }
+
+  // ---------------- Owner's weekly report (hosted) ----------------
+
+  ownerReport() {
+    const a = this.accounts!;
+    const u = this.usage(2);
+    const [prev, cur] = u.weeks;
+    const n = (sql: string, ...args: (string | number)[]) => Number((a.prepare(sql).get(...args) as { n: number }).n);
+    const weekAgo = "datetime('now','-7 days')";
+    const lines: string[] = [];
+    const delta = (x: number, y: number) => (y === x ? "" : ` (${x > y ? "▲" : "▼"}${Math.abs(x - y)} vs last week)`);
+    lines.push(`👥 ${u.members} member${u.members === 1 ? "" : "s"}, ${cur.signups} new this week · ${cur.activeSellers} active${delta(cur.activeSellers, prev.activeSellers)}`);
+    if (billingEnabled()) {
+      const paying = (u.plans.active ?? 0) + (u.plans.past_due ?? 0);
+      const ending = (a.prepare("SELECT id FROM users WHERE is_owner = 0").all() as { id: number }[]).filter((x) => {
+        const b = billingSummary(this.billingRow(x.id)!);
+        return b.status === "trial" && (b.trialDaysLeft ?? 99) <= 7;
+      }).length;
+      lines.push(`💳 ${paying} paying${u.mrr !== null ? ` (~$${u.mrr}/month)` : ""} · ${ending} trial${ending === 1 ? "" : "s"} ending this week${u.conversion.pct !== null ? ` · ${u.conversion.pct}% of trials convert` : ""}`);
+    }
+    lines.push(`🤖 ${cur.aiCalls} AI requests (~$${cur.aiCost.toFixed(2)})${delta(cur.aiCalls, prev.aiCalls)}`);
+    const fb = this.site.prepare("SELECT COUNT(*) AS n, MAX(message) AS m FROM feedback WHERE resolved_at IS NULL").get() as { n: number; m: string | null };
+    if (fb.n) lines.push(`💬 ${fb.n} open feedback${fb.m ? `, e.g. "${fb.m.slice(0, 60)}"` : ""}`);
+    const refs = n(`SELECT COUNT(*) AS n FROM referral_rewards WHERE created_at >= ${weekAgo}`);
+    if (refs) lines.push(`🎁 ${refs} referral reward${refs === 1 ? "" : "s"} given`);
+    const nudged = n(`SELECT COUNT(*) AS n FROM nudges WHERE sent_at >= ${weekAgo}`);
+    if (nudged) lines.push(`✉️ ${nudged} reminder email${nudged === 1 ? "" : "s"} sent`);
+    const inc = this.site.prepare(`SELECT COUNT(*) AS n FROM incidents WHERE started_at >= ${weekAgo}`).get() as { n: number };
+    if (inc.n) lines.push(`🩺 ${inc.n} outage${inc.n === 1 ? "" : "s"} this week (see Tools → Status)`);
+    const lb = this.siteGet<{ at?: string; error?: string | null } | null>("lastBackup", null);
+    const chk = this.siteGet<{ at: string; ok: boolean } | null>("lastBackupCheck", null);
+    lines.push(`🛟 ${lb?.at ? `Last backup ${new Date(lb.at).toISOString().slice(0, 10)}${lb.error ? " (upload problem)" : ""}` : "No backup yet"}${chk ? ` · last restore check ${chk.ok ? "passed" : "FAILED"}` : ""}`);
+    return { title: `FlipDesk this week: ${cur.activeSellers} active, ${cur.signups} new`, body: lines.join("\n") };
+  }
+
+  async ownerReportIfDue(now = new Date()) {
+    if (!this.multiuser) return null;
+    const o = this.ownerContact();
+    if (!o) return null;
+    const slot = weeklySlot(o.ws.db, now);
+    if (!slot.due || this.siteGet<string | null>("ownerReportWeek", null) === slot.week) return null;
+    this.siteSet("ownerReportWeek", slot.week);
+    const r = this.ownerReport();
+    return { ...r, ...(await this.tellOwner(r.title, r.body)) };
+  }
+
+  // ---------------- Friendly reminder emails (hosted) ----------------
+
+  /** Numbers that make a reminder personal: "you listed 34 items and made $412". */
+  private shopNumbers(userId: number) {
+    const ws = this.get(`u${userId}`);
+    if (!ws) return null;
+    const one = <T>(sql: string) => ws.db.prepare(sql).get() as T;
+    return {
+      items: one<{ n: number }>("SELECT COUNT(*) AS n FROM items").n,
+      live: one<{ n: number }>("SELECT COUNT(DISTINCT item_id) AS n FROM listings WHERE status = 'active'").n,
+      sold: one<{ n: number }>("SELECT COALESCE(SUM(quantity),0) AS n FROM sales").n,
+      profit: Math.round(one<{ n: number }>("SELECT COALESCE(SUM(profit),0) AS n FROM sales").n),
+      drafts: one<{ n: number }>("SELECT COUNT(*) AS n FROM items WHERE status = 'draft'").n,
+    };
+  }
+
+  /**
+   * Daily: (1) free trial ends in 3 days or less, (2) haven't been back for 14+ days (at most once a month).
+   * Only by email, only when email is set up, and people can turn them off in Settings.
+   */
+  async sendNudges() {
+    if (!this.multiuser || !(mailConfigured() || process.env.SMTP_HOST === "test")) return [];
+    const a = this.accounts!;
+    const base = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? "";
+    const link = (p: string) => (base ? `${base}${p}` : p);
+    const sent: { userId: number; kind: string }[] = [];
+    const users = a.prepare("SELECT id, email FROM users WHERE is_owner = 0 AND email_opt_out = 0").all() as { id: number; email: string }[];
+    const latestNews = (this.site.prepare("SELECT title FROM announcements WHERE archived_at IS NULL ORDER BY id DESC LIMIT 1").get() as { title: string } | undefined)?.title;
+    const once = (userId: number, kind: string, ref: string) => {
+      const r = a.prepare("INSERT OR IGNORE INTO nudges (user_id, kind, ref) VALUES (?, ?, ?)").run(userId, kind, ref);
+      return Number(r.changes) > 0;
+    };
+    for (const u of users) {
+      const nums = this.shopNumbers(u.id);
+      const stats = nums ? `So far you've added ${nums.items} item${nums.items === 1 ? "" : "s"}${nums.live ? ` (${nums.live} live)` : ""}${nums.sold ? `, sold ${nums.sold} and made $${nums.profit.toLocaleString("en-US")} profit` : ""}.` : "";
+      const b = billingSummary(this.billingRow(u.id)!);
+      if (b.status === "trial" && (b.trialDaysLeft ?? 99) <= 3 && once(u.id, "trial_ending", String(this.billingRow(u.id)!.trial_ends_at))) {
+        const days = b.trialDaysLeft === 0 ? "today" : `in ${b.trialDaysLeft} day${b.trialDaysLeft === 1 ? "" : "s"}`;
+        await sendMail(
+          u.email,
+          `Your FlipDesk trial ends ${days}`,
+          `Hi! Your free trial ends ${days}.\n\n${stats}\n\nKeep everything running (crosslisting, auto-delist, AI writing): ${link("/billing")}\n\nIf you don't subscribe, nothing is deleted: your shop just turns read-only, and sales still delist everywhere so nothing oversells.\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
+        ).catch(() => {});
+        sent.push({ userId: u.id, kind: "trial_ending" });
+        continue;
+      }
+      const last = (a.prepare("SELECT MAX(day) AS d FROM activity_days WHERE user_id = ?").get(u.id) as { d: string | null }).d;
+      if (!last) continue;
+      const idleDays = Math.floor((Date.now() - Date.parse(last + "T00:00:00Z")) / 86400_000);
+      const recent = a.prepare("SELECT 1 FROM nudges WHERE user_id = ? AND kind = 'inactive' AND sent_at >= datetime('now','-30 days')").get(u.id);
+      if (idleDays >= 14 && idleDays <= 90 && !recent && once(u.id, "inactive", last)) {
+        const tip = nums?.drafts ? `You have ${nums.drafts} draft${nums.drafts === 1 ? "" : "s"} waiting: finishing them is the quickest win.` : "Snap a few items with Shoot mode on your phone and let the AI write them.";
+        await sendMail(
+          u.email,
+          "Your FlipDesk shop misses you 👋",
+          `Hi! It's been ${idleDays} days since you stopped by.\n\n${stats} ${tip}\n${latestNews ? `\nNew since then: ${latestNews}\n` : ""}\nPick up where you left off: ${link("/")}\n\nTurn these emails off in FlipDesk → Settings → Your account.`,
+        ).catch(() => {});
+        sent.push({ userId: u.id, kind: "inactive" });
+      }
+    }
+    return sent;
+  }
+
+  // ---------------- Backup restore check ----------------
+
+  /** Prove a backup would restore (default: the newest). Tells the owner if it fails. */
+  async checkBackup(name?: string) {
+    const files = listBackups(this.dataDir);
+    const pick = name ?? files[0]?.name;
+    if (!pick) throw Object.assign(new Error("No backups to check yet"), { status: 400 });
+    const r = verifyBackup(this.backupFile(pick));
+    this.siteSet("lastBackupCheck", r);
+    if (!r.ok) await this.tellOwner("🔴 A FlipDesk backup failed its restore check", `${pick}: ${r.problems.slice(0, 3).join("; ")}\nMake a fresh backup in Settings and check it again.`);
+    return r;
+  }
+
+  /** Monthly: check the newest backup (FLIPDESK_BACKUP_CHECK_DAYS, default 30). */
+  async checkBackupIfDue() {
+    const last = this.siteGet<{ at?: string } | null>("lastBackupCheck", null);
+    const days = Number(process.env.FLIPDESK_BACKUP_CHECK_DAYS) || 30;
+    if (last?.at && Date.now() - Date.parse(last.at) < days * 86400_000) return null;
+    if (!listBackups(this.dataDir).length) return null;
+    return this.checkBackup();
   }
 
   // ---------------- The front door ----------------
@@ -1082,8 +1302,16 @@ export class Workspaces {
         user: u ? { email: u.email, owner: Boolean(u.is_owner) } : null,
         ai: u ? { used: this.aiUsedToday(u.id), limit: this.aiLimit(u.id) } : null,
         email: mailConfigured() && Boolean(process.env.PUBLIC_BASE_URL),
+        emailOptOut: u ? Boolean((this.accounts!.prepare("SELECT email_opt_out FROM users WHERE id = ?").get(u.id) as { email_opt_out: number }).email_opt_out) : false,
         canEditSite: owner(req),
       });
+    });
+    root.post("/api/account/emails", json, (req: R, res) => {
+      const u = needUser(req, res);
+      if (!u) return;
+      const optOut = z.object({ optOut: z.boolean() }).parse(req.body).optOut;
+      this.accounts!.prepare("UPDATE users SET email_opt_out = ? WHERE id = ?").run(optOut ? 1 : 0, u.id);
+      res.json({ emailOptOut: optOut });
     });
     root.post("/api/auth/password", json, (req: R, res) => {
       const u = needUser(req, res);
@@ -1154,8 +1382,9 @@ export class Workspaces {
       next();
     });
     root.get("/api/backups", (_req, res) =>
-      void res.json({ last: this.siteGet("lastBackup", null), files: listBackups(this.dataDir), offsite: s3Configured(), disabled: process.env.BACKUP_DISABLED === "1" }),
+      void res.json({ last: this.siteGet("lastBackup", null), check: this.siteGet("lastBackupCheck", null), files: listBackups(this.dataDir), offsite: s3Configured(), disabled: process.env.BACKUP_DISABLED === "1" }),
     );
+    root.post("/api/backups/:name/check", async (req, res) => void res.json(await this.checkBackup(String(req.params.name))));
     root.post("/api/backups", async (_req, res) => {
       const r = await this.backupNow();
       res.json({ last: this.siteGet("lastBackup", null), files: listBackups(this.dataDir), offsite: s3Configured(), result: { bytes: r.bytes, uploaded: r.uploaded, error: r.error ?? null } });
@@ -1183,10 +1412,26 @@ export class Workspaces {
       res.json({ ok: true });
     });
 
+    // ---- Ask FlipDesk (help chat) ----
+    root.post("/api/help/ask", json, async (req: R, res) => {
+      const b = z
+        .object({
+          question: z.string().trim().min(2, "Ask a question").max(1000),
+          page: z.string().max(200).default(""),
+          history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(8000) })).max(12).default([]),
+        })
+        .parse(req.body);
+      // Shared read-only visitors get doc search only (no AI on someone else's allowance).
+      if (req.fdShare) return void res.json({ answer: null, sources: (await import("./services/help.js")).searchDocs(b.question), demo: true });
+      const ws = this.current(req, req.fdUser ?? null);
+      res.json(await runInWorkspace(ws!, () => askHelp(b.question, b.history as HelpTurn[], b.page)));
+    });
+
     // ---- Status ----
     root.get("/api/status", (req: R, res) => {
       if (req.fdShare) return void res.status(403).json({ error: "read-only" });
-      res.json(this.status(req));
+      const isOwner = this.multiuser ? Boolean(req.fdUser?.is_owner) : true;
+      res.json({ ...this.status(req), incidents: this.recentIncidents(), backupCheck: isOwner ? this.siteGet("lastBackupCheck", null) : undefined });
     });
 
     // ---- Invite a friend (members), with a free month when they subscribe ----
@@ -1243,6 +1488,11 @@ export class Workspaces {
     root.delete("/api/admin/invites/:id", (req, res) => {
       this.accounts!.prepare("UPDATE invites SET revoked_at = datetime('now') WHERE id = ? AND used_at IS NULL").run(Number(req.params.id));
       res.json({ invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
+    });
+    root.get("/api/admin/owner-report", (_req, res) => void res.json(this.ownerReport()));
+    root.post("/api/admin/owner-report", async (_req, res) => {
+      const r = this.ownerReport();
+      res.json({ ...r, ...(await this.tellOwner(r.title, r.body)) });
     });
     root.get("/api/admin/usage", (req, res) => void res.json(this.usage(Math.min(52, Math.max(4, Number(req.query.weeks) || 12)))));
     root.get("/api/admin/announcements", (_req, res) => void res.json(this.announcementList()));

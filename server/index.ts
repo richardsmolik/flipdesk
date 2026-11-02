@@ -68,6 +68,19 @@ every(30 * 60_000, "ebay-labels", (db) => syncEbayLabelCosts(db)); // exact eBay
 every(12 * 60 * 60_000, "ebay-traffic", (db) => syncEbayTraffic(db)); // impressions/views -> "why isn't it selling"
 
 // Nightly backup of every shop (data/backups, plus cloud storage when BACKUP_S3_* is set).
-const backup = () => shops.backupIfDue().then((r) => r && console.log(`[backup] ${r.file} (${Math.round(r.bytes / 1e6)} MB)${r.uploaded ? " uploaded" : ""}${r.error ? ` - ${r.error}` : ""}`)).catch((e) => console.error("[backup]", (e as Error).message));
+const backup = () =>
+  shops
+    .backupIfDue()
+    .then((r) => r && console.log(`[backup] ${r.file} (${Math.round(r.bytes / 1e6)} MB)${r.uploaded ? " uploaded" : ""}${r.error ? ` - ${r.error}` : ""}`))
+    .then(() => shops.checkBackupIfDue()) // monthly restore drill
+    .then((c) => c && console.log(`[backup check] ${c.name}: ${c.ok ? "restores fine" : c.problems.join("; ")}`))
+    .catch((e) => console.error("[backup]", (e as Error).message));
 setInterval(backup, 60 * 60_000).unref();
 setTimeout(backup, 5 * 60_000).unref();
+
+// Watch for outages (AI, eBay, email, backups): tell the owner, post/remove a heads-up for everyone.
+const guard = (name: string, fn: () => Promise<unknown>) => () => void fn().catch((e) => console.error(`[${name}]`, (e as Error).message));
+setInterval(guard("incidents", () => shops.checkIncidents()), 2 * 60_000).unref();
+// Hosted: owner's weekly report (your weekly-summary day/hour) and friendly reminder emails.
+setInterval(guard("owner-report", () => shops.ownerReportIfDue()), 15 * 60_000).unref();
+setInterval(guard("nudges", () => shops.sendNudges()), 60 * 60_000).unref();

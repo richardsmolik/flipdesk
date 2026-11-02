@@ -5,17 +5,17 @@
  */
 import { currentWorkspace } from "./context.js";
 
-export interface Check { ok: number; fail: number; lastOk?: string; lastFail?: string; lastError?: string }
+export interface Check { ok: number; fail: number; streak: number; lastOk?: string; lastFail?: string; lastError?: string }
 const global = new Map<string, Check>();
 const perShop = new Map<string, Map<string, Check>>();
 const seen = new Map<string, string>(); // `${shop}:${what}` -> last time
 export const startedAt = new Date().toISOString();
 
 function bump(map: Map<string, Check>, key: string, ok: boolean, err?: string) {
-  const c = map.get(key) ?? { ok: 0, fail: 0 };
+  const c = map.get(key) ?? { ok: 0, fail: 0, streak: 0 };
   const now = new Date().toISOString();
-  if (ok) (c.ok++, (c.lastOk = now));
-  else (c.fail++, (c.lastFail = now), (c.lastError = (err ?? "failed").slice(0, 300)));
+  if (ok) (c.ok++, (c.lastOk = now), (c.streak = 0));
+  else (c.fail++, c.streak++, (c.lastFail = now), (c.lastError = (err ?? "failed").slice(0, 300)));
   map.set(key, c);
 }
 

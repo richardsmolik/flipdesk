@@ -96,6 +96,14 @@ export function buildDigest(db: Db) {
   };
 }
 
+/** Is it time for this week's summary (your day + hour, your time zone)? */
+export function weeklySlot(db: Db, now = new Date()) {
+  const ws = getSetting<WeeklySettings>(db, "weekly", {});
+  const tz = ws.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const lp = localParts(now, tz);
+  return { week: isoWeek(lp.ymd), due: ws.enabled !== false && lp.dow === (ws.day ?? 1) && lp.hour >= (ws.hour ?? 8) };
+}
+
 export async function sendDigest(db: Db, opts: { force?: boolean; now?: Date } = {}) {
   const ws = getSetting<WeeklySettings>(db, "weekly", {});
   const tz = ws.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
