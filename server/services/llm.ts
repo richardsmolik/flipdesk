@@ -87,6 +87,7 @@ function charge(provider: ProviderId, model: string, task: string, inTokens: num
   } catch {
     /* tracking never breaks a request */
   }
+  return cost;
 }
 
 // ---------------- Models ----------------
@@ -151,6 +152,8 @@ export interface AskOpts {
   images?: Img[];
   effort?: "low" | "medium" | "high";
   maxTokens?: number;
+  /** Use exactly this AI (no fallback): for comparing AIs, e.g. the backtest. */
+  only?: ProviderId;
 }
 export class AiRefusal extends Error {}
 
@@ -191,11 +194,11 @@ async function openaiStyle(id: ProviderId, o: AskOpts, schema?: z.ZodType) {
   }
   const j = JSON.parse(raw) as { model?: string; choices?: { message?: { content?: string | null; refusal?: string | null }; finish_reason?: string }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
   const ch = j.choices?.[0];
-  charge(id, j.model ?? model, o.task, j.usage?.prompt_tokens ?? 0, j.usage?.completion_tokens ?? 0);
+  const cost = charge(id, j.model ?? model, o.task, j.usage?.prompt_tokens ?? 0, j.usage?.completion_tokens ?? 0);
   if (ch?.message?.refusal || ch?.finish_reason === "content_filter") throw new AiRefusal(ch?.message?.refusal || "declined");
   const content = ch?.message?.content ?? "";
   if (ch?.finish_reason === "length") throw new Error(`${PROVIDERS[id].name}: the answer was cut off`);
-  return { content, model: j.model ?? model };
+  return { content, model: j.model ?? model, cost };
 }
 
 async function claude(o: AskOpts, schema?: z.ZodType) {
@@ -220,15 +223,15 @@ async function claude(o: AskOpts, schema?: z.ZodType) {
     : await client.beta.messages.create({ ...params, output_config: { effort: o.effort ?? "low" } } as never);
   const res = r as unknown as { model: string; stop_reason: string; parsed_output?: unknown; content: { type: string; text?: string }[]; usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } };
   const u = res.usage ?? {};
-  charge("claude", res.model ?? model, o.task, (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) * 1.25 + (u.cache_read_input_tokens ?? 0) * 0.1, u.output_tokens ?? 0);
+  const cost = charge("claude", res.model ?? model, o.task, (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) * 1.25 + (u.cache_read_input_tokens ?? 0) * 0.1, u.output_tokens ?? 0);
   if (res.stop_reason === "refusal") throw new AiRefusal("declined");
   if (res.stop_reason === "max_tokens") throw new Error("Claude: the answer was cut off");
-  return { res, model: res.model ?? model };
+  return { res, model: res.model ?? model, cost };
 }
 
 /** Try each provider in turn. Refusals stop (another AI shouldn't be shopped for the same request). */
 async function viaProviders<T>(o: AskOpts, run: (id: ProviderId) => Promise<T>) {
-  const order = plan({ images: Boolean(o.images?.length) });
+  const order = o.only ? (providerReady(o.only) ? [o.only] : []) : plan({ images: Boolean(o.images?.length) });
   if (!order.length) throw Object.assign(new Error(o.images?.length ? "No AI that can read photos is set up. Add a key in Settings → AI." : "No AI is set up. Add a key in Settings → AI."), { status: 400 });
   const errors: string[] = [];
   for (const id of order) {
@@ -250,14 +253,14 @@ async function viaProviders<T>(o: AskOpts, run: (id: ProviderId) => Promise<T>) 
 }
 
 /** A structured answer (validated against the schema) from the first provider that manages it. */
-export async function askStructured<S extends z.ZodType>(o: AskOpts, schema: S): Promise<{ output: z.infer<S>; provider: ProviderId; model: string; fellBack: string[] }> {
+export async function askStructured<S extends z.ZodType>(o: AskOpts, schema: S): Promise<{ output: z.infer<S>; provider: ProviderId; model: string; fellBack: string[]; cost: number }> {
   const r = await viaProviders(o, async (id) => {
     if (id === "claude") {
-      const { res, model } = await claude(o, schema);
+      const { res, model, cost } = await claude(o, schema);
       if (!res.parsed_output) throw new Error("Claude: no answer");
-      return { output: res.parsed_output as z.infer<S>, model };
+      return { output: res.parsed_output as z.infer<S>, model, cost };
     }
-    const { content, model } = await openaiStyle(id, o, schema);
+    const { content, model, cost } = await openaiStyle(id, o, schema);
     let parsed: unknown;
     try {
       parsed = JSON.parse(stripFences(content));
@@ -266,9 +269,9 @@ export async function askStructured<S extends z.ZodType>(o: AskOpts, schema: S):
     }
     const ok = schema.safeParse(parsed);
     if (!ok.success) throw new Error(`the answer didn't match the format (${ok.error.issues[0]?.path.join(".")}: ${ok.error.issues[0]?.message})`);
-    return { output: ok.data as z.infer<S>, model };
+    return { output: ok.data as z.infer<S>, model, cost };
   });
-  return { output: r.out.output, model: r.out.model, provider: r.provider, fellBack: r.fellBack };
+  return { output: r.out.output, model: r.out.model, provider: r.provider, fellBack: r.fellBack, cost: r.out.cost };
 }
 
 /** A plain-text answer. */

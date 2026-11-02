@@ -191,6 +191,21 @@ FlipDesk works with any of these. Add one key or several, either in the server's
 - **Privacy.** DeepSeek and Kimi (Moonshot AI) are companies based in China, so photos and text sent to them are processed there. On Google AI Studio's free tier, Google may use what you send to improve its products. Leave a provider out of the list to never use it.
 - **Spending.** Every call's tokens are counted and priced at list prices. These are estimates: set what you actually pay under each provider in Settings → AI. Settings → AI shows this month's spend by AI, by feature and by member. Set a **monthly limit**, and (hosted) a **per-member monthly limit**, which doesn't apply to you. You get alerts at 80% and 100%. At the limit AI pauses until the 1st; writing and listing by hand still work.
 
+### Which AI prices best? (backtest on your own sales)
+
+Reports → **Which AI prices best?** tests the AIs you pick on items you've already sold. Each one gets only what was known the day you listed the item: its details (and photos, if you tick that) and comps that had sold before that day. It never sees the sale. FlipDesk then compares each guess with what the item actually sold for, and with how many days it took.
+
+- **Scores:**
+  - **Typical miss:** half the guesses were closer than this.
+  - **Within 20%.**
+  - **Leans:** whether it guesses too high or too low on average.
+  - **Average miss in dollars.**
+  - **Days-to-sell miss.**
+- **Baselines:** your own list price and a plain comp average (no AI), so you can see whether AI beats what you'd do anyway.
+- **Before it runs:** it shows how many requests it will make and roughly what they'll cost. Every request counts against the AI budget and allowances, and a run stops if a limit is reached.
+- **Results:** a winner needs 5+ answers. If your own prices were closer, it says so. One button puts the winner first for listings. The last 5 runs are kept.
+- **Limits of the test:** AIs still know general prices from training, and items edited after selling show their final details. A few items are a hint; 50+ are evidence.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:

@@ -7,6 +7,8 @@ import { z } from "zod/v4";
 import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting, tx, type Db, type ItemRow, type JobRow, type ListingRow } from "./db.js";
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
 import { ebaySmokeTest, runWeeklyEbay, weeklyEbay } from "./services/ebaySmoke.js";
+import { estimateCost, getBacktest, listBacktests, pickCases, startBacktest } from "./services/backtest.js";
+import { PROVIDER_IDS, PROVIDERS, providerReady, type ProviderId } from "./services/llm.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
@@ -849,6 +851,29 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const r = await ebaySmokeTest(db, uploadDir, { allowProduction });
     setSetting(db, "ebaySmoke", r);
     res.json(r);
+  });
+
+  // AI backtest: each AI prices items you already sold (only knowing what was known at listing time); scored against what happened.
+  const Prov = z.enum(PROVIDER_IDS as [ProviderId, ...ProviderId[]]);
+  api.get("/backtest", (_req, res) => {
+    const sold = (db.prepare("SELECT COUNT(DISTINCT item_id) AS n FROM sales WHERE sale_price > 0").get() as { n: number }).n;
+    res.json({ runs: listBacktests(db), sold, providers: PROVIDER_IDS.filter(providerReady).map((id) => ({ id, name: PROVIDERS[id].name })) });
+  });
+  api.get("/backtest/estimate", (req, res) => {
+    const q = z.object({ n: z.coerce.number().int().min(3).max(100).default(20), providers: z.string().default(""), photos: z.enum(["0", "1"]).default("0") }).parse(req.query);
+    const providers = q.providers.split(",").filter(Boolean).map((x) => Prov.parse(x));
+    const cases = pickCases(db, q.n).length;
+    res.json({ cases, ...estimateCost(cases, providers, q.photos === "1") });
+  });
+  api.post("/backtest", (req, res) => {
+    const b = z.object({ n: z.number().int().min(3).max(100).default(20), providers: z.array(Prov).min(1).max(5), photos: z.boolean().default(false) }).parse(req.body);
+    const { backtest } = startBacktest(db, b);
+    res.json({ id: backtest.id, total: backtest.total });
+  });
+  api.get("/backtest/:id", (req, res) => {
+    const b = getBacktest(db, String(req.params.id));
+    if (!b) return void res.status(404).json({ error: "Not found" });
+    res.json(b);
   });
 
   // Weekly eBay check (full test on the sandbox, read-only on a real account).

@@ -305,3 +305,100 @@ describe("fire drill", () => {
     expect(bad.problems[0]).toMatch(/1 of 4 photos aren't in the backup/);
   });
 });
+
+import { pickCases, score } from "../server/services/backtest.js";
+
+describe("AI backtest on your past sales", () => {
+  const shop = () => {
+    const shops = new Workspaces({ dataDir: dir, mainDb: path.join(dir, "flipdesk.db"), mainUploads: path.join(dir, "uploads"), password: "" });
+    const db = shops.get("main")!.db;
+    const actual: Record<string, number> = {};
+    for (let i = 1; i <= 8; i++) {
+      const title = `Vintage Levis 501 jeans lot ${i}`;
+      const id = Number(db.prepare("INSERT INTO items (sku, title, brand, price, original_price, status, created_at) VALUES (?, ?, 'Levis', ?, ?, 'sold', '2026-03-01 10:00:00')").run(`L${i}`, title, 40 + i, 40 + i).lastInsertRowid);
+      db.prepare("INSERT INTO listings (item_id, marketplace, status, price, listed_at) VALUES (?, 'ebay', 'sold', ?, '2026-03-02 10:00:00')").run(id, 40 + i);
+      actual[title] = 30 + i * 2;
+      db.prepare("INSERT INTO sales (item_id, marketplace, quantity, sale_price, sold_at) VALUES (?, 'ebay', 1, ?, ?)").run(id, actual[title], `2026-03-${String(10 + i).padStart(2, "0")} 10:00:00`);
+    }
+    // comps: three before the listing date, one AFTER (must never be shown)
+    for (const [p, d] of [[33, "2026-02-01"], [35, "2026-02-10"], [37, "2026-02-20"], [999, "2026-04-01"]] as const)
+      db.prepare("INSERT INTO sold_comps (source, title, title_norm, price, sold_at) VALUES ('csv', 'Levis 501 vintage jeans', 'levis 501 vintage jeans', ?, ?)").run(p, d);
+    return { shops, db, actual, app: express().use(shops.handler()) };
+  };
+
+  it("only uses what was known on the listing day", () => {
+    const { db } = shop();
+    const cases = pickCases(db, 20);
+    expect(cases).toHaveLength(8);
+    expect(cases[0]).toMatchObject({ listedAt: "2026-03-02 10:00:00", actual: 46, actualDays: 16, yourPrice: 48, compMedian: 35 });
+    expect(cases[0].compsBefore.map((c) => c.price)).toEqual(expect.not.arrayContaining([999]));
+  });
+
+  it("asks each AI blind, scores it against what sold, crowns the closest, and keeps the baselines honest", async () => {
+    const { app, actual } = shop();
+    process.env.OPENAI_API_KEY = "o";
+    process.env.OPENAI_MODEL = "gpt-9";
+    process.env.MOONSHOT_API_KEY = "k";
+    process.env.KIMI_MODEL = "kimi-k9";
+    const prompts: string[] = [];
+    const answer = (factor: number) => (b: Record<string, unknown>) => {
+      const text = (b.messages as { content: string }[]).at(-1)!.content;
+      prompts.push(text);
+      const title = text.match(/Title: (.*)/)![1];
+      return chat(JSON.stringify({ price: actual[title] * factor, quick_sale: actual[title] * factor * 0.85, days_to_sell: 10, confidence: "medium" }));
+    };
+    fakeAi({ "api.openai.com": answer(1.05), "api.moonshot.ai": answer(1.5) });
+    const est = (await request(app).get("/api/backtest/estimate?n=20&providers=openai,kimi").expect(200)).body;
+    expect(est).toMatchObject({ cases: 8, requests: 16 });
+    const { id } = (await request(app).post("/api/backtest").send({ n: 20, providers: ["openai", "kimi"] }).expect(200)).body;
+    let run: { status: string; winner: string; scores: { predictor: string; medianAbsPct: number; within20: number; bias: number; n: number; daysMedianErr: number }[]; rows: unknown[]; cost: number } = { status: "running" } as never;
+    for (let i = 0; i < 50 && run.status === "running"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      run = (await request(app).get(`/api/backtest/${id}`).expect(200)).body;
+    }
+    expect(run.status).toBe("done");
+    expect(run.winner).toBe("openai");
+    const sc = Object.fromEntries(run.scores.map((x) => [x.predictor, x]));
+    expect(sc.openai).toMatchObject({ n: 8, medianAbsPct: 5, within20: 100, bias: 5 });
+    expect(sc.kimi).toMatchObject({ medianAbsPct: 50, within20: 0, bias: 50 });
+    expect(sc.you.n).toBe(8);
+    expect(sc.comps.n).toBe(8);
+    expect(run.cost).toBeGreaterThan(0);
+    // fair test: no AI saw the sale price, the sale date or the later comp
+    for (const p of prompts) {
+      expect(p).toMatch(/^Today is 2026-03-02\./);
+      expect(p).not.toMatch(/\$999|2026-04-01|sold for|2026-03-1\d/);
+    }
+    expect((await request(app).get("/api/backtest").expect(200)).body.runs[0]).toMatchObject({ id, status: "done", winner: "openai" });
+  });
+
+  it("stops at the spending limit, and needs 3+ sales and a key", async () => {
+    const { app, shops, db } = shop();
+    await request(app).post("/api/backtest").send({ providers: ["openai"] }).expect(400); // no key yet
+    process.env.OPENAI_API_KEY = "o";
+    process.env.OPENAI_MODEL = "gpt-9";
+    fakeAi({ "api.openai.com": () => chat(JSON.stringify({ price: 40, quick_sale: 35, days_to_sell: 9, confidence: "low" })) });
+    shops.siteSet("aiBudget", { monthly: 0.015, perMember: null }); // about one request
+    const { id } = (await request(app).post("/api/backtest").send({ providers: ["openai"] }).expect(200)).body;
+    let run = { status: "running", rows: [] as { error?: string }[] };
+    for (let i = 0; i < 50 && run.status === "running"; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      run = (await request(app).get(`/api/backtest/${id}`)).body;
+    }
+    expect(run.rows.filter((r) => !r.error).length).toBeLessThanOrEqual(3); // 3 at a time; then the limit stops it
+    expect(run.rows.some((r) => /budget/.test(r.error ?? ""))).toBe(true);
+    expect(run.rows.length).toBeLessThan(8);
+    await request(app).post("/api/backtest").send({ providers: ["openai"] }).expect(429); // budget used up: doesn't even start
+    db.exec("DELETE FROM sales WHERE id > 2");
+    shops.siteSet("aiBudget", {});
+    expect((await request(app).post("/api/backtest").send({ providers: ["openai"] }).expect(400)).body.error).toMatch(/Only 2 sold items/);
+  });
+
+  it("scores a guess that's always 10% low as leaning low", () => {
+    const cases = [1, 2, 3, 4, 5].map((i) => ({ saleId: i, itemId: i, title: "x", listedAt: "", soldAt: "", actual: 100, actualDays: 10, yourPrice: 120, compsBefore: [], compMedian: null }));
+    const s = score(cases, cases.map((c) => ({ saleId: c.saleId, predictor: "gemini", price: 90, days: 4 })), ["gemini"]);
+    expect(s.scores[0]).toMatchObject({ medianAbsPct: 10, bias: -10, daysMedianErr: 6, within20: 100 });
+    expect(s.scores.find((x) => x.predictor === "you")).toMatchObject({ medianAbsPct: 20, bias: 20 });
+    expect(s.winner).toBe("gemini");
+  });
+});
