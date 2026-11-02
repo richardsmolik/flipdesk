@@ -5,6 +5,21 @@ import { timeAgo, toast } from "../ui";
 interface Step { name: string; ok: boolean; ms: number; detail: string }
 interface Result { ok: boolean; env: string; steps: Step[]; error: string | null; ranAt: string }
 
+/** Plain text of a test run to paste into a message (no keys or tokens: just steps, times and eBay's words). */
+export function resultText(title: string, r: Result & { kind?: string }) {
+  return [
+    `${title}: ${r.ok ? "PASSED" : "FAILED"} · ${r.env}${r.kind ? ` · ${r.kind}` : ""} · ${new Date(r.ranAt).toLocaleString()}`,
+    ...r.steps.map((s) => `${s.ok ? "✓" : "✕"} ${s.name}: ${s.detail}${s.ms > 50 ? ` (${(s.ms / 1000).toFixed(1)} s)` : ""}`),
+    ...(r.error && !r.steps.some((s) => !s.ok) ? [`Error: ${r.error}`] : []),
+  ].join("\n");
+}
+const copy = (text: string) => {
+  navigator.clipboard?.writeText(text).then(
+    () => toast("Copied. Paste it into your message."),
+    () => toast("Couldn't copy: select the text and copy it by hand", "err"),
+  );
+};
+
 /** One click: list a test item on eBay's sandbox, end it, clean up. Proves the whole eBay path. */
 export default function EbaySmoke() {
   const [r, setR] = useState<Result | null>(null);
@@ -45,6 +60,7 @@ export default function EbaySmoke() {
             ))}
           </ol>
           {!r.ok && !production && r.steps.some((s) => s.name === "Reach your eBay account") && <p className="text-xs text-zinc-500">A problem report was saved (Inbox → 📮 Send report) so it can be reproduced and fixed.</p>}
+          <button className="btn-ghost text-xs" onClick={() => copy(resultText("FlipDesk eBay end-to-end test", r))}>📋 Copy results to share</button>
           {production && (
             <button className="btn-ghost text-xs text-amber-300" disabled={busy} onClick={() => confirm("This creates a REAL eBay listing for a few seconds, then ends it. eBay may count it toward your free listings. Continue?") && run(true)}>
               Test on real eBay anyway
@@ -94,6 +110,7 @@ function WeeklyCheck() {
               ))}
             </ol>
           )}
+          <button className="ml-2 text-zinc-400 underline hover:text-zinc-100" onClick={() => copy(resultText("FlipDesk weekly eBay check", last))}>📋 Copy results</button>
         </div>
       ) : (
         <p className="text-xs text-zinc-500">{w.connected ? "First check runs within a few hours." : "Starts once eBay is connected."}</p>

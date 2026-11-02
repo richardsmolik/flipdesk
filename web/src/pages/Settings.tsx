@@ -306,9 +306,12 @@ function AlertSettings() {
 
 interface PasskeyRow { id: string; name: string; device: string; created_at: string; last_used_at: string | null }
 function Passkeys() {
-  const [st, setSt] = useState<{ passkeys: PasskeyRow[]; unavailable?: string } | null>(null);
+  type St = { passkeys: PasskeyRow[]; unavailable?: string; passkeyOnly?: boolean; recoveryLeft?: number };
+  const [st, setSt] = useState<St | null>(null);
   const [busy, setBusy] = useState(false);
-  useEffect(() => void api.get<{ passkeys: PasskeyRow[]; unavailable?: string }>("/api/passkeys").then(setSt).catch(() => setSt(null)), []);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const reload = () => api.get<St>("/api/passkeys").then(setSt).catch(() => setSt(null));
+  useEffect(() => void reload(), []);
   if (!st) return null;
   const supported = browserSupportsWebAuthn();
   const add = async () => {
@@ -317,7 +320,7 @@ function Passkeys() {
       const options = await api.post<Parameters<typeof startRegistration>[0]["optionsJSON"]>("/api/passkeys/register/options");
       const response = await startRegistration({ optionsJSON: options });
       const r = await api.post<{ passkeys: PasskeyRow[] }>("/api/passkeys/register", { response });
-      setSt({ passkeys: r.passkeys });
+      setSt({ ...st!, passkeys: r.passkeys });
       toast("Passkey added. Next time, tap “Sign in with a passkey”.");
     } catch (e) {
       const m = (e as Error).message;
@@ -343,7 +346,7 @@ function Passkeys() {
                 className="btn-ghost text-xs"
                 onClick={async () => {
                   const name = prompt("Name this passkey (e.g. “My iPhone”)", k.name);
-                  if (name?.trim()) setSt({ passkeys: (await api.patch<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`, { name: name.trim() })).passkeys });
+                  if (name?.trim()) setSt({ ...st, passkeys: (await api.patch<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`, { name: name.trim() })).passkeys });
                 }}
               >
                 Rename
@@ -352,7 +355,11 @@ function Passkeys() {
                 className="btn-ghost text-xs text-red-300"
                 onClick={async () => {
                   if (!confirm(`Remove “${k.name}”? That device won't be able to sign in with it any more.`)) return;
-                  setSt({ passkeys: (await api.del<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`)).passkeys });
+                  try {
+                    setSt({ ...st, passkeys: (await api.del<{ passkeys: PasskeyRow[] }>(`/api/passkeys/${encodeURIComponent(k.id)}`)).passkeys });
+                  } catch (e) {
+                    toast((e as Error).message, "err");
+                  }
                 }}
               >
                 Remove
@@ -367,7 +374,48 @@ function Passkeys() {
         ) : (
           <p className="text-xs text-zinc-500">This browser can't make passkeys. Try Safari, Chrome or Edge on a recent phone or computer.</p>
         ))}
-      <p className="text-xs text-zinc-500">Keep your password too: it's the way back in if you lose every device.</p>
+      {codes && (
+        <div className="space-y-2 rounded-md border border-amber-800 bg-amber-950/30 p-3">
+          <div className="text-sm font-medium text-amber-200">Save these recovery codes now. If you lose every passkey, one of them signs you in (once) and turns passkey-only off. They won't be shown again.</div>
+          <pre className="grid grid-cols-2 gap-1 font-mono text-sm text-zinc-100">{codes.join("\n")}</pre>
+          <div className="flex gap-2">
+            <button className="btn-ghost text-xs" onClick={() => (navigator.clipboard?.writeText(codes.join("\n")), toast("Copied"))}>Copy</button>
+            <a className="btn-ghost text-xs" download="flipdesk-passkey-recovery-codes.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(`FlipDesk passkey recovery codes (each works once)\n\n${codes.join("\n")}\n`)}`}>Download</a>
+            <button className="btn-primary text-xs" onClick={() => setCodes(null)}>I saved them</button>
+          </div>
+        </div>
+      )}
+      {!st.unavailable && st.passkeys.length > 0 && (
+        <div className="space-y-1 border-t border-zinc-800 pt-3">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={Boolean(st.passkeyOnly)}
+              disabled={!st.passkeyOnly && st.passkeys.length < 2}
+              onChange={async (e) => {
+                const on = e.target.checked;
+                if (on && !confirm("Turn off password sign-in? From now on only your passkeys sign you in. You'll get recovery codes for emergencies.")) return;
+                try {
+                  const r = await api.post<{ passkeyOnly: boolean; recoveryCodes?: string[] }>("/api/passkeys/only", { on });
+                  if (r.recoveryCodes) setCodes(r.recoveryCodes);
+                  await reload();
+                  toast(on ? "Passkey-only sign-in is on" : "Password sign-in is back on");
+                } catch (x) {
+                  toast((x as Error).message, "err");
+                }
+              }}
+            />
+            <span>
+              <span className="font-medium">Passkey-only sign-in</span> {st.passkeyOnly && <span className="text-xs text-green-400">on · {st.recoveryLeft} recovery codes left</span>}
+              <span className="block text-xs text-zinc-500">
+                {st.passkeys.length < 2 && !st.passkeyOnly ? "Add a second passkey (e.g. your phone and your computer) to turn this on. " : ""}Your password stops working for sign-in, so a leaked or guessed password is useless. Recovery codes get you in if you lose every passkey.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+      <p className="text-xs text-zinc-500">{st.passkeyOnly ? "Keep your recovery codes somewhere safe: they're the way back in if you lose every device." : "Keep your password too: it's the way back in if you lose every device."}</p>
     </section>
   );
 }

@@ -40,6 +40,9 @@ export function AuthScreen() {
   const [tab, setTab] = useState<"in" | "up" | "forgot">("in");
   const [sent, setSent] = useState<null | { emailed: boolean }>(null);
   const [ticket, setTicket] = useState<string | null>(null);
+  // "code": a code we emailed/phoned because this looked suspicious; "2fa": the authenticator app.
+  const [ticketKind, setTicketKind] = useState<{ kind: "2fa" | "code"; sentTo?: string }>({ kind: "2fa" });
+  const [recover, setRecover] = useState(false);
   // /join?invite=... : a personal invite link fills in the code and opens "Create account".
   const inviteFromLink = location.pathname === "/join" ? new URLSearchParams(location.search).get("invite") ?? "" : "";
   const [inviteOk, setInviteOk] = useState<boolean | null>(null);
@@ -79,13 +82,15 @@ export function AuthScreen() {
     setBusy(true);
     try {
       if (tab === "forgot") return void setSent(await api.post<{ emailed: boolean }>("/api/auth/forgot", { email: f.email }));
-      if (ticket) await api.post("/api/login/2fa", { ticket, code: f.code });
+      if (recover) await api.post("/api/passkeys/recover", { email: accounts ? f.email : undefined, code: f.code });
+      else if (ticket) await api.post(ticketKind.kind === "code" ? "/api/login/verify" : "/api/login/2fa", { ticket, code: f.code });
       else {
-        let r: { needs2fa?: boolean; ticket?: string } = {};
+        let r: { needs2fa?: boolean; needsCode?: boolean; sentTo?: string; ticket?: string } = {};
         if (!accounts) r = await api.post("/api/login", { password: f.password });
         else if (tab === "in") r = await api.post("/api/auth/login", { email: f.email, password: f.password });
         else await api.post("/api/auth/signup", { email: f.email, password: f.password, invite: f.invite || undefined });
-        if (r.needs2fa && r.ticket) return void setTicket(r.ticket); // step 2: the code from the authenticator app
+        if (r.needs2fa && r.ticket) return void (setTicketKind({ kind: "2fa" }), setTicket(r.ticket)); // step 2: the code from the authenticator app
+        if (r.needsCode && r.ticket) return void (setTicketKind({ kind: "code", sentTo: r.sentTo }), setTicket(r.ticket)); // looked suspicious: code we sent
       }
       done();
     } catch (x) {
@@ -98,7 +103,26 @@ export function AuthScreen() {
     <div className="flex min-h-screen items-center justify-center p-4">
       <form className="card w-full max-w-sm space-y-3 p-6" onSubmit={submit}>
         <div className="text-lg font-bold">📦 Flip<span className="text-brand">Desk</span></div>
-        {ticket ? (
+        {recover ? (
+          <>
+            <p className="text-sm text-zinc-300">Lost your passkeys? Type one of the recovery codes you saved when you turned on passkey-only sign-in. It signs you in once and turns passkey-only off, so you can add new passkeys.</p>
+            {accounts && <input className="input" type="email" autoComplete="email" placeholder="Email" required value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} />}
+            <input className="input text-center font-mono tracking-widest" autoFocus placeholder="abcde-12345" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
+            {err && <div className="text-sm text-red-400">{err}</div>}
+            <button className="btn-primary w-full" disabled={busy || f.code.trim().length < 6}>{busy ? "…" : "Sign in with recovery code"}</button>
+            <p className="text-xs text-zinc-500">No codes either? {accounts ? "Ask the owner of this FlipDesk to turn passkey-only off for you." : "Restart the server once with FLIPDESK_PASSKEY_RESET=1 (then remove it) and sign in with your password."}</p>
+            <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (setRecover(false), setErr(""), setF({ ...f, code: "" }))}>← Back</button>
+          </>
+        ) : ticket ? (
+          ticketKind.kind === "code" ? (
+          <>
+            <p className="text-sm text-zinc-300">🛡️ For your safety: there were several wrong passwords before this sign-in, and we don't recognize this device. We sent a 6-digit code to your {ticketKind.sentTo === "phone" ? "phone (FlipDesk alerts)" : "email"}.</p>
+            <input className="input text-center font-mono text-lg tracking-widest" inputMode="numeric" autoComplete="one-time-code" autoFocus maxLength={8} placeholder="123456" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
+            {err && <div className="text-sm text-red-400">{err}</div>}
+            <button className="btn-primary w-full" disabled={busy || f.code.trim().length < 6}>{busy ? "…" : "Sign in"}</button>
+            <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (setTicket(null), setF({ ...f, code: "" }))}>← Start over</button>
+          </>
+          ) : (
           <>
             <p className="text-sm text-zinc-300">Enter the 6-digit code from your authenticator app.</p>
             <input className="input text-center font-mono text-lg tracking-widest" inputMode="numeric" autoComplete="one-time-code" autoFocus maxLength={12} placeholder="123456" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
@@ -107,6 +131,7 @@ export function AuthScreen() {
             <button className="btn-primary w-full" disabled={busy || f.code.trim().length < 6}>{busy ? "…" : "Sign in"}</button>
             <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (setTicket(null), setF({ ...f, code: "" }))}>← Start over</button>
           </>
+          )
         ) : (
         <>
         {accounts && (
@@ -144,6 +169,11 @@ export function AuthScreen() {
         {tab === "in" && passkeyOk && (
           <button type="button" className="btn-ghost w-full" disabled={busy} onClick={passkey}>
             🔑 Sign in with a passkey
+          </button>
+        )}
+        {tab === "in" && (
+          <button type="button" className="block w-full text-center text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (setRecover(true), setErr(""), setF({ ...f, code: "" }))}>
+            Lost your passkeys? Use a recovery code
           </button>
         )}
         </>

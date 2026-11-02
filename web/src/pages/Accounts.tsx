@@ -4,7 +4,7 @@ import { timeAgo, toast } from "../ui";
 import { WeeklyBars } from "../components/WeeklyBars";
 
 interface Acct {
-  id: number; email: string; owner: boolean; createdAt: string; lastLoginAt: string | null; items: number; sales30: number; aiToday: number; aiLimit: number | null; aiLimitCustom: number | null; onLeaderboard: boolean;
+  id: number; email: string; owner: boolean; createdAt: string; lastLoginAt: string | null; items: number; sales30: number; aiToday: number; aiLimit: number | null; aiLimitCustom: number | null; onLeaderboard: boolean; passkeyOnly?: boolean;
   invitedBy: string | null;
   billing: { enabled: boolean; status: string; trialDaysLeft: number | null };
 }
@@ -506,6 +506,20 @@ export default function Accounts() {
                 <td className="text-zinc-400">{a.lastLoginAt ? timeAgo(a.lastLoginAt) : "never"}</td>
                 <td className="whitespace-nowrap p-3 text-right">
                   <button className="btn-ghost px-2 py-1 text-xs" onClick={async () => setLink({ email: a.email, url: (await api.post<{ link: string }>(`/api/admin/accounts/${a.id}/reset-link`)).link })}>Reset link</button>
+                  {a.passkeyOnly && (
+                    <button
+                      className="btn-ghost px-2 py-1 text-xs"
+                      title="They lost every passkey and their recovery codes"
+                      onClick={async () => {
+                        if (!confirm(`Turn off passkey-only sign-in for ${a.email}? Only do this after checking it's really them. Then send them a reset link.`)) return;
+                        await api.post(`/api/admin/accounts/${a.id}/passkey-only-off`);
+                        toast("Passkey-only is off. Now send them a reset link.");
+                        load();
+                      }}
+                    >
+                      🔑 Passkey-only off
+                    </button>
+                  )}
                   {!a.owner && (
                     <button
                       className="btn-ghost ml-1 px-2 py-1 text-xs text-red-300"

@@ -14,6 +14,8 @@ import { sendDigest } from "./services/digest.js";
 import { syncEbayLabelCosts } from "./services/shipping.js";
 import { syncEbayTraffic } from "./services/traffic.js";
 import { ebayCheckIfDue } from "./services/ebaySmoke.js";
+import { markGood, noteStart } from "./services/versions.js";
+import { safeMode } from "./safeMode.js";
 
 // Minimal .env loader (no dependency).
 if (fs.existsSync(".env")) {
@@ -24,7 +26,18 @@ if (fs.existsSync(".env")) {
 }
 
 // Your shop + the sample shop (or, with FLIPDESK_MULTIUSER=1, one shop per account). See workspaces.ts.
-const shops = new Workspaces();
+const dataDir = path.dirname(process.env.FLIPDESK_DB ?? "data/flipdesk.db");
+noteStart(dataDir); // which version is starting (see services/versions.ts)
+let shops: Workspaces;
+try {
+  shops = new Workspaces();
+} catch (e) {
+  // Can't open the data with this version: explain, and go back to the last good version by itself if it can.
+  const safe = await safeMode(dataDir, e as Error);
+  safe.app.listen(Number(process.env.PORT ?? 8787), process.env.HOST ?? "127.0.0.1");
+  await new Promise(() => {}); // serve the explanation until the machine is switched back
+  throw e;
+}
 const app = express();
 app.set("trust proxy", 1); // behind Fly/Cloudflare/Render HTTPS proxies
 app.disable("x-powered-by");
@@ -50,6 +63,7 @@ if (!["127.0.0.1", "localhost", "::1"].includes(host) && !process.env.FLIPDESK_P
 }
 app.listen(port, host, () => {
   console.log(`FlipDesk API on http://${host}:${port}`);
+  markGood(dataDir); // this version opened its data and is serving
   if (shops.multiuser) console.log(`Accounts mode: ${shops.signupsOpen() ? "sign-ups open" : "sign-ups closed (set FLIPDESK_INVITE_CODE)"}`);
   else {
     const main = shops.get("main")!;
@@ -92,4 +106,6 @@ setInterval(guard("owner-report", () => shops.ownerReportIfDue()), 15 * 60_000).
 setInterval(guard("nudges", () => shops.sendNudges()), 60 * 60_000).unref();
 // Nightly self-check: speed of the main screens, database health, disk space (alerts the owner on problems).
 setInterval(guard("self-check", () => shops.selfCheckIfDue()), 60 * 60_000).unref();
+// Speed from real use: save today's timings, tell the owner once a day if a screen is slow for real users.
+setInterval(guard("real-speed", () => shops.flushRealSpeed()), 60 * 60_000).unref();
 setTimeout(guard("self-check", () => shops.selfCheckIfDue()), 10 * 60_000).unref();

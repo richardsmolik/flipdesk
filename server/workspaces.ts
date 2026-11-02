@@ -34,6 +34,8 @@ import { runSelfCheck, speedLine, speedTrend, type SelfCheck } from "./services/
 import { newRecoveryCodes, newSecret, otpauthUrl, useRecoveryCode, verifyTotp } from "./services/totp.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify, raiseAlert } from "./services/alerts.js";
+import { currentDay, mergeDay, realTrend, recordTiming, type RealDay } from "./services/realSpeed.js";
+import { listVersions, markFailed, previousGood, flyReady, switchImage, currentImage } from "./services/versions.js";
 import { describeDevice, ensurePasskeys, finishLogin, finishRegistration, hasPasskeys, listPasskeys, loginOptions, registrationOptions, relyingParty, removePasskey, renamePasskey } from "./services/passkeys.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
 import { ebayIsLive } from "./marketplaces/ebay.js";
@@ -91,6 +93,11 @@ export class Workspaces {
       setAiGate((ws, kind) => this.chargeAi(ws, kind));
     } else setAiGate(null);
     this.site = this.openSite();
+    // Single-password mode, owner lost every passkey and recovery code: start once with FLIPDESK_PASSKEY_RESET=1.
+    if (!this.multiuser && process.env.FLIPDESK_PASSKEY_RESET === "1") {
+      this.site.prepare("DELETE FROM passkey_only WHERE owner_key = 'owner'").run();
+      console.log("[passkeys] FLIPDESK_PASSKEY_RESET=1: passkey-only sign-in is off for the owner. Remove the setting now.");
+    }
     setStripeMode(this.siteGet<StripeMode | null>("stripeMode", null));
     setExtraArticles(() => this.helpArticles());
   }
@@ -152,6 +159,7 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS owner_sessions (token_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS known_devices (actor_key TEXT NOT NULL, device_hash TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', ip TEXT,
         first_seen TEXT NOT NULL DEFAULT (datetime('now')), last_seen TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (actor_key, device_hash));
+      CREATE TABLE IF NOT EXISTS passkey_only (owner_key TEXT PRIMARY KEY, recovery TEXT NOT NULL DEFAULT '[]', enabled_at TEXT NOT NULL DEFAULT (datetime('now')));
       CREATE TABLE IF NOT EXISTS not_me (token_hash TEXT PRIMARY KEY, actor_key TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
         expires_at TEXT NOT NULL, used_at TEXT);
       CREATE TABLE IF NOT EXISTS help_articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, from_question TEXT,
@@ -263,7 +271,22 @@ export class Workspaces {
       tokenPrefix: key === "main" ? "" : `${key}.`,
       userId: key.startsWith("u") ? Number(key.slice(1).replace("d", "")) : undefined,
     };
-    const db = openDb(dbFile);
+    let db: Db;
+    try {
+      db = openDb(dbFile);
+    } catch (e) {
+      // An update that didn't pass on a copy of this shop: the shop stays untouched; tell the owner (once per error).
+      const msg = (e as Error).message;
+      if (/tried this update on a copy/.test(msg)) {
+        markFailed(this.dataDir, `${key}: ${msg}`);
+        const seen = this.siteGet<string[]>("updateProblemsSeen", []);
+        if (!seen.includes(key)) {
+          this.siteSet("updateProblemsSeen", [...seen, key].slice(-50));
+          void this.tellOwner("🔴 An update didn't pass its check on a copy of someone's data", `Shop ${key}: ${msg}\nGo back to the previous version: Tools → Status → Version.`).catch(() => {});
+        }
+      }
+      throw e;
+    }
     if (this.multiuser && ctx.userId && !demo) {
       const email = (this.accounts!.prepare("SELECT email FROM users WHERE id = ?").get(ctx.userId) as { email: string } | undefined)?.email;
       if (email) setSetting(db, "accountEmail", email);
@@ -483,7 +506,7 @@ export class Workspaces {
     this.site.prepare("UPDATE shares SET revoked_at = datetime('now') WHERE ws_key IN (?, ?)").run(`u${userId}`, `u${userId}d`);
     this.accounts!.prepare("DELETE FROM users WHERE id = ?").run(userId);
     this.accounts!.prepare("DELETE FROM ai_usage WHERE user_id = ?").run(userId);
-    for (const t of ["passkeys WHERE owner_key", "known_devices WHERE actor_key", "not_me WHERE actor_key"]) this.site.prepare(`DELETE FROM ${t} = ?`).run(`u${userId}`);
+    for (const t of ["passkeys WHERE owner_key", "known_devices WHERE actor_key", "not_me WHERE actor_key", "passkey_only WHERE owner_key"]) this.site.prepare(`DELETE FROM ${t} = ?`).run(`u${userId}`);
     fs.rmSync(path.join(this.dataDir, "users", String(userId)), { recursive: true, force: true });
   }
 
@@ -509,6 +532,7 @@ export class Workspaces {
         aiLimit: this.aiLimit(u.id),
         aiLimitCustom: u.ai_limit,
         onLeaderboard: Boolean(u.leaderboard_name),
+        passkeyOnly: Boolean(this.passkeyOnly(u.id)),
         billing: billingSummary(this.billingRow(u.id)!),
         invitedBy: u.invited_by ? ((this.accounts!.prepare("SELECT email FROM users WHERE id = ?").get(u.invited_by) as { email: string } | undefined)?.email ?? null) : null,
       };
@@ -1120,6 +1144,11 @@ export class Workspaces {
     const chk = this.siteGet<{ at: string; ok: boolean } | null>("lastBackupCheck", null);
     const speed = speedLine(speedTrend(this.siteGet<SelfCheck[]>("selfChecks", [])));
     if (speed) lines.push(speed);
+    const real = realTrend(this.siteGet<RealDay[]>("realSpeed", []));
+    if (real?.rows.length) {
+      const slowest = [...real.rows].filter((r) => r.n >= 5).sort((a, b) => b.p95 - a.p95)[0];
+      lines.push(`🧭 Real use (${real.day}): ${real.uses} screen loads${slowest ? `, slowest ${slowest.name} (1 in 20 over ${slowest.p95} ms)` : ""}${real.slower.length ? ` · slower than usual: ${real.slower.map((r) => r.name).join(", ")}` : ""}`);
+    }
     lines.push(`🛟 ${lb?.at ? `Last backup ${new Date(lb.at).toISOString().slice(0, 10)}${lb.error ? " (upload problem)" : ""}` : "No backup yet"}${chk ? ` · last restore check ${chk.ok ? "passed" : "FAILED"}` : ""}`);
     return { title: `FlipDesk this week: ${cur.activeSellers} active, ${cur.signups} new`, body: lines.join("\n") };
   }
@@ -1502,6 +1531,26 @@ export class Workspaces {
     return this.selfCheckNow();
   }
 
+  // ---------------- Speed from real use ----------------
+
+  private saveRealDay(d: RealDay) {
+    this.siteSet("realSpeed", mergeDay(this.siteGet<RealDay[]>("realSpeed", []), d));
+  }
+
+  /** Hourly: save today's real-use timings; tell the owner (once a day) if a screen got clearly slower or is too slow. */
+  async flushRealSpeed() {
+    const d = currentDay();
+    if (d.rows.length) this.saveRealDay(d);
+    const t = realTrend(this.siteGet<RealDay[]>("realSpeed", []));
+    if (!t) return null;
+    const bad = [...t.slower.map((r) => `${r.name} is slower than usual for real users: ${r.p50} ms typical (usually ${r.usual} ms), ${r.n} uses`), ...t.tooSlow.filter((r) => !r.slower).map((r) => `${r.name} is too slow for real users: 1 in 20 loads takes over ${(r.p95 / 1000).toFixed(1)} s (${r.n} uses)`)];
+    if (bad.length && this.siteGet<string | null>("realSpeedAlerted", null) !== t.day) {
+      this.siteSet("realSpeedAlerted", t.day);
+      await this.tellOwner("🐢 FlipDesk is slow for real users", `${bad.join("\n")}\nDetails: Tools → Status → Speed.`, { email: false }).catch(() => {});
+    }
+    return t;
+  }
+
   // ---------------- Activity log (owner) ----------------
 
   audit(req: Request | null, action: string, detail = "", actor?: string) {
@@ -1525,7 +1574,7 @@ export class Workspaces {
   // ---------------- Two-step sign-in ----------------
 
   private pending2fa = new Map<string, { secret: string; exp: number }>();
-  private loginTickets = new Map<string, { key: string; userId?: number; exp: number; tries: number }>();
+  private loginTickets = new Map<string, { key: string; userId?: number; exp: number; tries: number; kind?: "2fa" | "code"; codeHash?: string }>();
   private keyFor = (userId?: number) => (userId ? `u${userId}` : "owner");
   accountEmail = (userId: number) => (this.accounts?.prepare("SELECT email FROM users WHERE id = ?").get(userId) as { email: string } | undefined)?.email ?? `#${userId}`;
 
@@ -1661,6 +1710,9 @@ export class Workspaces {
     this.signOutEverywhere(userId);
     // Passkeys added since that sign-in could be the intruder's: remove them.
     const removed = this.site.prepare("DELETE FROM passkeys WHERE owner_key = ? AND created_at >= ?").run(r.actor_key, r.created_at).changes;
+    // Passkey-only turned on by the intruder (or now with too few passkeys left): off, so the reset link works.
+    const po = this.site.prepare("SELECT enabled_at FROM passkey_only WHERE owner_key = ?").get(r.actor_key) as { enabled_at: string } | undefined;
+    if (po && (po.enabled_at >= r.created_at || listPasskeys(this.site, r.actor_key).length < 2)) this.site.prepare("DELETE FROM passkey_only WHERE owner_key = ?").run(r.actor_key);
     let resetSent = false;
     if (userId) resetSent = (await this.forgot(this.accountEmail(userId)).catch(() => ({ emailed: false }))).emailed;
     this.audit(req, "signed out everywhere", `"this wasn't me" for ${r.device}${removed ? `; removed ${removed} new passkey(s)` : ""}`, userId ? this.accountEmail(userId) : "owner");
@@ -1672,6 +1724,68 @@ export class Workspaces {
     const cur = readCookie(req, "fd_dev");
     const here = cur ? sha(cur) : "";
     return (this.site.prepare("SELECT device_hash, device, ip, first_seen, last_seen FROM known_devices WHERE actor_key = ? ORDER BY last_seen DESC").all(this.keyFor(userId)) as { device_hash: string; device: string; ip: string | null; first_seen: string; last_seen: string }[]).map((d) => ({ device: d.device, ip: d.ip, firstSeen: d.first_seen, lastSeen: d.last_seen, thisOne: d.device_hash === here }));
+  }
+
+  // ---------------- Passkey-only sign-in ----------------
+
+  passkeyOnly(userId: number | undefined) {
+    const r = this.site.prepare("SELECT recovery, enabled_at FROM passkey_only WHERE owner_key = ?").get(this.keyFor(userId)) as { recovery: string; enabled_at: string } | undefined;
+    return r ? { recovery: JSON.parse(r.recovery) as string[], enabledAt: r.enabled_at } : null;
+  }
+  setPasskeyOnly(userId: number | undefined, recovery: string[] | null) {
+    const key = this.keyFor(userId);
+    if (recovery) this.site.prepare("INSERT INTO passkey_only (owner_key, recovery) VALUES (?, ?) ON CONFLICT(owner_key) DO UPDATE SET recovery = excluded.recovery").run(key, JSON.stringify(recovery));
+    else this.site.prepare("DELETE FROM passkey_only WHERE owner_key = ?").run(key);
+  }
+
+  // ---------------- Suspicious sign-ins ----------------
+
+  /** A browser this account hasn't used, right after several wrong passwords: ask for a code we send them first. */
+  private suspicious(req: Request, userId: number | undefined, actor: string) {
+    const limit = Number(process.env.FLIPDESK_SUSPICIOUS_FAILS ?? 3);
+    if (!limit) return false;
+    const dev = readCookie(req, "fd_dev");
+    if (dev && this.site.prepare("SELECT 1 FROM known_devices WHERE actor_key = ? AND device_hash = ?").get(this.keyFor(userId), sha(dev))) return false;
+    const fails = (this.site.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'sign-in failed' AND LOWER(actor) = LOWER(?) AND at >= datetime('now','-1 hour')").get(actor) as { n: number }).n;
+    return fails >= limit;
+  }
+
+  /** Send a 6-digit sign-in code by email (accounts) or phone alert (single-password mode). Null = no way to send one. */
+  private async sendSignInCode(req: Request, userId: number | undefined): Promise<{ ticket: string; sentTo: "email" | "phone" } | null> {
+    const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+    const device = describeDevice(String(req.headers["user-agent"] ?? ""));
+    const body = `Your FlipDesk sign-in code is ${code}. It works for 10 minutes.\n\nWe asked for it because someone is signing in from ${device} (${req.ip ?? "unknown address"}) right after several wrong passwords.\nIf that isn't you, don't share the code, and change your password.`;
+    let sentTo: "email" | "phone" | null = null;
+    if (userId) {
+      if ((mailConfigured() || process.env.SMTP_HOST === "test") && (await sendMail(this.accountEmail(userId), `FlipDesk sign-in code: ${code}`, body).catch(() => false))) sentTo = "email";
+    } else {
+      const ws = this.get("main");
+      if (ws && (await runInWorkspace(ws, () => notify(ws.db, "security", `FlipDesk sign-in code ${code}`, body)).catch(() => false))) sentTo = "phone";
+    }
+    if (!sentTo) return null;
+    const ticket = crypto.randomBytes(24).toString("base64url");
+    for (const [k, v] of this.loginTickets) if (v.exp < Date.now()) this.loginTickets.delete(k);
+    this.loginTickets.set(ticket, { key: this.keyFor(userId), userId, exp: Date.now() + 10 * 60_000, tries: 0, kind: "code", codeHash: sha(code) });
+    return { ticket, sentTo };
+  }
+
+  /** After the password checked out: passkey-only? two-step? suspicious? Otherwise sign in. Returns what the client needs. */
+  private async afterPassword(req: Request, res: Response, userId: number | undefined, actor: string) {
+    if (this.passkeyOnly(userId)) {
+      this.audit(req, "sign-in failed", "password used on a passkey-only account", actor);
+      return { status: 403, body: { error: "This account signs in with a passkey only. Use “Sign in with a passkey”, or a recovery code if you lost your passkeys.", passkeyOnly: true } };
+    }
+    if (this.twofa(userId)) return { status: 200, body: { needs2fa: true, ticket: this.newTicket(userId) } };
+    if (this.suspicious(req, userId, actor)) {
+      const sent = await this.sendSignInCode(req, userId);
+      if (sent) {
+        this.audit(req, "sign-in code sent", `new device after failed tries (${sent.sentTo})`, actor);
+        return { status: 200, body: { needsCode: true, ticket: sent.ticket, sentTo: sent.sentTo } };
+      }
+      this.audit(req, "suspicious sign-in allowed", "no email or phone alerts set up to send a code", actor);
+    }
+    this.signIn(req, res, userId, "with password");
+    return { status: 200, body: { ok: true } };
   }
 
   // ---------------- The front door ----------------
@@ -1713,9 +1827,17 @@ export class Workspaces {
     const root = express.Router();
     const json = express.json({ limit: "100kb" });
     root.use(securityHeaders, hostGuard, sameSiteGuard);
+    // Speed from real use: how long each screen's data takes for the people actually using it (see realSpeed.ts).
+    root.use((req, res, next) => {
+      if (req.method === "GET" && req.path.startsWith("/api/")) {
+        const t = performance.now();
+        res.on("finish", () => recordTiming(req.originalUrl, performance.now() - t, res.statusCode < 500, (d) => this.saveRealDay(d)));
+      }
+      next();
+    });
     // Slow down password guessing and email bombing (per IP, on top of the per-account limits).
     const signInLimit = rateLimit(30, 15 * 60_000, "Too many sign-in attempts from here. Wait 15 minutes.");
-    root.use(["/api/login", "/api/auth/login", "/api/auth/reset", "/api/passkeys/login", "/api/auth/not-me"], (req, res, next) => (req.method === "POST" ? signInLimit(req, res, next) : next()));
+    root.use(["/api/login", "/api/auth/login", "/api/auth/reset", "/api/passkeys/login", "/api/auth/not-me", "/api/passkeys/recover"], (req, res, next) => (req.method === "POST" ? signInLimit(req, res, next) : next()));
     root.use("/api/auth/signup", rateLimit(10, 60 * 60_000, "Too many sign-ups from here. Try again later."));
     root.use("/api/auth/forgot", rateLimit(10, 60 * 60_000, "Too many reset requests from here. Try again later."));
 
@@ -1806,10 +1928,50 @@ export class Workspaces {
     // ---- Accounts ----
     root.get("/api/auth/mode", (req, res) => void res.json(this.describe(req, this.userFor(req))));
     // Second step of sign-in (both modes): the ticket from the password step + a 6-digit or recovery code.
+    // The emailed / phoned code for a suspicious sign-in.
+    root.post("/api/login/verify", json, (req, res) => {
+      const b = z.object({ ticket: z.string().max(100), code: z.string().max(20) }).parse(req.body);
+      const t = this.loginTickets.get(b.ticket);
+      if (!t || t.exp < Date.now() || t.kind !== "code") return void res.status(401).json({ error: "That took too long. Sign in again." });
+      if (++t.tries > 5) return void (this.loginTickets.delete(b.ticket), res.status(429).json({ error: "Too many wrong codes. Sign in again." }));
+      const given = sha(b.code.replace(/\s/g, ""));
+      if (!crypto.timingSafeEqual(Buffer.from(given), Buffer.from(t.codeHash!))) {
+        this.audit(req, "sign-in failed", "wrong sign-in code", t.userId ? this.accountEmail(t.userId) : "owner");
+        return void res.status(401).json({ error: "That code isn't right." });
+      }
+      this.loginTickets.delete(b.ticket);
+      this.signIn(req, res, t.userId, "with password + a sent code");
+      res.json({ ok: true });
+    });
+    // Lost every passkey on a passkey-only account: a recovery code signs in once and turns passkey-only off.
+    root.post("/api/passkeys/recover", json, async (req, res) => {
+      const b = z.object({ email: z.string().max(200).optional(), code: z.string().min(6).max(40) }).parse(req.body);
+      let userId: number | undefined;
+      let actor = "owner";
+      if (this.multiuser) {
+        const u = this.accounts!.prepare("SELECT id, email FROM users WHERE email = ?").get((b.email ?? "").trim()) as { id: number; email: string } | undefined;
+        if (!u) return void res.status(401).json({ error: "That recovery code isn't right." });
+        userId = u.id;
+        actor = u.email;
+      } else if (!this.password) return void res.status(400).json({ error: "No sign-in needed here." });
+      const po = this.passkeyOnly(userId);
+      const left = po ? useRecoveryCode(po.recovery, b.code) : null;
+      if (!left) {
+        this.audit(req, "sign-in failed", "wrong passkey recovery code", actor);
+        return void res.status(401).json({ error: "That recovery code isn't right." });
+      }
+      this.setPasskeyOnly(userId, null);
+      this.audit(req, "passkey-only turned off", "signed in with a recovery code", actor);
+      this.signIn(req, res, userId, "with a passkey recovery code");
+      await this.tellOwner("🔐 A passkey recovery code was used", `${actor} signed in with a recovery code; passkey-only sign-in is now off for them.`, { email: false }).catch(() => {});
+      if (userId && (mailConfigured() || process.env.SMTP_HOST === "test"))
+        void sendMail(actor, "A FlipDesk recovery code was used", `Someone (hopefully you) signed in with one of your passkey recovery codes, so passkey-only sign-in is now off.\nAdd new passkeys in Settings and turn it back on. If this wasn't you, reset your password now.`).catch(() => {});
+      res.json({ ok: true });
+    });
     root.post("/api/login/2fa", json, (req, res) => {
       const b = z.object({ ticket: z.string().max(100), code: z.string().max(20) }).parse(req.body);
       const t = this.loginTickets.get(b.ticket);
-      if (!t || t.exp < Date.now()) return void res.status(401).json({ error: "That took too long. Sign in again." });
+      if (!t || t.exp < Date.now() || t.kind === "code") return void res.status(401).json({ error: "That took too long. Sign in again." });
       if (++t.tries > 5) return void (this.loginTickets.delete(b.ticket), res.status(429).json({ error: "Too many wrong codes. Sign in again." }));
       const how = this.checkSecondFactor(t.userId, b.code);
       if (!how) {
@@ -1821,7 +1983,7 @@ export class Workspaces {
       res.json({ ok: true, recoveryLeft: this.twofa(t.userId)?.recovery.length ?? 0 });
     });
     if (!this.multiuser)
-      root.post("/api/login", json, (req, res) => {
+      root.post("/api/login", json, async (req, res) => {
         if (!this.password) return void res.json({ ok: true });
         const given = String((req.body as { password?: string })?.password ?? "");
         const ok = given.length === this.password.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(this.password));
@@ -1829,9 +1991,8 @@ export class Workspaces {
           this.audit(req, "sign-in failed", "wrong password", "owner");
           return void res.status(401).json({ error: "Wrong password" });
         }
-        if (this.twofa()) return void res.json({ needs2fa: true, ticket: this.newTicket() });
-        this.signIn(req, res, undefined, "with password");
-        res.json({ ok: true });
+        const r = await this.afterPassword(req, res, undefined, "owner");
+        res.status(r.status).json(r.body);
       });
     if (this.multiuser) {
       const Creds = z.object({ email: z.email().max(200), password: z.string().min(8, "Use at least 8 characters").max(200), invite: z.string().max(200).optional() });
@@ -1856,7 +2017,7 @@ export class Workspaces {
           res.status((e as { status?: number }).status ?? 400).json({ error: msg });
         }
       });
-      root.post("/api/auth/login", json, (req, res) => {
+      root.post("/api/auth/login", json, async (req, res) => {
         try {
           const b = z.object({ email: z.string().max(200), password: z.string().max(200) }).parse(req.body);
           let u: Account;
@@ -1866,9 +2027,8 @@ export class Workspaces {
             this.audit(req, "sign-in failed", (e as Error).message, b.email.trim().slice(0, 200));
             throw e;
           }
-          if (this.twofa(u.id)) return void res.json({ needs2fa: true, ticket: this.newTicket(u.id) });
-          this.signIn(req, res, u.id, "with password");
-          res.json({ ok: true });
+          const r = await this.afterPassword(req, res, u.id, u.email);
+          res.status(r.status).json(r.body);
         } catch (e) {
           res.status((e as { status?: number }).status ?? 400).json({ error: (e as Error).message });
         }
@@ -1891,7 +2051,7 @@ export class Workspaces {
           const u = this.resetPassword(b.token, b.password);
           this.audit(req, "password reset", "via reset link", u.email);
           // With two-step sign-in on, a reset link alone never signs anyone in.
-          if (this.twofa(u.id)) return void res.json({ ok: true, signIn: true });
+          if (this.twofa(u.id) || this.passkeyOnly(u.id)) return void res.json({ ok: true, signIn: true });
           this.signIn(req, res, u.id, "after a password reset");
           res.json({ ok: true });
         } catch (e) {
@@ -2131,7 +2291,24 @@ export class Workspaces {
       if (!this.multiuser && !req.fdShare && !this.password) return void res.json({ passkeys: [], unavailable: "Set FLIPDESK_PASSWORD first: passkeys replace typing it." });
       const w = who2fa(req, res);
       if (!w) return;
-      res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
+      const po = this.passkeyOnly(w.userId);
+      res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)), passkeyOnly: Boolean(po), recoveryLeft: po?.recovery.length ?? 0 });
+    });
+    root.post("/api/passkeys/only", json, (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      const on = z.object({ on: z.boolean() }).parse(req.body).on;
+      if (!on) {
+        this.setPasskeyOnly(w.userId, null);
+        this.audit(req, "passkey-only turned off", "", w.label);
+        return void res.json({ passkeyOnly: false });
+      }
+      if (listPasskeys(this.site, this.keyFor(w.userId)).length < 2)
+        return void res.status(400).json({ error: "Add a second passkey first (e.g. your phone and your computer), so losing one device doesn't lock you out." });
+      const rc = newRecoveryCodes();
+      this.setPasskeyOnly(w.userId, rc.hashes);
+      this.audit(req, "passkey-only turned on", "", w.label);
+      res.json({ passkeyOnly: true, recoveryCodes: rc.codes });
     });
     root.post("/api/passkeys/register/options", async (req: R, res) => {
       const w = who2fa(req, res);
@@ -2161,6 +2338,8 @@ export class Workspaces {
     root.delete("/api/passkeys/:id", (req: R, res) => {
       const w = who2fa(req, res);
       if (!w) return;
+      if (this.passkeyOnly(w.userId) && listPasskeys(this.site, this.keyFor(w.userId)).length <= 2)
+        return void res.status(400).json({ error: "Passkey-only sign-in needs at least two passkeys. Add another first, or turn passkey-only off." });
       if (!removePasskey(this.site, this.keyFor(w.userId), String(req.params.id))) return void res.status(404).json({ error: "Not found" });
       this.audit(req, "passkey removed", "", w.label);
       res.json({ passkeys: listPasskeys(this.site, this.keyFor(w.userId)) });
@@ -2219,6 +2398,10 @@ export class Workspaces {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       res.json(this.siteGet<SelfCheck[]>("selfChecks", []));
     });
+    root.get("/api/real-speed", async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json({ trend: await this.flushRealSpeed(), days: this.siteGet<RealDay[]>("realSpeed", []).length });
+    });
     root.get("/api/selfcheck/trend", (req: R, res) => {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       const h = this.siteGet<SelfCheck[]>("selfChecks", []);
@@ -2228,6 +2411,25 @@ export class Workspaces {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       this.audit(req, "self-check run");
       res.json(await this.selfCheckNow());
+    });
+
+    // ---- Version and going back (owner) ----
+    root.get("/api/versions", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json({ versions: listVersions(this.dataDir), current: currentImage(), previous: previousGood(this.dataDir), canSwitch: flyReady() });
+    });
+    root.post("/api/versions/rollback", json, async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const prev = previousGood(this.dataDir);
+      const image = z.object({ image: z.string().max(300).optional() }).parse(req.body ?? {}).image ?? prev?.image;
+      if (!image || !listVersions(this.dataDir).some((v) => v.image === image)) return void res.status(400).json({ error: "There's no earlier version to go back to yet." });
+      try {
+        const r = await switchImage(image);
+        this.audit(req, "went back to an earlier version", image);
+        res.json({ ...r, message: "Switching now. FlipDesk restarts on the earlier version in about a minute; reload then." });
+      } catch (e) {
+        res.status((e as { status?: number }).status ?? 502).json({ error: (e as Error).message });
+      }
     });
 
     // ---- Activity log (owner) ----
@@ -2437,6 +2639,14 @@ export class Workspaces {
       const base = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") || `${req.protocol}://${req.get("host")}`;
       this.audit(req, "reset link made", `for ${this.accountEmail(id)}`);
       res.json({ link: `${base}/reset?token=${this.createReset(id, 24)}`, hours: 24 });
+    });
+    // Support: someone lost every passkey and their recovery codes. Turn passkey-only off so a reset link works again.
+    root.post("/api/admin/accounts/:id/passkey-only-off", (req, res) => {
+      const id = Number(req.params.id);
+      if (!this.accounts!.prepare("SELECT 1 FROM users WHERE id = ?").get(id)) return void res.status(404).json({ error: "No such account" });
+      this.setPasskeyOnly(id, null);
+      this.audit(req, "passkey-only turned off", `for ${this.accountEmail(id)} by the owner`);
+      res.json({ ok: true });
     });
     root.put("/api/admin/accounts/:id", json, (req, res) => {
       const b = z.object({ aiLimit: z.number().int().min(0).max(100000).nullable().optional(), comp: z.boolean().optional() }).parse(req.body);
