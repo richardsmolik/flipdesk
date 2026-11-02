@@ -86,6 +86,14 @@ describe("security", () => {
     await request(app).post("/api/auth/signup").send({ email: "ME@x.com", password: "long-enough-1" }).expect(200);
   });
 
+  it("every owner-only /api/admin route is defined after the owner check", () => {
+    const root = fs.readFileSync("server/workspaces.ts", "utf8");
+    const gate = root.indexOf('root.use("/api/admin"');
+    const routes = [...root.matchAll(/root\.(get|post|put|delete|patch)\("\/api\/admin/g)].map((m) => m.index!);
+    expect(gate).toBeGreaterThan(0);
+    expect(routes.filter((i) => i < gate)).toEqual([]);
+  });
+
   it("server-wide routes never shadow a shop route (the Inbox bug)", () => {
     const root = fs.readFileSync("server/workspaces.ts", "utf8");
     const shop = fs.readFileSync("server/app.ts", "utf8");

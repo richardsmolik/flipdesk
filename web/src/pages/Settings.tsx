@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { toast, useFetch, useMarketplaces } from "../ui";
+import QRCode from "qrcode";
+import { timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import { switchShop, useAccount, useWorkspace } from "../components/Account";
 
 function ShareLink() {
@@ -302,15 +303,160 @@ function AlertSettings() {
   );
 }
 
+function TwoStep() {
+  const [st, setSt] = useState<{ enabled: boolean; recoveryLeft: number } | null>(null);
+  const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
+  const [code, setCode] = useState("");
+  const [codes, setCodes] = useState<string[] | null>(null);
+  useEffect(() => void api.get<{ enabled: boolean; recoveryLeft: number }>("/api/2fa").then(setSt).catch(() => setSt(null)), []);
+  if (!st) return null;
+  const err = (e: unknown) => toast((e as Error).message, "err");
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">🔐 Two-step sign-in {st.enabled ? <span className="text-sm font-normal text-green-400">on</span> : <span className="text-sm font-normal text-amber-400">off</span>}</h2>
+      <p className="text-sm text-zinc-400">After your password, FlipDesk asks for a 6-digit code from an app on your phone (Google Authenticator, 1Password, Authy…). A stolen password alone is then not enough.</p>
+      {codes && (
+        <div className="space-y-2 rounded-md border border-amber-800 bg-amber-950/30 p-3">
+          <div className="text-sm font-medium text-amber-200">Save these recovery codes now. Each works once if you lose your phone. They won't be shown again.</div>
+          <pre className="grid grid-cols-2 gap-1 font-mono text-sm text-zinc-100">{codes.join("\n")}</pre>
+          <div className="flex gap-2">
+            <button className="btn-ghost text-xs" onClick={() => (navigator.clipboard?.writeText(codes.join("\n")), toast("Copied"))}>Copy</button>
+            <a className="btn-ghost text-xs" download="flipdesk-recovery-codes.txt" href={`data:text/plain;charset=utf-8,${encodeURIComponent(`FlipDesk recovery codes (each works once)\n\n${codes.join("\n")}\n`)}`}>Download</a>
+            <button className="btn-primary text-xs" onClick={() => setCodes(null)}>I saved them</button>
+          </div>
+        </div>
+      )}
+      {!st.enabled && !setup && (
+        <button
+          className="btn-primary"
+          onClick={async () => {
+            try {
+              const r = await api.post<{ secret: string; otpauth: string }>("/api/2fa/setup");
+              setSetup({ secret: r.secret, qr: await QRCode.toDataURL(r.otpauth, { margin: 1, width: 220 }) });
+            } catch (e) {
+              err(e);
+            }
+          }}
+        >
+          Turn on two-step sign-in
+        </button>
+      )}
+      {setup && (
+        <div className="flex flex-wrap items-start gap-4">
+          <img src={setup.qr} alt="QR code for your authenticator app" className="h-44 w-44 rounded bg-white p-1" />
+          <div className="min-w-0 flex-1 space-y-2 text-sm">
+            <ol className="list-decimal space-y-1 pl-5 text-zinc-300">
+              <li>Open your authenticator app and scan this code.</li>
+              <li>Can't scan? Enter this key: <code className="break-all text-xs">{setup.secret}</code></li>
+              <li>Type the 6-digit code it shows:</li>
+            </ol>
+            <div className="flex gap-2">
+              <input className="input w-36 text-center font-mono" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+              <button
+                className="btn-primary"
+                disabled={code.length !== 6}
+                onClick={async () => {
+                  try {
+                    const r = await api.post<{ recoveryCodes: string[] }>("/api/2fa/enable", { code });
+                    setCodes(r.recoveryCodes);
+                    setSetup(null);
+                    setCode("");
+                    setSt({ enabled: true, recoveryLeft: r.recoveryCodes.length });
+                    toast("Two-step sign-in is on. Other devices were signed out.");
+                  } catch (e) {
+                    err(e);
+                  }
+                }}
+              >
+                Turn on
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {st.enabled && !codes && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-zinc-400">{st.recoveryLeft} recovery code{st.recoveryLeft === 1 ? "" : "s"} left.</span>
+          <input className="input w-36 font-mono" placeholder="Current code" value={code} onChange={(e) => setCode(e.target.value.trim())} />
+          <button className="btn-ghost text-xs" disabled={code.length < 6} onClick={async () => {
+            try {
+              const r = await api.post<{ recoveryCodes: string[] }>("/api/2fa/recovery-codes", { code });
+              setCodes(r.recoveryCodes);
+              setCode("");
+              setSt({ ...st, recoveryLeft: r.recoveryCodes.length });
+            } catch (e) {
+              err(e);
+            }
+          }}>New recovery codes</button>
+          <button className="btn-ghost text-xs text-red-300" disabled={code.length < 6} onClick={async () => {
+            if (!confirm("Turn off two-step sign-in?")) return;
+            try {
+              await api.post("/api/2fa/disable", { code });
+              setCode("");
+              setSt({ enabled: false, recoveryLeft: 0 });
+              toast("Two-step sign-in is off");
+            } catch (e) {
+              err(e);
+            }
+          }}>Turn off</button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface AuditRow { id: number; at: string; actor: string; action: string; detail: string; ip: string | null }
+
+function ActivityLog() {
+  const [rows, setRows] = useState<AuditRow[] | null>(null);
+  const [q, setQ] = useState("");
+  const load = (more = false) =>
+    api
+      .get<AuditRow[]>(`/api/audit?q=${encodeURIComponent(q)}${more && rows?.length ? `&before=${rows[rows.length - 1].id}` : ""}`)
+      .then((r) => setRows(more && rows ? [...rows, ...r] : r))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => void load(), [q]);
+  if (!rows) return null;
+  const risky = /failed|RESTORED|deleted|turned off|payments mode|reset link/i;
+  return (
+    <section className="card space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-semibold">🗂️ Activity log</h2>
+        <input className="input max-w-xs py-1 text-sm" placeholder="Search (email, action…)" value={q} onChange={(e) => setQ(e.target.value)} />
+      </div>
+      <p className="text-xs text-zinc-500">Sign-ins (and failed ones), account changes, invites, backups and restores, payment and alert settings. Kept for the newest 20,000 events.</p>
+      <div className="max-h-96 overflow-auto">
+        <table className="w-full text-sm">
+          <tbody className="divide-y divide-zinc-800">
+            {rows.map((r) => (
+              <tr key={r.id} className={risky.test(r.action) ? "text-amber-200" : "text-zinc-300"}>
+                <td className="whitespace-nowrap py-1.5 pr-3 text-xs text-zinc-500" title={r.at + " UTC"}>{timeAgo(r.at)}</td>
+                <td className="pr-3">{r.actor}</td>
+                <td className="pr-3">{r.action}</td>
+                <td className="text-xs text-zinc-500">{r.detail}{r.ip ? ` · ${r.ip}` : ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && <div className="p-4 text-sm text-zinc-500">Nothing yet.</div>}
+      </div>
+      {rows.length >= 100 && <button className="btn-ghost text-xs" onClick={() => load(true)}>Older</button>}
+    </section>
+  );
+}
+
 function SiteSections() {
   const a = useAccount();
   const w = useWorkspace();
   return (
     <>
       {a?.user && <AccountSection email={a.user.email} optOut={Boolean(a.emailOptOut)} />}
+      {!w?.shared && <TwoStep />}
       {!w?.shared && <YourData />}
       {a?.canEditSite && <Backups />}
       {a?.canEditSite && <AlertSettings />}
+      {a?.canEditSite && <ActivityLog />}
       {a?.canEditSite && <HelpVideos />}
     </>
   );

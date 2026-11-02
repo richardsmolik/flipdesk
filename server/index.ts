@@ -88,3 +88,6 @@ setInterval(guard("incidents", () => shops.checkIncidents()), 2 * 60_000).unref(
 // Hosted: owner's weekly report (your weekly-summary day/hour) and friendly reminder emails.
 setInterval(guard("owner-report", () => shops.ownerReportIfDue()), 15 * 60_000).unref();
 setInterval(guard("nudges", () => shops.sendNudges()), 60 * 60_000).unref();
+// Nightly self-check: speed of the main screens, database health, disk space (alerts the owner on problems).
+setInterval(guard("self-check", () => shops.selfCheckIfDue()), 60 * 60_000).unref();
+setTimeout(guard("self-check", () => shops.selfCheckIfDue()), 10 * 60_000).unref();

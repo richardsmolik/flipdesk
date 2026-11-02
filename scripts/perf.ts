@@ -8,30 +8,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Workspaces } from "../server/workspaces.js";
-
-export async function fill(db: import("../server/db.js").Db, n: number) {
-  const mps = ["ebay", "poshmark", "mercari", "depop", "etsy"];
-  const cats = ["Clothing > Men", "Clothing > Women", "Shoes", "Electronics", "Home > Kitchen", "Collectibles", "Toys", "Books"];
-  const brands = ["Nike", "Patagonia", "Levi's", "Coach", "Sony", "Pyrex", "LEGO", "Carhartt", "Lululemon", "Funko"];
-  db.exec("BEGIN");
-  for (let i = 0; i < n; i++) {
-    const age = (i * 7) % 120;
-    const status = i % 9 === 0 ? "draft" : i % 4 === 0 ? "sold" : "active";
-    const id = Number(
-      db
-        .prepare(`INSERT INTO items (sku, title, brand, category, size, cost, price, min_price, quantity, quantity_purchased, status, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?), datetime('now', ?))`)
-        .run(`P-${i}`, `${brands[i % 10]} item number ${i} size M`, brands[i % 10], cats[i % 8], ["S", "M", "L"][i % 3], 5 + (i % 30), 20 + (i % 150), 15, status === "sold" ? 0 : 1 + (i % 3), 1 + (i % 3), status, ["Goodwill", "Estate sale"][i % 2], `-${age} days`, `-${age} days`).lastInsertRowid,
-    );
-    for (let p = 0; p < 4; p++) db.prepare("INSERT INTO photos (item_id, path, position) VALUES (?, ?, ?)").run(id, `/tmp/p-${i}-${p}.jpg`, p);
-    if (status !== "draft")
-      for (const m of mps.slice(0, 2 + (i % 4)))
-        db.prepare("INSERT INTO listings (item_id, marketplace, status, external_id, price, quantity, views, watchers, listed_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, datetime('now', ?))").run(id, m, status === "sold" ? "ended" : "active", `${m}-${id}`, 20 + (i % 150), i % 90, m === "ebay" ? i % 4 : 0, `-${age} days`);
-    if (status === "sold" || i % 5 === 0)
-      db.prepare("INSERT INTO sales (item_id, marketplace, quantity, order_id, sale_price, shipping_cost, fees, cost, profit, sold_at, shipped_at) VALUES (?, ?, 1, ?, ?, 5, 4, ?, ?, datetime('now', ?), CASE WHEN ? THEN datetime('now') END)").run(id, mps[i % 5], `O-${i}`, 30 + (i % 100), 5 + (i % 30), 15 + (i % 60), `-${i % 60} days`, i % 7 ? 1 : 0);
-    if (i % 25 === 0) db.prepare("INSERT INTO jobs (marketplace, type, item_id, status, updated_at) VALUES ('poshmark', 'publish', ?, ?, datetime('now'))").run(id, i % 50 ? "pending" : "failed");
-  }
-  db.exec("COMMIT");
-}
+import { fill } from "../server/services/selfcheck.js";
+export { fill };
 
 const ENDPOINTS = [
   "/api/items?view=inventory", "/api/items?view=selling", "/api/items?view=unsold", "/api/items?view=drafts", "/api/items?view=sold", "/api/items?q=nike",

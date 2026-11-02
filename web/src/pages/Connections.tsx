@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { api } from "../api";
 import { MpBadge, toast, useMarketplaces } from "../ui";
 import EbaySetup from "../components/EbaySetup";
+import EbaySmoke from "../components/EbaySmoke";
 
 const ENV_HINT: Record<string, string> = {
   ebay: "EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_RU_NAME",
@@ -37,6 +38,7 @@ export default function Connections() {
         </p>
       </div>
       <EbaySetup />
+      <EbaySmoke />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {marketplaces.map((m) => {
           const connected = m.connection.status === "connected";

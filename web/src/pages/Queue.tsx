@@ -39,6 +39,16 @@ export default function Queue() {
                         📋 report
                       </a>
                     )}
+                    {j.problemId && (
+                      <button className="ml-2 text-xs text-brand hover:underline" onClick={async () => {
+                        try {
+                          const r = await api.post<{ sentTo: string }>(`/api/problems/${j.problemId}/send`, {});
+                          toast(r.sentTo === "owner" ? "Sent to the owner" : "Report sent");
+                        } catch (e) {
+                          toast((e as Error).message, "err");
+                        }
+                      }}>📮 send</button>
+                    )}
                   </td>
                 </tr>
               );

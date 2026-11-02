@@ -6,6 +6,7 @@ import path from "node:path";
 import { z } from "zod/v4";
 import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting, tx, type Db, type ItemRow, type JobRow, type ListingRow } from "./db.js";
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
+import { ebaySmokeTest } from "./services/ebaySmoke.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
@@ -839,6 +840,15 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
           return { ...row, photo: photo ? (photo.startsWith("http") ? photo : uploadUrl(photo)) : null };
         }),
     );
+  });
+
+  // eBay smoke test: list a test item on eBay's sandbox, end it, clean up (see services/ebaySmoke.ts).
+  api.get("/ebay/smoke-test", (_req, res) => void res.json(getSetting(db, "ebaySmoke", null)));
+  api.post("/ebay/smoke-test", async (req, res) => {
+    const allowProduction = z.object({ allowProduction: z.boolean().default(false) }).parse(req.body ?? {}).allowProduction;
+    const r = await ebaySmokeTest(db, uploadDir, { allowProduction });
+    setSetting(db, "ebaySmoke", r);
+    res.json(r);
   });
 
   // Problem reports (replayable): list, one as a JSON download.

@@ -151,6 +151,15 @@ See `docs/SECURITY.md` for the review and what's protected. Two settings matter 
 - `FLIPDESK_OWNER_EMAIL` (accounts mode, above).
 - With a Cloudflare Tunnel (Option A) FlipDesk still listens only on your computer, so it only answers to `localhost` and the host in `PUBLIC_BASE_URL`. Set `PUBLIC_BASE_URL` to your tunnel address (or add the host to `FLIPDESK_ALLOWED_HOSTS`), or you'll see "FlipDesk doesn't answer to …".
 
+## Safety and quality extras
+
+- **Two-step sign-in.** Settings → Two-step sign-in: scan the QR code with an authenticator app (Google Authenticator, 1Password, Authy…), type the code, and save the 10 recovery codes. From then on, sign-in asks for the 6-digit code after your password; codes can't be reused, and five wrong codes end the attempt. Turning it on signs out your other devices. A password-reset link never signs anyone in by itself while it's on. Works for every account and for single-password mode (`FLIPDESK_PASSWORD`). The launch checklist reminds the owner to turn it on.
+- **Activity log** (Settings, owner only): sign-ins and failed sign-ins (with IP address), sign-ups, password changes and resets, two-step on/off, invites, account changes and deletions, backups, downloads and restores, payment mode and alert settings, share links, announcements. Searchable; the newest 20,000 events are kept.
+- **Problem reports, with your OK.** When a sync fails for good, the Inbox asks: **📮 Send report** (optionally with a note) or **See what's in it**. On your shop, a yes files a GitHub issue on `FLIPDESK_GITHUB_REPO` (needs `GITHUB_TOKEN` with Issues: write) with the readable summary and the replayable report. Members' reports go to your feedback inbox first, where **Send to GitHub** forwards them. Nothing is sent without someone saying yes.
+- **Nightly self-check** (on the server): times the main screens on a scratch shop of 800 items, runs SQLite's quick check on every database, and checks free disk space. It keeps 14 nights of results and alerts you when something breaks or a screen gets clearly slower than usual (2x its usual time and over 300 ms). It shows on Status and the launch checklist.
+- **Nightly GitHub check** (`.github/workflows/nightly.yml`): every night and on every push, GitHub runs the type check, all tests, a build, the phone-size check of every screen and the speed check. A failed nightly run opens an issue.
+- **eBay end-to-end test** (Marketplaces): one click lists a test item on eBay's **sandbox**, ends it and cleans up, timing each step. If a step fails it says which one and why, and saves a problem report with eBay's exact answers. It refuses production keys unless you confirm a real listing for a few seconds.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:

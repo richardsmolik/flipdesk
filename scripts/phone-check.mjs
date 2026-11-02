@@ -47,3 +47,4 @@ for (const r of ROUTES) {
 }
 console.log(`\n${problems} screen(s) wider than the phone. ${errors.length ? `Errors: ${[...new Set(errors)].slice(0, 5).join(" | ")}` : "No page errors."}`);
 await b.close();
+process.exitCode = problems || errors.length ? 1 : 0; // fail CI on sideways scrolling or page errors

@@ -58,6 +58,27 @@ export default function Inbox() {
               </div>
               {!a.resolved_at && (
                 <div className="flex shrink-0 flex-col gap-1">
+                  {a.kind === "problem" && (a.data as { problemId?: number }).problemId && (
+                    <>
+                      <button
+                        className="btn-primary text-xs"
+                        title="Sends what failed (no passwords, notes or buyer details) so it can be reproduced and fixed"
+                        onClick={async () => {
+                          const note = prompt("Anything to add? (optional, e.g. 'happens on every Poshmark item')") ?? "";
+                          try {
+                            const r = await api.post<{ sentTo: string }>(`/api/problems/${(a.data as { problemId: number }).problemId}/send`, { note });
+                            toast(r.sentTo === "owner" ? "Sent to the owner of this FlipDesk" : "Sent. Thank you!");
+                            reload();
+                          } catch (e) {
+                            toast((e as Error).message, "err");
+                          }
+                        }}
+                      >
+                        📮 Send report
+                      </button>
+                      <a className="btn-ghost text-center text-xs" href={`/api/problems/${(a.data as { problemId: number }).problemId}`} download>See what's in it</a>
+                    </>
+                  )}
                   {a.kind === "oversell" && a.sale_id && (
                     <button className="btn-ghost text-xs" title="Removes the second sale so your profit stays accurate" onClick={async () => { await api.post(`/api/sales/${a.sale_id}/cancel`, { restock: false, kind: "oversell", reason: "oversold" }); toast("Cancelled order removed from your sales"); reload(); }}>
                       Order cancelled, remove sale

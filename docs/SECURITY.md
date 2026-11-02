@@ -15,6 +15,12 @@ A focused review of sign-in, invites, payments, shared links, uploads and the fr
 | **Extension token check** | Compared with `!==` (timing). | Constant-time comparison. |
 | **A settings route shadowing the Inbox** | Found during the phone check: the quiet-hours settings used `/api/alerts`, so the owner's Inbox received the wrong data. | Moved to `/api/alert-settings`; a test now fails if any server-wide route ever shadows a shop route again. |
 
+## Added after the review
+
+- **Two-step sign-in** (authenticator codes, RFC 6238, checked against the standard's test vectors) with one-time recovery codes, replay protection, a 5-try limit per sign-in, and sign-out of other devices when it's turned on. With it on, single-password mode uses real server-side sessions instead of a password-derived cookie, and reset links never sign anyone in by themselves.
+- **Activity log** of sign-ins, failures and owner actions (with IP addresses).
+- **Fix found by the new tests:** one owner-only route (forwarding a member's problem report) was defined before the owner check took effect, so a member could call it. The owner check now runs right after sign-in for every `/api/admin` route, and a test fails if any owner-only route is ever defined before it.
+
 ## Checked and fine
 
 - **Passwords**: scrypt with a per-user salt, constant-time comparison; reset and session tokens are stored only as SHA-256 hashes; resets are one-use, expire (1 h emailed / 24 h owner-made) and sign the person out everywhere.

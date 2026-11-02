@@ -38,6 +38,7 @@ export function AuthScreen() {
   const [mode, setMode] = useState<WorkspaceState | null>(null);
   const [tab, setTab] = useState<"in" | "up" | "forgot">("in");
   const [sent, setSent] = useState<null | { emailed: boolean }>(null);
+  const [ticket, setTicket] = useState<string | null>(null);
   // /join?invite=... : a personal invite link fills in the code and opens "Create account".
   const inviteFromLink = location.pathname === "/join" ? new URLSearchParams(location.search).get("invite") ?? "" : "";
   const [inviteOk, setInviteOk] = useState<boolean | null>(null);
@@ -47,7 +48,7 @@ export function AuthScreen() {
     setF((x) => ({ ...x, invite: inviteFromLink }));
     api.get<{ valid: boolean }>(`/api/auth/invite/${encodeURIComponent(inviteFromLink)}`).then((r) => setInviteOk(r.valid), () => setInviteOk(false));
   }, [inviteFromLink]);
-  const [f, setF] = useState({ email: "", password: "", invite: "" });
+  const [f, setF] = useState({ email: "", password: "", invite: "", code: "" });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => void api.get<WorkspaceState>("/api/auth/mode").then((m) => (setMode(m), m.signupsOpen && !m.needsInvite && setTab("up"))).catch(() => setMode(null)), []);
@@ -58,9 +59,14 @@ export function AuthScreen() {
     setBusy(true);
     try {
       if (tab === "forgot") return void setSent(await api.post<{ emailed: boolean }>("/api/auth/forgot", { email: f.email }));
-      if (!accounts) await api.post("/api/login", { password: f.password });
-      else if (tab === "in") await api.post("/api/auth/login", { email: f.email, password: f.password });
-      else await api.post("/api/auth/signup", { email: f.email, password: f.password, invite: f.invite || undefined });
+      if (ticket) await api.post("/api/login/2fa", { ticket, code: f.code });
+      else {
+        let r: { needs2fa?: boolean; ticket?: string } = {};
+        if (!accounts) r = await api.post("/api/login", { password: f.password });
+        else if (tab === "in") r = await api.post("/api/auth/login", { email: f.email, password: f.password });
+        else await api.post("/api/auth/signup", { email: f.email, password: f.password, invite: f.invite || undefined });
+        if (r.needs2fa && r.ticket) return void setTicket(r.ticket); // step 2: the code from the authenticator app
+      }
       location.assign(location.pathname === "/join" ? "/" : location.pathname + location.search);
     } catch (x) {
       setErr((x as Error).message);
@@ -72,6 +78,17 @@ export function AuthScreen() {
     <div className="flex min-h-screen items-center justify-center p-4">
       <form className="card w-full max-w-sm space-y-3 p-6" onSubmit={submit}>
         <div className="text-lg font-bold">📦 Flip<span className="text-brand">Desk</span></div>
+        {ticket ? (
+          <>
+            <p className="text-sm text-zinc-300">Enter the 6-digit code from your authenticator app.</p>
+            <input className="input text-center font-mono text-lg tracking-widest" inputMode="numeric" autoComplete="one-time-code" autoFocus maxLength={12} placeholder="123456" value={f.code} onChange={(e) => setF({ ...f, code: e.target.value })} />
+            <p className="text-xs text-zinc-500">Lost your phone? Type one of your recovery codes instead.</p>
+            {err && <div className="text-sm text-red-400">{err}</div>}
+            <button className="btn-primary w-full" disabled={busy || f.code.trim().length < 6}>{busy ? "…" : "Sign in"}</button>
+            <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={() => (setTicket(null), setF({ ...f, code: "" }))}>← Start over</button>
+          </>
+        ) : (
+        <>
         {accounts && (
           <div className="flex gap-1 rounded-md bg-zinc-900 p-1 text-sm">
             {(["in", "up"] as const).map((t) => (
@@ -104,6 +121,8 @@ export function AuthScreen() {
         {accounts && !mode?.signupsOpen && <p className="text-xs text-zinc-500">New accounts need an invite from the owner.</p>}
         {err && <div className="text-sm text-red-400">{err}</div>}
         {!(tab === "forgot" && sent) && <button className="btn-primary w-full" disabled={busy}>{busy ? "…" : tab === "forgot" ? "Send reset link" : !accounts || tab === "in" ? "Sign in" : "Create my shop"}</button>}
+        </>
+        )}
       </form>
     </div>
   );
@@ -170,7 +189,8 @@ export function ResetPage() {
           e.preventDefault();
           if (pw !== pw2) return setErr("The two passwords don't match.");
           try {
-            await api.post("/api/auth/reset", { token, password: pw });
+            const r = await api.post<{ signIn?: boolean }>("/api/auth/reset", { token, password: pw });
+            if (r.signIn) toast("Password changed. Sign in with it and your two-step code.");
             location.assign("/");
           } catch (x) {
             setErr((x as Error).message);

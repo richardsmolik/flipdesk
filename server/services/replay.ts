@@ -7,6 +7,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import type { Db, Item, JobRow, ListingRow } from "../db.js";
+import { raiseAlert } from "./alerts.js";
 
 export interface Exchange { method: string; path: string; status: number; request?: unknown; response: string }
 const recorder = new AsyncLocalStorage<Exchange[]>();
@@ -41,6 +42,19 @@ export function appVersion() {
 function ensure(db: Db) {
   db.exec(`CREATE TABLE IF NOT EXISTS problem_reports (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, job_id INTEGER, summary TEXT NOT NULL,
     data TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  for (const col of ["sent_at TEXT", "sent_to TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE problem_reports ADD COLUMN ${col}`);
+    } catch {
+      /* already there */
+    }
+  }
+}
+
+export function markSent(db: Db, id: number, to: string) {
+  ensure(db);
+  db.prepare("UPDATE problem_reports SET sent_at = datetime('now'), sent_to = ? WHERE id = ?").run(to, id);
+  db.prepare("UPDATE alerts SET resolved_at = datetime('now') WHERE kind = 'problem' AND resolved_at IS NULL AND json_extract(data, '$.problemId') = ?").run(id);
 }
 
 /** Strip what a problem report must never carry (buyer details, local file paths). */
@@ -72,14 +86,18 @@ export function saveProblem(db: Db, p: { job: JobRow; item?: Item; listing?: Lis
   // One report per job is enough (retries of the same job update it).
   const existing = db.prepare("SELECT id FROM problem_reports WHERE job_id = ?").get(p.job.id) as { id: number } | undefined;
   if (existing) db.prepare("UPDATE problem_reports SET summary = ?, data = ?, created_at = datetime('now') WHERE id = ?").run(summary, JSON.stringify(data), existing.id);
-  else db.prepare("INSERT INTO problem_reports (kind, job_id, summary, data) VALUES ('job', ?, ?, ?)").run(p.job.id, summary, JSON.stringify(data));
+  else {
+    const id = Number(db.prepare("INSERT INTO problem_reports (kind, job_id, summary, data) VALUES ('job', ?, ?, ?)").run(p.job.id, summary, JSON.stringify(data)).lastInsertRowid);
+    // Ask (in the Inbox) whether to send it. Nothing leaves without a yes.
+    raiseAlert(db, { kind: "problem", severity: "warning", title: `Something failed: ${summary}`.slice(0, 200), body: "A problem report was saved. Send it so it can be reproduced and fixed?", itemId: p.item?.id, data: { problemId: id } });
+  }
   // Keep the newest 200.
   db.prepare("DELETE FROM problem_reports WHERE id NOT IN (SELECT id FROM problem_reports ORDER BY id DESC LIMIT 200)").run();
 }
 
 export function listProblems(db: Db) {
   ensure(db);
-  return db.prepare("SELECT id, kind, job_id, summary, created_at FROM problem_reports ORDER BY id DESC LIMIT 100").all() as { id: number; kind: string; job_id: number | null; summary: string; created_at: string }[];
+  return db.prepare("SELECT id, kind, job_id, summary, created_at, sent_at, sent_to FROM problem_reports ORDER BY id DESC LIMIT 100").all() as { id: number; kind: string; job_id: number | null; summary: string; created_at: string; sent_at: string | null; sent_to: string | null }[];
 }
 
 export function getProblem(db: Db, id: number) {

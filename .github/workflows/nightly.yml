@@ -1,0 +1,60 @@
+# Nightly (and on every push to main): type check, all tests, build, then start FlipDesk with the sample
+# shop and run the phone-size check of every screen and the speed check. A failed nightly run opens an issue.
+name: Nightly check
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # 09:17 UTC daily
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit -p .
+      - name: Tests
+        run: npx vitest run
+      - name: Build
+        run: npm run build
+      - name: Browser for the phone check
+        run: |
+          npm i --no-save playwright@1
+          npx playwright install --with-deps chromium
+      - name: Start FlipDesk
+        run: |
+          mkdir -p /tmp/fd
+          NODE_ENV=production FLIPDESK_DB=/tmp/fd/flipdesk.db PORT=8787 nohup npx tsx server/index.ts > /tmp/fd/server.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://localhost:8787/healthz && break; sleep 1; done
+      - name: Phone check (every screen at 390px)
+        run: node scripts/phone-check.mjs http://localhost:8787
+      - name: Speed check (1,500 items)
+        run: npx tsx scripts/perf.ts 1500
+      - name: Server log
+        if: always()
+        run: tail -n 100 /tmp/fd/server.log || true
+      - name: Open an issue when the nightly run fails
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Nightly check] failed on ${new Date().toISOString().slice(0, 10)}`,
+              body: `The nightly check (tests, phone check or speed check) failed.\n\nSee the run: ${run}`,
+            });

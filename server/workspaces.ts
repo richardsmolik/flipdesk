@@ -28,6 +28,10 @@ import { backupAll, exportShop, listBackups, backupDir, s3Configured, verifyBack
 import { weeklySlot } from "./services/digest.js";
 import { FIRST_WEEK } from "./services/firstWeek.js";
 import { askHelp, draftArticle, setExtraArticles, type HelpTurn } from "./services/help.js";
+import { getProblem, markSent } from "./services/replay.js";
+import { createIssue, githubIssuesReady, problemIssue } from "./services/github.js";
+import { runSelfCheck, type SelfCheck } from "./services/selfcheck.js";
+import { newRecoveryCodes, newSecret, otpauthUrl, useRecoveryCode, verifyTotp } from "./services/totp.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify } from "./services/alerts.js";
 import { globalCheck, lastSeen, reportHealth, shopCheck, startedAt, stateOf, type Check } from "./health.js";
@@ -117,7 +121,7 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS nudges (user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (user_id, kind, ref));
       CREATE TABLE IF NOT EXISTS cancellations (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, reason TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
-    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER", "email_opt_out INTEGER NOT NULL DEFAULT 0", "stripe_mode TEXT", "canceling INTEGER NOT NULL DEFAULT 0"]) {
+    for (const col of ["ai_limit INTEGER", "leaderboard_name TEXT", "plan TEXT", "trial_ends_at TEXT", "stripe_customer_id TEXT", "stripe_subscription_id TEXT", "current_period_end TEXT", "invited_by INTEGER", "email_opt_out INTEGER NOT NULL DEFAULT 0", "stripe_mode TEXT", "canceling INTEGER NOT NULL DEFAULT 0", "totp_secret TEXT", "totp_recovery TEXT", "totp_last_step INTEGER NOT NULL DEFAULT -1"]) {
       try {
         a.exec(`ALTER TABLE users ADD COLUMN ${col}`);
       } catch {
@@ -142,6 +146,9 @@ export class Workspaces {
         last_error TEXT NOT NULL DEFAULT '', announcement_id INTEGER);
       CREATE TABLE IF NOT EXISTS help_questions (id INTEGER PRIMARY KEY, viewer TEXT NOT NULL, question TEXT NOT NULL, page TEXT NOT NULL DEFAULT '',
         answered_by TEXT NOT NULL, top_source TEXT, helpful INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')), actor TEXT NOT NULL, action TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '', ip TEXT);
+      CREATE TABLE IF NOT EXISTS owner_sessions (token_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS help_articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, from_question TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), archived_at TEXT);`);
     try {
@@ -256,7 +263,8 @@ export class Workspaces {
       if (email) setSetting(db, "accountEmail", email);
     }
     // Accounts are checked in front of the shops when hosted; single-user keeps the shared password.
-    const app = createApp(db, { uploadDir, workspace: ctx, password: this.multiuser ? "" : this.password });
+    // The front door (this class) checks sign-in for every shop, including two-step sign-in.
+    const app = createApp(db, { uploadDir, workspace: ctx, password: "" });
     app.set("trust proxy", 1);
     const ws: Workspace = { ...ctx, db, dbFile, uploadDir, app, userId: key.startsWith("u") ? Number(key.slice(1).replace("d", "")) : undefined };
     this.cache.set(key, ws);
@@ -838,6 +846,14 @@ export class Workspaces {
           ? upH < 2 ? "First backup runs within the hour" : "No backup yet"
           : `Last one ${backupAgeH < 1 ? "less than an hour" : `${Math.round(backupAgeH)} h`} ago${lastBackup?.error ? `. ${lastBackup.error}` : ""}`;
     if (isOwner) {
+      const sc = this.siteGet<SelfCheck[]>("selfChecks", [])[0];
+      services.push(
+        !sc
+          ? { key: "self-check", label: "Nightly self-check", state: "off", detail: "Runs every night (speed, database health, disk space)" }
+          : sc.ok
+            ? { key: "self-check", label: "Nightly self-check", state: "ok", detail: `Passed ${Math.max(0, Math.round((Date.now() - Date.parse(sc.at)) / 3600_000))} h ago${sc.disk ? ` · ${sc.disk.freeGB} GB free` : ""}` }
+            : { key: "self-check", label: "Nightly self-check", state: "down", detail: sc.problems.slice(0, 2).join("; ") },
+      );
       services.push({ key: "backup", label: "Nightly backup", state: backupState, detail: backupDetail });
       const chk = this.siteGet<{ at: string; ok: boolean; problems: string[]; photosChecked: number } | null>("lastBackupCheck", null);
       services.push(
@@ -1297,6 +1313,13 @@ export class Workspaces {
         : { key: "ebay-policies", group: "Selling", label: "eBay shipping/payment/return policies", state: "fail", detail: "Pick them before listing", href: "/settings#ebay" });
     }
 
+    if (ebayKeys && ownerDb) {
+      const smoke = getSetting<{ ok: boolean; ranAt: string; env: string } | null>(ownerDb, "ebaySmoke", null);
+      add(smoke?.ok
+        ? { key: "ebay-smoke", group: "Selling", label: "eBay end-to-end test", state: "ok", detail: `Passed ${Math.round((age(smoke.ranAt) ?? 0) / 24)} days ago (${smoke.env})` }
+        : { key: "ebay-smoke", group: "Selling", label: "eBay end-to-end test", state: "warn", detail: smoke ? "Last test failed" : "Not run yet", fix: "Marketplaces → eBay → Run eBay test (lists and ends a test item on eBay's sandbox)", href: "/connections" });
+    }
+
     // Staying informed
     const mail = globalCheck("mail");
     add(!mailConfigured()
@@ -1326,6 +1349,19 @@ export class Workspaces {
     add(chk?.ok
       ? { key: "restore-check", group: "Data safety", label: "Backup restore check", state: "ok", detail: `Passed ${Math.round((age(chk.at) ?? 0) / 24)} days ago` }
       : { key: "restore-check", group: "Data safety", label: "Backup restore check", state: chk ? "fail" : "warn", detail: chk ? "Last check failed" : "Not run yet", href: "/settings" });
+
+    add(this.password || this.multiuser
+      ? this.twofa(this.multiuser ? o?.ws.userId : undefined)
+        ? { key: "2fa", group: "Address & safety", label: "Two-step sign-in (owner)", state: "ok", detail: "On" }
+        : { key: "2fa", group: "Address & safety", label: "Two-step sign-in (owner)", state: this.multiuser ? "warn" : "optional", detail: "Off: a stolen password is enough to get in", href: "/settings" }
+      : { key: "2fa", group: "Address & safety", label: "Two-step sign-in (owner)", state: "optional", detail: "Needs a password first" });
+    add(githubIssuesReady()
+      ? { key: "reports", group: "Staying informed", label: "Problem reports to GitHub", state: "ok", detail: `Issues go to ${process.env.FLIPDESK_GITHUB_REPO}` }
+      : { key: "reports", group: "Staying informed", label: "Problem reports to GitHub", state: "optional", detail: "Without it, reports can still be downloaded and sent by hand", fix: "Set FLIPDESK_GITHUB_REPO and GITHUB_TOKEN (Issues: write)" });
+    const sc = this.siteGet<SelfCheck[]>("selfChecks", [])[0];
+    add(sc
+      ? { key: "selfcheck", group: "Data safety", label: "Nightly self-check", state: sc.ok ? "ok" : "fail", detail: sc.ok ? "Passing" : sc.problems[0] ?? "Problems found", href: "/status" }
+      : { key: "selfcheck", group: "Data safety", label: "Nightly self-check", state: "warn", detail: "Hasn't run yet (runs nightly)" });
 
     // Others using it
     if (this.multiuser) {
@@ -1423,13 +1459,105 @@ export class Workspaces {
     return this.checkBackup();
   }
 
+  // ---------------- Nightly self-check ----------------
+
+  async selfCheckNow(items?: number) {
+    const history = this.siteGet<SelfCheck[]>("selfChecks", []);
+    const dbs = [...this.all().filter((w) => !w.demo).map((w) => ({ name: w.key === "main" ? "shop" : `shop ${w.key}`, db: w.db })), ...(this.accounts ? [{ name: "accounts", db: this.accounts }] : []), { name: "site", db: this.site }];
+    const r = await runSelfCheck({ dbs, dataDir: this.dataDir, history, items });
+    this.siteSet("selfChecks", [r, ...history].slice(0, 14));
+    if (!r.ok) await this.tellOwner("🔴 FlipDesk's nightly check found problems", `${r.problems.join("\n")}\nDetails: Tools → Status.`);
+    return r;
+  }
+
+  async selfCheckIfDue() {
+    const last = this.siteGet<SelfCheck[]>("selfChecks", [])[0];
+    if (last && Date.now() - Date.parse(last.at) < 23 * 3600_000) return null;
+    return this.selfCheckNow();
+  }
+
+  // ---------------- Activity log (owner) ----------------
+
+  audit(req: Request | null, action: string, detail = "", actor?: string) {
+    try {
+      const u = (req as (Request & { fdUser?: Account | null }) | null)?.fdUser;
+      const who = actor ?? (u ? u.email : this.multiuser ? "someone" : "owner");
+      this.site.prepare("INSERT INTO audit (actor, action, detail, ip) VALUES (?, ?, ?, ?)").run(who, action, detail.slice(0, 500), req?.ip ?? null);
+      if (Math.random() < 0.01) this.site.prepare("DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 20000)").run();
+    } catch {
+      /* the log never blocks the action */
+    }
+  }
+
+  auditList(opts: { q?: string; limit?: number; before?: number } = {}) {
+    const q = `%${(opts.q ?? "").trim()}%`;
+    return this.site
+      .prepare(`SELECT * FROM audit WHERE (? = '%%' OR actor LIKE ? OR action LIKE ? OR detail LIKE ?) AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`)
+      .all(q, q, q, q, opts.before ?? null, opts.before ?? null, Math.min(500, opts.limit ?? 100)) as { id: number; at: string; actor: string; action: string; detail: string; ip: string | null }[];
+  }
+
+  // ---------------- Two-step sign-in ----------------
+
+  private pending2fa = new Map<string, { secret: string; exp: number }>();
+  private loginTickets = new Map<string, { key: string; userId?: number; exp: number; tries: number }>();
+  private keyFor = (userId?: number) => (userId ? `u${userId}` : "owner");
+  accountEmail = (userId: number) => (this.accounts?.prepare("SELECT email FROM users WHERE id = ?").get(userId) as { email: string } | undefined)?.email ?? `#${userId}`;
+
+  twofa(userId?: number): { secret: string; recovery: string[]; lastStep: number } | null {
+    if (userId && this.accounts) {
+      const r = this.accounts.prepare("SELECT totp_secret, totp_recovery, totp_last_step FROM users WHERE id = ?").get(userId) as { totp_secret: string | null; totp_recovery: string | null; totp_last_step: number } | undefined;
+      return r?.totp_secret ? { secret: r.totp_secret, recovery: JSON.parse(r.totp_recovery ?? "[]"), lastStep: r.totp_last_step } : null;
+    }
+    return this.siteGet<{ secret: string; recovery: string[]; lastStep: number } | null>("ownerTotp", null);
+  }
+
+  private saveTwofa(userId: number | undefined, v: { secret: string; recovery: string[]; lastStep: number } | null) {
+    if (userId && this.accounts) this.accounts.prepare("UPDATE users SET totp_secret = ?, totp_recovery = ?, totp_last_step = ? WHERE id = ?").run(v?.secret ?? null, v ? JSON.stringify(v.recovery) : null, v?.lastStep ?? -1, userId);
+    else this.siteSet("ownerTotp", v);
+  }
+
+  /** Check a 6-digit code (no reuse) or a one-time recovery code. */
+  checkSecondFactor(userId: number | undefined, code: string): "totp" | "recovery" | null {
+    const t = this.twofa(userId);
+    if (!t) return null;
+    const step = verifyTotp(t.secret, code, Date.now(), t.lastStep);
+    if (step !== null) {
+      this.saveTwofa(userId, { ...t, lastStep: step });
+      return "totp";
+    }
+    const left = useRecoveryCode(t.recovery, code);
+    if (left) {
+      this.saveTwofa(userId, { ...t, recovery: left });
+      return "recovery";
+    }
+    return null;
+  }
+
+  private newTicket(userId?: number) {
+    const t = crypto.randomBytes(24).toString("base64url");
+    for (const [k, v] of this.loginTickets) if (v.exp < Date.now()) this.loginTickets.delete(k);
+    this.loginTickets.set(t, { key: this.keyFor(userId), userId, exp: Date.now() + 5 * 60_000, tries: 0 });
+    return t;
+  }
+
+  /** Single-password mode sessions (used once two-step sign-in is on, so the password alone can't make a cookie). */
+  private newOwnerSession() {
+    const token = crypto.randomBytes(32).toString("base64url");
+    this.site.prepare("DELETE FROM owner_sessions WHERE expires_at < datetime('now')").run();
+    this.site.prepare("INSERT INTO owner_sessions (token_hash, expires_at) VALUES (?, datetime('now','+30 days'))").run(sha(token));
+    return token;
+  }
+
   // ---------------- The front door ----------------
 
   /** Single-user password check (same cookie the shop apps use). */
   private passwordOk(req: Request) {
     if (!this.password) return true;
+    const c = readCookie(req, "fd_session") ?? "";
+    const session = Boolean(c) && Boolean(this.site.prepare("SELECT 1 FROM owner_sessions WHERE token_hash = ? AND expires_at > datetime('now')").get(sha(c)));
+    if (this.twofa()) return session; // with two-step sign-in, only a real session counts
     const v = crypto.createHmac("sha256", this.password).update("flipdesk-session").digest("base64url");
-    return readCookie(req, "fd_session") === v;
+    return session || c === v;
   }
 
   /** Which shop this browser is looking at. */
@@ -1552,6 +1680,39 @@ export class Workspaces {
 
     // ---- Accounts ----
     root.get("/api/auth/mode", (req, res) => void res.json(this.describe(req, this.userFor(req))));
+    // Second step of sign-in (both modes): the ticket from the password step + a 6-digit or recovery code.
+    root.post("/api/login/2fa", json, (req, res) => {
+      const b = z.object({ ticket: z.string().max(100), code: z.string().max(20) }).parse(req.body);
+      const t = this.loginTickets.get(b.ticket);
+      if (!t || t.exp < Date.now()) return void res.status(401).json({ error: "That took too long. Sign in again." });
+      if (++t.tries > 5) return void (this.loginTickets.delete(b.ticket), res.status(429).json({ error: "Too many wrong codes. Sign in again." }));
+      const how = this.checkSecondFactor(t.userId, b.code);
+      if (!how) {
+        this.audit(req, "sign-in failed", "wrong two-step code", t.userId ? this.accountEmail(t.userId) : "owner");
+        return void res.status(401).json({ error: "That code isn't right. Check the time on your phone, or use a recovery code." });
+      }
+      this.loginTickets.delete(b.ticket);
+      const actor = t.userId ? this.accountEmail(t.userId) : "owner";
+      this.audit(req, "signed in", how === "recovery" ? "with a recovery code" : "with two-step code", actor);
+      if (t.userId) res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(t.userId), 60 * 60 * 24 * 30));
+      else res.setHeader("Set-Cookie", cookie(req, "fd_session", this.newOwnerSession(), 60 * 60 * 24 * 30));
+      res.json({ ok: true, recoveryLeft: this.twofa(t.userId)?.recovery.length ?? 0 });
+    });
+    if (!this.multiuser)
+      root.post("/api/login", json, (req, res) => {
+        if (!this.password) return void res.json({ ok: true });
+        const given = String((req.body as { password?: string })?.password ?? "");
+        const ok = given.length === this.password.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(this.password));
+        if (!ok) {
+          this.audit(req, "sign-in failed", "wrong password", "owner");
+          return void res.status(401).json({ error: "Wrong password" });
+        }
+        if (this.twofa()) return void res.json({ needs2fa: true, ticket: this.newTicket() });
+        this.audit(req, "signed in", "", "owner");
+        const v = crypto.createHmac("sha256", this.password).update("flipdesk-session").digest("base64url");
+        res.setHeader("Set-Cookie", cookie(req, "fd_session", v, 60 * 60 * 24 * 30));
+        res.json({ ok: true });
+      });
     if (this.multiuser) {
       const Creds = z.object({ email: z.email().max(200), password: z.string().min(8, "Use at least 8 characters").max(200), invite: z.string().max(200).optional() });
       root.post("/api/auth/signup", json, (req, res) => {
@@ -1559,6 +1720,7 @@ export class Workspaces {
           const b = Creds.parse(req.body);
           const u = this.signup(b.email.trim(), b.password, b.invite?.trim());
           this.get(`u${u.id}`); // create the shop
+          this.audit(req, u.is_owner ? "owner account created" : "signed up", b.invite && !process.env.FLIPDESK_INVITE_CODE ? "with an invite link" : "", u.email);
           if (!u.is_owner && (mailConfigured() || process.env.SMTP_HOST === "test")) {
             const link = (p: string) => `${process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") ?? ""}${p}`;
             void sendMail(
@@ -1577,7 +1739,15 @@ export class Workspaces {
       root.post("/api/auth/login", json, (req, res) => {
         try {
           const b = z.object({ email: z.string().max(200), password: z.string().max(200) }).parse(req.body);
-          const u = this.login(b.email.trim(), b.password);
+          let u: Account;
+          try {
+            u = this.login(b.email.trim(), b.password);
+          } catch (e) {
+            this.audit(req, "sign-in failed", (e as Error).message, b.email.trim().slice(0, 200));
+            throw e;
+          }
+          if (this.twofa(u.id)) return void res.json({ needs2fa: true, ticket: this.newTicket(u.id) });
+          this.audit(req, "signed in", "", u.email);
           res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
           res.json({ ok: true });
         } catch (e) {
@@ -1586,6 +1756,8 @@ export class Workspaces {
       });
       root.post("/api/auth/logout", (req, res) => {
         const t = readCookie(req, "fd_user");
+        const u = this.userFor(req);
+        if (u) this.audit(req, "signed out", "", u.email);
         if (t) this.accounts!.prepare("DELETE FROM sessions WHERE token_hash = ?").run(sha(t));
         res.setHeader("Set-Cookie", [cookie(req, "fd_user", "", 0), cookie(req, "fd_ws", "", 0)]);
         res.json({ ok: true });
@@ -1598,6 +1770,9 @@ export class Workspaces {
         try {
           const b = z.object({ token: z.string().max(200), password: z.string().min(8, "Use at least 8 characters").max(200) }).parse(req.body);
           const u = this.resetPassword(b.token, b.password);
+          this.audit(req, "password reset", "via reset link", u.email);
+          // With two-step sign-in on, a reset link alone never signs anyone in.
+          if (this.twofa(u.id)) return void res.json({ ok: true, signIn: true });
           res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(u.id), 60 * 60 * 24 * 30));
           res.json({ ok: true });
         } catch (e) {
@@ -1661,7 +1836,6 @@ export class Workspaces {
         if (ws) return void ws.app(Object.assign(req, { url: req.originalUrl }), res, next);
         return void res.json({ ok: true, ai: process.env.ANTHROPIC_API_KEY ? "live" : "demo", ebay: "demo" });
       }
-      if (!this.multiuser && req.path === "/login") return void ((req.url = req.originalUrl), this.get("main")!.app(req, res, next));
       const user = this.multiuser ? this.userFor(req) : null;
       if (this.multiuser ? !user : !this.passwordOk(req)) return void res.status(401).json({ error: "login required", auth: this.multiuser ? "accounts" : "password" });
       (req as Request & { fdUser?: Account | null }).fdUser = user;
@@ -1672,6 +1846,12 @@ export class Workspaces {
         if (b && planStatus(b) === "expired")
           return void res.status(402).json({ error: "Your free trial has ended. Choose a plan to keep listing. Your data is safe and you can still view and download it.", billing: true });
       }
+      next();
+    });
+
+    // Owner-only area. Registered right after sign-in so it covers every /api/admin route, wherever it's defined.
+    root.use("/api/admin", (req: Request & { fdUser?: Account | null }, res, next) => {
+      if (!this.multiuser || !req.fdUser?.is_owner) return void res.status(403).json({ error: "Only the owner can do that." });
       next();
     });
 
@@ -1721,11 +1901,125 @@ export class Workspaces {
       try {
         const b = z.object({ current: z.string().max(200), next: z.string().min(8, "Use at least 8 characters").max(200) }).parse(req.body);
         this.changePassword(u.id, b.current, b.next);
+        this.audit(req, "password changed", "", u.email);
         res.json({ ok: true });
       } catch (e) {
         const msg = e instanceof z.ZodError ? e.issues[0]?.message ?? "Check the password" : (e as Error).message;
         res.status((e as { status?: number }).status === 401 ? 400 : ((e as { status?: number }).status ?? 400)).json({ error: msg === "Wrong email or password." ? "Your current password isn't right." : msg });
       }
+    });
+
+    // ---- Two-step sign-in (your account; the owner in single-password mode) ----
+    const who2fa = (req: R, res: Response): { userId?: number; label: string } | null => {
+      if (this.multiuser) {
+        if (req.fdUser) return { userId: req.fdUser.id, label: req.fdUser.email };
+        res.status(401).json({ error: "login required" });
+        return null;
+      }
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" }), null;
+      if (!this.password) return void res.status(400).json({ error: "Set FLIPDESK_PASSWORD first: two-step sign-in adds to a password." }), null;
+      return { label: "owner" };
+    };
+    root.get("/api/2fa", (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      const t = this.twofa(w.userId);
+      res.json({ enabled: Boolean(t), recoveryLeft: t?.recovery.length ?? 0 });
+    });
+    root.post("/api/2fa/setup", (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      if (this.twofa(w.userId)) return void res.status(400).json({ error: "Two-step sign-in is already on." });
+      const secret = newSecret();
+      this.pending2fa.set(this.keyFor(w.userId), { secret, exp: Date.now() + 15 * 60_000 });
+      res.json({ secret, otpauth: otpauthUrl(secret, w.label) });
+    });
+    root.post("/api/2fa/enable", json, (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      const p = this.pending2fa.get(this.keyFor(w.userId));
+      if (!p || p.exp < Date.now()) return void res.status(400).json({ error: "Start again: the setup expired." });
+      const step = verifyTotp(p.secret, z.object({ code: z.string().max(20) }).parse(req.body).code);
+      if (step === null) return void res.status(400).json({ error: "That code doesn't match. Check the code in your app and try again." });
+      const rc = newRecoveryCodes();
+      this.saveTwofa(w.userId, { secret: p.secret, recovery: rc.hashes, lastStep: step });
+      this.pending2fa.delete(this.keyFor(w.userId));
+      // Sign out other devices; keep this one signed in with a fresh session.
+      if (w.userId) {
+        this.accounts!.prepare("DELETE FROM sessions WHERE user_id = ?").run(w.userId);
+        res.setHeader("Set-Cookie", cookie(req, "fd_user", this.newSession(w.userId), 60 * 60 * 24 * 30));
+      } else {
+        this.site.prepare("DELETE FROM owner_sessions").run();
+        res.setHeader("Set-Cookie", cookie(req, "fd_session", this.newOwnerSession(), 60 * 60 * 24 * 30));
+      }
+      this.audit(req, "two-step sign-in turned on", "", w.label);
+      res.json({ enabled: true, recoveryCodes: rc.codes });
+    });
+    root.post("/api/2fa/disable", json, (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      if (!this.checkSecondFactor(w.userId, z.object({ code: z.string().max(20) }).parse(req.body).code)) return void res.status(400).json({ error: "That code isn't right." });
+      this.saveTwofa(w.userId, null);
+      this.audit(req, "two-step sign-in turned off", "", w.label);
+      res.json({ enabled: false });
+    });
+    root.post("/api/2fa/recovery-codes", json, (req: R, res) => {
+      const w = who2fa(req, res);
+      if (!w) return;
+      const t = this.twofa(w.userId);
+      if (!t || !this.checkSecondFactor(w.userId, z.object({ code: z.string().max(20) }).parse(req.body).code)) return void res.status(400).json({ error: "That code isn't right." });
+      const rc = newRecoveryCodes();
+      this.saveTwofa(w.userId, { ...this.twofa(w.userId)!, recovery: rc.hashes });
+      this.audit(req, "new recovery codes", "", w.label);
+      res.json({ recoveryCodes: rc.codes });
+    });
+
+    // ---- Send a problem report (with your OK): owner → GitHub issue; member → the owner's feedback inbox ----
+    root.post("/api/problems/:id/send", json, async (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      const ws = this.current(req, req.fdUser ?? null)!;
+      const id = Number(req.params.id);
+      const report = getProblem(ws.db, id);
+      if (!report) return void res.status(404).json({ error: "Not found" });
+      const note = z.object({ note: z.string().trim().max(1000).default("") }).parse(req.body ?? {}).note;
+      if (this.multiuser && !req.fdUser?.is_owner) {
+        this.site.prepare("INSERT INTO feedback (user_id, email, page, message, context) VALUES (?, ?, '/queue', ?, ?)").run(req.fdUser!.id, req.fdUser!.email, `📋 Problem report: ${report.error}${note ? `\n${note}` : ""}`, JSON.stringify({ problemReport: report }));
+        markSent(ws.db, id, "owner");
+        this.audit(req, "problem report sent to owner", report.error);
+        return void res.json({ sentTo: "owner" });
+      }
+      const issue = problemIssue(report, note);
+      const url = await createIssue(issue.title, issue.body);
+      markSent(ws.db, id, url);
+      this.audit(req, "problem report sent", url);
+      res.json({ sentTo: url });
+    });
+    root.post("/api/admin/feedback/:id/send-report", async (req: R, res) => {
+      const f = this.site.prepare("SELECT context FROM feedback WHERE id = ?").get(Number(req.params.id)) as { context: string } | undefined;
+      const ctx = f ? (JSON.parse(f.context) as { problemReport?: Parameters<typeof problemIssue>[0]; sentTo?: string }) : null;
+      if (!ctx?.problemReport) return void res.status(404).json({ error: "No problem report on this feedback" });
+      const issue = problemIssue(ctx.problemReport, "Forwarded from a member's report.");
+      const url = await createIssue(issue.title, issue.body);
+      this.site.prepare("UPDATE feedback SET context = ? WHERE id = ?").run(JSON.stringify({ ...ctx, sentTo: url }), Number(req.params.id));
+      this.audit(req, "member's problem report sent", url);
+      res.json({ sentTo: url });
+    });
+
+    // ---- Nightly self-check (owner) ----
+    root.get("/api/selfcheck", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json(this.siteGet<SelfCheck[]>("selfChecks", []));
+    });
+    root.post("/api/selfcheck", async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      this.audit(req, "self-check run");
+      res.json(await this.selfCheckNow());
+    });
+
+    // ---- Activity log (owner) ----
+    root.get("/api/audit", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Only the owner can see the activity log." });
+      res.json(this.auditList({ q: String(req.query.q ?? ""), before: req.query.before ? Number(req.query.before) : undefined, limit: Number(req.query.limit) || 100 }));
     });
 
     // ---- Plan & billing (hosted) ----
@@ -1790,6 +2084,7 @@ export class Workspaces {
       const ws = this.current(req, req.fdUser ?? null);
       if (!ws) return void res.status(404).json({ error: "Shop not found" });
       const day = new Date().toISOString().slice(0, 10);
+      this.audit(req, "data downloaded", ws.demo ? "sample shop" : "");
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="flipdesk-${ws.demo ? "sample-" : ""}export-${day}.zip"`);
       await exportShop(ws.db, ws.uploadDir, res, ws.demo ? "Sample shop" : req.fdUser?.email ?? "My shop");
@@ -1821,6 +2116,7 @@ export class Workspaces {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       const b = z.object({ quiet: z.boolean(), quietStart: z.number().int().min(0).max(23), quietEnd: z.number().int().min(0).max(23) }).parse(req.body);
       this.siteSet("alerts", b);
+      this.audit(req, "alert settings", b.quiet ? `quiet ${b.quietStart}:00-${b.quietEnd}:00` : "quiet hours off");
       res.json({ ...this.alertSettings(), quietNow: this.isQuiet() });
     });
 
@@ -1833,15 +2129,19 @@ export class Workspaces {
       void res.json({ last: this.siteGet("lastBackup", null), check: this.siteGet("lastBackupCheck", null), files: listBackups(this.dataDir), offsite: s3Configured(), disabled: process.env.BACKUP_DISABLED === "1" }),
     );
     root.post("/api/backups/:name/check", async (req, res) => void res.json(await this.checkBackup(String(req.params.name))));
-    root.post("/api/backups", async (_req, res) => {
+    root.post("/api/backups", async (req, res) => {
       const r = await this.backupNow();
+      this.audit(req, "backup made", `${path.basename(r.file)} (${Math.round(r.bytes / 1e6)} MB)`);
       res.json({ last: this.siteGet("lastBackup", null), files: listBackups(this.dataDir), offsite: s3Configured(), result: { bytes: r.bytes, uploaded: r.uploaded, error: r.error ?? null } });
     });
     root.get("/api/backups/:name/contents", (req, res) => void res.json({ parts: this.backupContents(String(req.params.name)), lastRestore: this.siteGet("lastRestore", null) }));
     root.post("/api/backups/:name/restore", json, async (req, res) => {
       const b = z.object({ parts: z.array(z.string().max(40)).min(1).max(1000), confirm: z.literal("RESTORE") }).parse(req.body);
-      res.json(await this.restore(String(req.params.name), b.parts));
+      const r = await this.restore(String(req.params.name), b.parts);
+      this.audit(req, "RESTORED from backup", `${req.params.name}: ${b.parts.join(", ")} (undo: ${r.undoBackup})`);
+      res.json(r);
     });
+    root.get("/api/backups/:name", (req, res, next) => (this.audit(req, "backup downloaded", String(req.params.name)), next()));
     root.get("/api/backups/:name", (req, res) => {
       const name = String(req.params.name);
       if (!/^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(name)) return void res.status(400).end();
@@ -1916,21 +2216,19 @@ export class Workspaces {
     });
 
     // ---- Owner: accounts ----
-    root.use("/api/admin", (req: R, res, next) => {
-      if (!this.multiuser || !req.fdUser?.is_owner) return void res.status(403).json({ error: "Only the owner can manage accounts." });
-      next();
-    });
     root.get("/api/admin/accounts", (_req, res) => void res.json({ accounts: this.adminList(), defaultAiLimit: this.defaultAiLimit(), inviteCode: Boolean(process.env.FLIPDESK_INVITE_CODE) }));
     root.post("/api/admin/accounts/:id/reset-link", (req, res) => {
       const id = Number(req.params.id);
       if (!this.accounts!.prepare("SELECT 1 FROM users WHERE id = ?").get(id)) return void res.status(404).json({ error: "No such account" });
       const base = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "") || `${req.protocol}://${req.get("host")}`;
+      this.audit(req, "reset link made", `for ${this.accountEmail(id)}`);
       res.json({ link: `${base}/reset?token=${this.createReset(id, 24)}`, hours: 24 });
     });
     root.put("/api/admin/accounts/:id", json, (req, res) => {
       const b = z.object({ aiLimit: z.number().int().min(0).max(100000).nullable().optional(), comp: z.boolean().optional() }).parse(req.body);
       const id = Number(req.params.id);
       if (b.aiLimit !== undefined) this.accounts!.prepare("UPDATE users SET ai_limit = ? WHERE id = ?").run(b.aiLimit, id);
+      this.audit(req, "account changed", `${this.accountEmail(id)}: ${b.aiLimit !== undefined ? `AI limit ${b.aiLimit ?? "default"}` : ""}${b.comp !== undefined ? ` free plan ${b.comp ? "on" : "off"}` : ""}`.trim());
       // "Free forever" for friends and family (only replaces a plan that isn't a live Stripe subscription).
       if (b.comp === true) this.accounts!.prepare("UPDATE users SET plan = 'comp' WHERE id = ? AND (plan IS NULL OR plan NOT IN ('active','trialing','past_due'))").run(id);
       if (b.comp === false) this.accounts!.prepare("UPDATE users SET plan = NULL WHERE id = ? AND plan = 'comp'").run(id);
@@ -1940,10 +2238,12 @@ export class Workspaces {
     root.post("/api/admin/invites", json, (req: R, res) => {
       const note = z.object({ note: z.string().trim().max(80).default("") }).parse(req.body ?? {}).note;
       const token = this.createInvite(req.fdUser!.id, note);
+      this.audit(req, "invite link made", note);
       res.json({ link: `${base(req)}/join?invite=${token}`, invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
     });
     root.delete("/api/admin/invites/:id", (req, res) => {
       this.accounts!.prepare("UPDATE invites SET revoked_at = datetime('now') WHERE id = ? AND used_at IS NULL").run(Number(req.params.id));
+      this.audit(req, "invite link turned off", `#${req.params.id}`);
       res.json({ invites: this.listInvites().map((i) => ({ ...i, link: `${base(req)}/join?invite=${i.token}` })) });
     });
     root.get("/api/admin/owner-report", (_req, res) => void res.json(this.ownerReport()));
@@ -1955,6 +2255,7 @@ export class Workspaces {
       if (!m[mode]) return void res.status(400).json({ error: mode === "live" ? "Set STRIPE_SECRET_KEY and STRIPE_PRICE_ID (live) first." : "Set STRIPE_TEST_SECRET_KEY and STRIPE_TEST_PRICE_ID first." });
       this.siteSet("stripeMode", mode);
       setStripeMode(mode);
+      this.audit(req, "payments mode", mode.toUpperCase());
       res.json(stripeModes());
     });
     root.get("/api/admin/help-articles", (_req, res) => void res.json(this.helpArticles()));
@@ -2006,6 +2307,7 @@ export class Workspaces {
         })
         .parse(req.body);
       if (b.commit) this.siteSet("lastAnnouncedCommit", b.commit);
+      this.audit(req, "announcement posted", b.title);
       this.site.prepare("INSERT INTO announcements (title, body, link, ends_at) VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE datetime('now', ?) END)").run(b.title, b.body, b.link, b.days, `+${b.days ?? 0} days`);
       res.json(this.announcementList());
     });
@@ -2023,7 +2325,9 @@ export class Workspaces {
       res.json({ ok: true });
     });
     root.delete("/api/admin/accounts/:id", (req, res) => {
+      const email = this.accountEmail(Number(req.params.id));
       this.deleteAccount(Number(req.params.id));
+      this.audit(req, "account deleted", email);
       res.json({ accounts: this.adminList() });
     });
 
@@ -2054,6 +2358,7 @@ export class Workspaces {
         clean[k] = url;
       }
       this.siteSet("helpVideos", clean);
+      this.audit(req, "help videos changed", `${Object.keys(clean).length} set`);
       res.json(clean);
     });
 
@@ -2067,10 +2372,12 @@ export class Workspaces {
       const key = this.demoKey(req.fdUser?.id);
       if (!this.exists(key)) await this.resetDemo(req.fdUser?.id);
       const s = this.createShare(key);
+      this.audit(req, "sample shop shared");
       res.json({ share: { path: `/s/${s.token}`, views: s.views } });
     });
     root.delete("/api/workspace/share", (req: R, res) => {
       this.revokeShare(this.demoKey(req.fdUser?.id));
+      this.audit(req, "share link turned off");
       res.json({ share: null });
     });
 

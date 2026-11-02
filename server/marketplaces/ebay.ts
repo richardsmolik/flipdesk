@@ -648,3 +648,8 @@ export async function ebayTrafficReport(db: Db, days = 30) {
     periodDays: days,
   }));
 }
+
+/** Remove an inventory item (used by the smoke test to clean up after itself). */
+export async function ebayDeleteInventoryItem(db: Db, sku: string) {
+  await call(db, "DELETE", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`);
+}
