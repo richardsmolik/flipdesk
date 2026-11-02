@@ -173,7 +173,7 @@ describe("what's new drafts", () => {
     expect(sellerFacing({ sha: "", date: "", subject: "Fix test timing", body: "" })).toBe(false);
     const d = await draftWhatsNew(changes.slice(0, 3));
     expect(d.ai).toBe(false);
-    expect(d.body.split("\n")).toHaveLength(3);
+    expect(d.body.split("\n")).toHaveLength(Math.min(3, changes.length)); // CI clones can be shallow
 
     const { o } = await setup();
     const wn = (await o.get("/api/admin/whats-new").expect(200)).body;
