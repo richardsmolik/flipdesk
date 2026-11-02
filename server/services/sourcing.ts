@@ -13,6 +13,7 @@ import { aiIsLive, MODEL } from "./ai.js";
 import { recommend } from "./fees.js";
 import { researchPrice } from "./pricing.js";
 import { lookupBarcode, type BarcodeProduct } from "./barcode.js";
+import { useAi } from "../context.js";
 
 export const QuickId = z.object({
   name: z.string().describe("What the item is, specific: brand + model/line + type"),
@@ -45,6 +46,7 @@ export async function quickIdentify(photoPath: string | undefined, hint: string 
       id: { name: q, brand: q.split(/\s+/)[0] ?? "", category: "", search_query: q, est_low: 0, est_high: 0, confidence: "low", demand: "steady", red_flags: [] },
     };
   }
+  useAi("sourcing");
   const client = new Anthropic();
   const response = await client.beta.messages.parse({
     model: MODEL,

@@ -1,7 +1,115 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { toast, useFetch, useMarketplaces } from "../ui";
-import { switchShop, useWorkspace } from "../components/Account";
+import { switchShop, useAccount, useWorkspace } from "../components/Account";
+
+function ShareLink() {
+  const [share, setShare] = useState<{ path: string; views: number } | null | undefined>(undefined);
+  useEffect(() => void api.get<{ share: { path: string; views: number } | null }>("/api/workspace/share").then((r) => setShare(r.share)).catch(() => {}), []);
+  if (share === undefined) return null;
+  const url = share ? location.origin + share.path : "";
+  return (
+    <div className="space-y-2 border-t border-zinc-800 pt-3">
+      <div className="text-sm font-medium">🔗 Share it (read-only)</div>
+      <p className="text-xs text-zinc-500">A link anyone can open to look around your sample shop without signing up. They can't change anything. Your real shop is never shared.</p>
+      {share ? (
+        <>
+          <input className="input font-mono text-xs" readOnly value={url} onFocus={(e) => e.target.select()} />
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn-primary" onClick={() => (navigator.clipboard?.writeText(url), toast("Link copied"))}>Copy link</button>
+            <button className="btn-ghost text-red-300" onClick={async () => (await api.del("/api/workspace/share"), setShare(null), toast("Link turned off"))}>Turn off link</button>
+            <span className="text-xs text-zinc-500">Opened {share.views} time{share.views === 1 ? "" : "s"}</span>
+          </div>
+          {location.hostname === "localhost" || location.hostname === "127.0.0.1" ? <p className="text-xs text-amber-400">This address only works on this computer. Host FlipDesk online (docs/DEPLOY.md) to share it with others.</p> : null}
+        </>
+      ) : (
+        <button className="btn-ghost" onClick={async () => setShare((await api.post<{ share: { path: string; views: number } }>("/api/workspace/share")).share)}>Make a share link</button>
+      )}
+    </div>
+  );
+}
+
+const STEP_LABELS: [string, string][] = [
+  ["profile", "Tell FlipDesk how you sell"],
+  ["ebay", "Connect eBay"],
+  ["item", "Add your first item"],
+  ["crosslist", "Crosslist it"],
+  ["extension", "Install the Chrome extension"],
+  ["notify", "Get sale alerts on your phone"],
+  ["sale", "Make your first sale"],
+];
+
+function HelpVideos() {
+  const [v, setV] = useState<Record<string, string> | null>(null);
+  useEffect(() => void api.get<Record<string, string>>("/api/help-videos").then(setV).catch(() => {}), []);
+  if (!v) return null;
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">🎬 Help videos for "Get started"</h2>
+      <p className="text-sm text-zinc-400">Record a short screen video for any step (Loom, YouTube unlisted, your phone's screen recorder…) and paste the link. It shows as "▶ Watch" under that step{" "}for everyone on this FlipDesk.</p>
+      <div className="space-y-2">
+        {STEP_LABELS.map(([k, label]) => (
+          <label key={k} className="grid items-center gap-1 sm:grid-cols-[14rem_1fr]">
+            <span className="text-sm text-zinc-300">{label}</span>
+            <input className="input" placeholder="https://www.loom.com/share/…" value={v[k] ?? ""} onChange={(e) => setV({ ...v, [k]: e.target.value })} />
+          </label>
+        ))}
+      </div>
+      <button
+        className="btn-primary"
+        onClick={async () => {
+          try {
+            setV(await api.put<Record<string, string>>("/api/help-videos", v));
+            toast("Help videos saved");
+          } catch (e) {
+            toast((e as Error).message, "err");
+          }
+        }}
+      >
+        Save videos
+      </button>
+    </section>
+  );
+}
+
+function AccountSection({ email }: { email: string }) {
+  const [f, setF] = useState({ current: "", next: "" });
+  return (
+    <section className="card space-y-3 p-4">
+      <h2 className="font-semibold">👤 Your account</h2>
+      <p className="text-sm text-zinc-400">Signed in as {email}.</p>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <input className="input" type="password" autoComplete="current-password" placeholder="Current password" value={f.current} onChange={(e) => setF({ ...f, current: e.target.value })} />
+        <input className="input" type="password" autoComplete="new-password" placeholder="New password (8+)" value={f.next} onChange={(e) => setF({ ...f, next: e.target.value })} />
+        <button
+          className="btn-ghost"
+          disabled={!f.current || f.next.length < 8}
+          onClick={async () => {
+            try {
+              await api.post("/api/auth/password", f);
+              setF({ current: "", next: "" });
+              toast("Password changed");
+            } catch (e) {
+              toast((e as Error).message, "err");
+            }
+          }}
+        >
+          Change password
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function SiteSections() {
+  const a = useAccount();
+  return (
+    <>
+      {a?.user && <AccountSection email={a.user.email} />}
+      {a?.canEditSite && <HelpVideos />}
+    </>
+  );
+}
 
 function SampleShop() {
   const w = useWorkspace();
@@ -17,8 +125,9 @@ function SampleShop() {
           <button className="btn-primary" onClick={() => switchShop("enter_demo")}>{w.demoExists ? "Open the sample shop" : "Create a sample shop"}</button>
         )}
         {w.demoExists && <button className="btn-ghost" onClick={() => confirm("Start the sample shop over with fresh data?") && switchShop("reset_demo")}>Start over</button>}
-        {w.demoExists && <button className="btn-ghost text-red-300" onClick={() => confirm("Delete the sample shop and its photos?") && switchShop("delete_demo")}>Delete it</button>}
+        {w.demoExists && <button className="btn-ghost text-red-300" onClick={() => confirm("Delete the sample shop and its photos? Any share link stops working.") && switchShop("delete_demo")}>Delete it</button>}
       </div>
+      <ShareLink />
     </section>
   );
 }
@@ -109,6 +218,7 @@ export default function Settings() {
       </section>
 
       <SampleShop />
+      <SiteSections />
 
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">📱 Phone notifications</h2>

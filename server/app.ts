@@ -1171,6 +1171,8 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     if (err instanceof z.ZodError) return void res.status(400).json({ error: "Invalid input", issues: err.issues });
     if (err instanceof NeedsVariationError) return void res.status(409).json({ error: err.message, variations: err.options });
     const message = err instanceof Error ? err.message : String(err);
+    const status = (err as { status?: number })?.status;
+    if (status && status >= 400 && status < 500) return void res.status(status).json({ error: message });
     console.error("[api]", message);
     res.status(500).json({ error: message });
   });

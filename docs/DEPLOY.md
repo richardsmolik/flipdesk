@@ -115,7 +115,14 @@ FLIPDESK_INVITE_CODE=pick-a-long-code
 - **Phones and the extension just work.** Phone links and extension tokens start with the shop's id (like `u3.`), so the server knows where they belong.
 - **Back up `data/`** (the Fly volume). It holds `accounts.db` and every shop.
 
-Still to do before charging money: per-account AI limits, password reset by email, Stripe billing, and moving to Postgres + object storage once you have more than a few dozen sellers.
+- **AI spending cap.** Everyone except you gets `FLIPDESK_AI_DAILY_LIMIT` AI requests a day (default 40; listing writer, photo AI and sourcing each count one). Their sample shop shares the same allowance. Over the cap, they can still list by hand. Change it per person on the **Accounts** page.
+- **Accounts page (owner only).** Who signed up, items, sales, AI used today, per-person AI limit, a **Reset link** button, and delete.
+- **Forgot password.** With `SMTP_*` and `PUBLIC_BASE_URL` set, "Forgot password?" emails a 1-hour, one-time link. The link always uses `PUBLIC_BASE_URL`, never the address in the request, so nobody can make it point somewhere else. Without email, use the owner's Reset link button and send it yourself. Changing a password through a link signs that person out everywhere.
+- **Share links.** Settings → Sample shop → Make a share link: a read-only view of your sample shop for anyone, no sign-up. Turn it off any time. It shows how many times it was opened.
+- **Leaderboard (opt-in).** People who join with a nickname are ranked each week by how close they are to their goals, then return on cost. Only percentages and counts are shown, never dollars.
+- **Help videos.** Settings → Help videos: paste a Loom/YouTube link per "Get started" step, and everyone sees "▶ Watch" under it.
+
+Still to do before charging money: Stripe billing, and moving to Postgres + object storage once you have more than a few dozen sellers.
 
 ## Becoming a product (later)
 

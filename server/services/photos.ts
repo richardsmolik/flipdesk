@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
 import { aiIsLive, MODEL } from "./ai.js";
+import { useAi } from "../context.js";
 
 export type EditOp =
   | { type: "rotate"; deg: number } // any angle; 90/180/270 for orientation, small values to straighten
@@ -261,6 +262,7 @@ export async function aiAdvice(db: Db, id: number): Promise<{ advice: PhotoAdvic
       advice: { rotate: "0", straighten_degrees: 0, crop: null, brightness: 1.05, contrast: 1.05, saturation: 1.05, warmth: 0, remove_background: false, issues: ["Demo mode: automatic levels only"], tips: ["Add ANTHROPIC_API_KEY for AI photo analysis"] },
     };
   }
+  useAi("photo");
   const small = await sharp(fs.readFileSync(p.path)).rotate().resize(1200, 1200, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
   const client = new Anthropic();
   const r = await client.beta.messages.parse({

@@ -7,7 +7,10 @@ import { Toaster } from "./ui";
 import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
 import { Welcome, type OnboardingState } from "./components/Onboarding";
 import { Shortcuts } from "./components/Shortcuts";
-import { AuthScreen, DemoBanner, ShopSwitch, useWorkspace } from "./components/Account";
+import { AuthScreen, DemoBanner, ResetPage, SharePage, ShopSwitch, useWorkspace } from "./components/Account";
+import { useParams } from "react-router-dom";
+import Leaderboard from "./pages/Leaderboard";
+import Accounts from "./pages/Accounts";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import ItemEditor from "./pages/ItemEditor";
@@ -29,6 +32,10 @@ import PhoneCapture from "./pages/PhoneCapture";
 import Shoot from "./pages/Shoot";
 import Switch from "./pages/Switch";
 
+
+function ShareRoute() {
+  return <SharePage token={useParams().token ?? ""} />;
+}
 
 function Shell() {
   const [needLogin, setNeedLogin] = useState(false);
@@ -52,6 +59,7 @@ function Shell() {
   return (
     <div className="flex min-h-screen">
       <Sidebar
+        shop={shop}
         counts={counts}
         footer={
           health && (
@@ -88,10 +96,12 @@ function Shell() {
           <Route path="/shoot" element={<Shoot />} />
           <Route path="/switch" element={<Switch />} />
           <Route path="/bins/:name" element={<BinDetail />} />
+          <Route path="/leaderboard" element={<Leaderboard />} />
+          <Route path="/accounts" element={<Accounts />} />
         </Routes>
         </div>
       </main>
-      <MobileBar counts={counts} />
+      <MobileBar counts={counts} shop={shop} />
       {welcome && <Welcome onDone={() => (setWelcome(false), window.dispatchEvent(new Event("fd-onboarding-changed")))} />}
       <Shortcuts />
       <Toaster />
@@ -113,6 +123,8 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/print/picklist" element={<PickList />} />
         <Route path="/print/labels" element={<Labels />} />
         <Route path="/m/:token" element={<PhoneCapture />} />
+        <Route path="/reset" element={<ResetPage />} />
+        <Route path="/s/:token" element={<ShareRoute />} />
         <Route path="*" element={<Shell />} />
       </Routes>
     </BrowserRouter>

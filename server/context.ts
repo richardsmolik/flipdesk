@@ -14,6 +14,8 @@ export interface WorkspaceContext {
   urlPrefix: string;
   /** Put in front of phone-link and extension tokens so the server knows which shop they belong to. */
   tokenPrefix: string;
+  /** Hosted with accounts: whose shop this is. */
+  userId?: number;
 }
 
 const als = new AsyncLocalStorage<WorkspaceContext>();
@@ -30,6 +32,17 @@ export function personalEnv(name: (typeof PERSONAL_ENV)[number]) {
   const ws = currentWorkspace();
   if (ws && !ws.owner) return undefined;
   return process.env[name];
+}
+
+/**
+ * AI spending guard. The server installs one when hosted for others (daily cap per account).
+ * Call useAi() right before any paid Claude request; it throws a friendly 429 when the cap is reached.
+ */
+type AiGate = (ws: WorkspaceContext | undefined, kind: string) => void;
+let aiGate: AiGate | null = null;
+export const setAiGate = (g: AiGate | null) => void (aiGate = g);
+export function useAi(kind: string) {
+  aiGate?.(currentWorkspace(), kind);
 }
 
 /** Public URL path of an uploaded photo file in the current shop. */

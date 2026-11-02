@@ -99,6 +99,8 @@ export function Welcome({ onDone }: { onDone: (s: OnboardingState) => void }) {
 export function GetStarted({ onWelcome }: { onWelcome: () => void }) {
   const [s, setS] = useState<OnboardingState | null>(null);
   const [how, setHow] = useState<string | null>(null);
+  const [videos, setVideos] = useState<Record<string, string>>({});
+  useEffect(() => void api.get<Record<string, string>>("/api/help-videos").then(setVideos).catch(() => {}), []);
   useEffect(() => void api.get<OnboardingState>("/api/onboarding").then(setS).catch(() => {}), []);
   if (!s || s.complete || s.checklistHidden) return null;
   const next = s.steps.find((x) => !x.done);
@@ -130,6 +132,9 @@ export function GetStarted({ onWelcome }: { onWelcome: () => void }) {
                   <button className="text-xs text-brand hover:underline" onClick={() => setHow(how === st.key ? null : st.key)} aria-expanded={how === st.key}>
                     {how === st.key ? "Hide steps" : "Show me how"}
                   </button>
+                  {videos[st.key] && (
+                    <a className="ml-3 text-xs text-brand hover:underline" href={videos[st.key]} target="_blank" rel="noreferrer noopener">▶ Watch</a>
+                  )}
                   {how === st.key && (
                     <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-xs text-zinc-400">
                       {st.how.map((h) => <li key={h}>{h}</li>)}

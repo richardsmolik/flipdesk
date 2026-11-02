@@ -3,7 +3,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import { api } from "../api";
 
 /** Navigation grouped by job, with live badges; on phones, a bottom tab bar + "More" sheet. */
-type Entry = { to: string; label: string; icon: string; badge?: keyof Counts };
+type Entry = { to: string; label: string; icon: string; badge?: keyof Counts; only?: "accounts" | "owner" };
 type Group = { key: string; label: string; items: Entry[] };
 export interface Counts { inbox: number; toShip: number; drafts: number; failed: number }
 
@@ -22,7 +22,15 @@ export const GROUPS: Group[] = [
   },
   { key: "source", label: "Source", items: [{ to: "/source", label: "Sourcing mode", icon: "🛒" }, { to: "/mileage", label: "Mileage", icon: "🚗" }] },
   { key: "ship", label: "Ship", items: [{ to: "/shipping", label: "Shipping", icon: "🚚", badge: "toShip" }, { to: "/bins", label: "Bins", icon: "🗄️" }] },
-  { key: "money", label: "Money", items: [{ to: "/sales", label: "Sales & profit", icon: "💵" }, { to: "/reports", label: "Reports", icon: "📈" }] },
+  {
+    key: "money",
+    label: "Money",
+    items: [
+      { to: "/sales", label: "Sales & profit", icon: "💵" },
+      { to: "/reports", label: "Reports", icon: "📈" },
+      { to: "/leaderboard", label: "Leaderboard", icon: "🏆", only: "accounts" },
+    ],
+  },
   { key: "tools", label: "Tools", items: [{ to: "/tools", label: "Power tools", icon: "⚡" }, { to: "/queue", label: "Sync queue", icon: "🔄", badge: "failed" }] },
   {
     key: "setup",
@@ -31,9 +39,19 @@ export const GROUPS: Group[] = [
       { to: "/connections", label: "Marketplaces", icon: "🔌" },
       { to: "/switch", label: "Switch to FlipDesk", icon: "🔀" },
       { to: "/settings", label: "Settings", icon: "⚙️" },
+      { to: "/accounts", label: "Accounts", icon: "👥", only: "owner" },
     ],
   },
 ];
+
+/** Hide "Leaderboard" unless hosted with accounts, and "Accounts" unless you're the owner. */
+export interface NavShop { mode: "single" | "accounts"; user: { owner: boolean } | null; shared?: boolean }
+export function groupsFor(shop?: NavShop | null) {
+  return GROUPS.map((g) => ({
+    ...g,
+    items: g.items.filter((e) => !e.only || (e.only === "accounts" ? shop?.mode === "accounts" && !shop.shared : Boolean(shop?.user?.owner))),
+  }));
+}
 
 const BADGE_TONE: Record<keyof Counts, string> = {
   inbox: "bg-red-600 text-white",
@@ -75,7 +93,7 @@ function Link_({ e, counts, onClick }: { e: Entry; counts: Counts | null; onClic
   );
 }
 
-export function Sidebar({ counts, footer }: { counts: Counts | null; footer?: React.ReactNode }) {
+export function Sidebar({ counts, footer, shop }: { counts: Counts | null; footer?: React.ReactNode; shop?: NavShop | null }) {
   const loc = useLocation();
   const [closed, setClosed] = useState<Record<string, boolean>>(() => {
     try {
@@ -98,7 +116,7 @@ export function Sidebar({ counts, footer }: { counts: Counts | null; footer?: Re
     <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col overflow-y-auto border-r border-zinc-800 bg-zinc-950 p-3 md:flex">
       <div className="mb-4 px-2 pt-2 text-lg font-bold tracking-tight">📦 Flip<span className="text-brand">Desk</span></div>
       <nav className="space-y-3" aria-label="Main">
-        {GROUPS.map((g) => {
+        {groupsFor(shop).map((g) => {
           const active = g.items.some((e) => (e.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(e.to)));
           const isClosed = closed[g.key] && !active; // never hide the section you're in
           const pending = g.items.reduce((a, e) => a + (e.badge && counts ? counts[e.badge] : 0), 0);
@@ -130,7 +148,7 @@ const TABS: Entry[] = [
   { to: "/shipping", label: "Ship", icon: "🚚", badge: "toShip" },
 ];
 
-export function MobileBar({ counts }: { counts: Counts | null }) {
+export function MobileBar({ counts, shop }: { counts: Counts | null; shop?: NavShop | null }) {
   const [more, setMore] = useState(false);
   const loc = useLocation();
   useEffect(() => setMore(false), [loc.pathname]);
@@ -139,7 +157,7 @@ export function MobileBar({ counts }: { counts: Counts | null }) {
       {more && (
         <div className="fixed inset-0 z-40 bg-black/60 md:hidden" onClick={() => setMore(false)}>
           <div className="absolute inset-x-0 bottom-16 max-h-[75vh] space-y-3 overflow-y-auto rounded-t-2xl border-t border-zinc-800 bg-zinc-950 p-4 pb-6" onClick={(e) => e.stopPropagation()}>
-            {GROUPS.map((g) => (
+            {groupsFor(shop).map((g) => (
               <div key={g.key}>
                 {g.label && <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{g.label}</div>}
                 <div className="grid grid-cols-2 gap-0.5">{g.items.map((e) => <Link_ key={e.to} e={e} counts={counts} />)}</div>

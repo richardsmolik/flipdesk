@@ -15,6 +15,7 @@ import { z } from "zod/v4";
 import fs from "node:fs";
 import path from "node:path";
 import type { Comp } from "./pricing.js";
+import { useAi } from "../context.js";
 
 export const MODEL = "claude-opus-5-5";
 
@@ -71,6 +72,7 @@ export interface GenerateInput {
 
 export async function generateListing(input: GenerateInput): Promise<{ draft: ListingDraft; demo: boolean; model?: string }> {
   if (!aiIsLive()) return { draft: demoDraft(input), demo: true };
+  useAi("listing");
 
   const client = new Anthropic();
   const images = input.photoPaths.slice(0, 8).map((p) => ({
