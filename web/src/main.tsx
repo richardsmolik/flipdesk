@@ -7,6 +7,7 @@ import { Toaster } from "./ui";
 import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
 import { Welcome, type OnboardingState } from "./components/Onboarding";
 import { Shortcuts } from "./components/Shortcuts";
+import Uptime from "./pages/Uptime";
 import { AuthScreen, DemoBanner, NotMePage, PlanBanner, ResetPage, SharePage, ShopSwitch, useBilling, useWorkspace } from "./components/Account";
 import Billing from "./pages/Billing";
 import StatusPage from "./pages/Status";
@@ -138,6 +139,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/m/:token" element={<PhoneCapture />} />
         <Route path="/reset" element={<ResetPage />} />
         <Route path="/not-me" element={<NotMePage />} />
+        <Route path="/uptime" element={<Uptime />} />
         <Route path="/join" element={<AuthScreen />} />
         <Route path="/s/:token" element={<ShareRoute />} />
         <Route path="*" element={<Shell />} />

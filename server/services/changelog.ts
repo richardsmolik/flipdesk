@@ -5,12 +5,10 @@
  * plus GITHUB_TOKEN for a private repo) when the server has no .git folder (Docker / Fly).
  */
 import { execFileSync } from "node:child_process";
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
 import { useAi } from "../context.js";
-import { trackAnthropic } from "../health.js";
-import { aiIsLive, MODEL } from "./ai.js";
+import { AiRefusal, askStructured } from "./llm.js";
+import { aiIsLive } from "./ai.js";
 
 export interface Change { sha: string; date: string; subject: string; body: string }
 
@@ -92,22 +90,18 @@ export async function draftWhatsNew(changes: Change[]): Promise<{ title: string;
     };
   }
   useAi("whats-new");
-  const client = trackAnthropic(new Anthropic());
   const log = changes
     .slice(0, 25)
     .map((c) => `## ${c.subject}\n${c.body.slice(0, 1500)}`)
     .join("\n\n");
-  const r = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: betaZodOutputFormat(Draft) },
-    system:
+  let d: z.infer<typeof Draft>;
+  try {
+    d = (await askStructured({ task: "whats-new", system:
       "You write short in-app announcements for FlipDesk, a reseller tool. From the developer change log, pick what sellers will notice and care about (new features, big fixes), skip internal work (tests, docs, refactors, hosting/admin details only the owner sees). Plain words, no jargon, no version numbers or commit ids. App paths you may link: /, /inventory, /items/new, /shoot, /bulk, /bundles, /source, /shipping, /sales, /reports, /tools, /status, /help, /settings, /connections, /billing.",
-    messages: [{ role: "user", content: `Recent updates:\n\n${log}` }],
-  });
-  if (r.stop_reason === "refusal" || !r.parsed_output) return { title: "What's new in FlipDesk", body: changes.slice(0, 6).map((c) => `• ${c.subject}`).join("\n"), link: "", ai: false };
-  const d = r.parsed_output;
+      text: `Recent updates:\n\n${log}`, effort: "low", maxTokens: 4000 }, Draft)).output;
+  } catch (e) {
+    if (!(e instanceof AiRefusal)) throw e;
+    return { title: "What's new in FlipDesk", body: changes.slice(0, 6).map((c) => `• ${c.subject}`).join("\n"), link: "", ai: false };
+  }
   return { title: d.title.slice(0, 120), body: d.body.slice(0, 1000), link: /^\/[\w/-]*$/.test(d.link) ? d.link : "", ai: true };
 }

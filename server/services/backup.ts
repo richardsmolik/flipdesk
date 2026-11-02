@@ -107,7 +107,7 @@ export async function backupAll(dataDir: string, sources: BackupSource[], now = 
     fs.renameSync(partial, file);
     // Keep the newest N local copies.
     const keep = Math.max(1, Number(process.env.BACKUP_KEEP) || 7);
-    const all = fs.readdirSync(dir).filter((f) => /^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(f)).sort();
+    const all = fs.readdirSync(dir).filter((f) => /^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(f)).sort((a, b) => order(a).localeCompare(order(b)));
     for (const old of all.slice(0, Math.max(0, all.length - keep))) fs.rmSync(path.join(dir, old), { force: true });
     const res: BackupResult = { file, bytes: r.bytes, files: r.files, at: now.toISOString(), uploaded: null };
     if (s3Configured()) {
@@ -161,14 +161,18 @@ async function s3Put(key: string, file: string) {
   return url.toString().replace(/\?.*$/, "");
 }
 
+const order = (f: string) => {
+  const m = f.match(/^flipdesk-(\d{8}-\d{4,6})(?:-(\d+))?\.zip$/)!;
+  return `${m[1]}-${(m[2] ?? "1").padStart(4, "0")}`;
+};
 export function listBackups(dataDir: string) {
   const dir = backupDir(dataDir);
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
     .filter((f) => /^flipdesk-\d{8}-\d{4,6}(-\d+)?\.zip$/.test(f))
-    .sort()
-    .reverse()
+    // Newest first. Two made in the same second are "-2", "-3"… (a plain text sort would put those before the first).
+    .sort((a, b) => order(b).localeCompare(order(a)))
     .map((f) => ({ name: f, bytes: fs.statSync(path.join(dir, f)).size }));
 }
 

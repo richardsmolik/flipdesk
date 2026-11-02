@@ -94,6 +94,8 @@ const backup = () =>
     .then((r) => r && console.log(`[backup] ${r.file} (${Math.round(r.bytes / 1e6)} MB)${r.uploaded ? " uploaded" : ""}${r.error ? ` - ${r.error}` : ""}`))
     .then(() => shops.checkBackupIfDue()) // monthly restore drill
     .then((c) => c && console.log(`[backup check] ${c.name}: ${c.ok ? "restores fine" : c.problems.join("; ")}`))
+    .then(() => shops.fireDrillIfDue()) // monthly practice recovery
+    .then((d) => d && console.log(`[fire drill] ${d.backup}: ${d.ok ? d.estimate : d.problems.join("; ")}`))
     .catch((e) => console.error("[backup]", (e as Error).message));
 setInterval(backup, 60 * 60_000).unref();
 setTimeout(backup, 5 * 60_000).unref();

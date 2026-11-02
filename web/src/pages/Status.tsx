@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { timeAgo } from "../ui";
+import { timeAgo, toast } from "../ui";
 
 interface Row { key: string; label: string; state: "ok" | "warn" | "down" | "off"; detail: string; lastOk?: string | null }
 interface Incident { service: string; label: string; started_at: string; ended_at: string | null; last_error: string }
@@ -104,6 +104,27 @@ function Speed() {
           </div>
           <p className="text-xs text-zinc-500">Measured on a test shop of 800 items, {t.runs.now} check{t.runs.now === 1 ? "" : "s"} this week and {t.runs.before} last week. “Slower” means at least 25% and 30 ms slower.</p>
         </>
+      )}
+    </section>
+  );
+}
+
+/** Owner: turn the public /uptime page on or off. */
+function PublicPage() {
+  const [p, setP] = useState<{ on: boolean; title: string } | null>(null);
+  useEffect(() => void api.get<{ on: boolean; title: string }>("/api/public-status/settings").then(setP).catch(() => setP(null)), []);
+  if (!p) return null;
+  const save = async (next: { on: boolean; title: string }) => setP(await api.put<{ on: boolean; title: string }>("/api/public-status/settings", next));
+  return (
+    <section className="card space-y-2 p-4">
+      <h2 className="font-semibold">🌐 Public status page</h2>
+      <p className="text-sm text-zinc-400">A page anyone can open without signing in, showing whether FlipDesk, the AI, eBay and email are working, plus the last 30 days of problems (times only, never error details). Share it so people can check before messaging you.</p>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={p.on} onChange={(e) => void save({ ...p, on: e.target.checked })} /> Turned on</label>
+      {p.on && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <a className="text-brand hover:underline" href="/uptime" target="_blank" rel="noreferrer">{location.origin}/uptime ↗</a>
+          <button className="btn-ghost px-2 py-0.5 text-xs" onClick={() => (navigator.clipboard?.writeText(`${location.origin}/uptime`), toast("Link copied"))}>Copy link</button>
+        </div>
       )}
     </section>
   );
@@ -238,6 +259,7 @@ export default function StatusPage() {
       <Speed />
       <RealUse />
       <Version />
+      <PublicPage />
       {!!s.incidents?.length && (
         <section className="card p-4">
           <h2 className="font-semibold">Recent problems</h2>

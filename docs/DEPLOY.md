@@ -169,6 +169,9 @@ See `docs/SECURITY.md` for the review and what's protected. Two settings matter 
 - **Going back to the previous version.** Every start notes which version is running (`data/versions.json`), and a version that opens its data and serves is marked as working. Tools → Status → Version lists them, and with `FLY_API_TOKEN` set (`fly tokens create deploy`, then `fly secrets set FLY_API_TOKEN=…`) one button switches the machine back to the last version that worked, keeping its settings. If an update ever can't open your data (it failed its check on a copy), FlipDesk doesn't crash in a loop. It shows a "back in a minute, your data wasn't changed" page, emails `FLIPDESK_OWNER_EMAIL`, and goes back to the last good version by itself (turn that off with `FLIPDESK_AUTO_ROLLBACK=0`). Going back changes the program, not your data.
 - **Speed in real use** (Status, owner): how long each screen takes for the people actually using FlipDesk, with their real data: typical time, slowest 1 in 20, and how that compares with the usual. You get one alert a day if a screen gets clearly slower (+50% and +100 ms) or 1 in 20 loads takes over 2 s, and the weekly report gets a 🧭 line. Only the screen and the time are kept, never what's on it.
 - **eBay "Copy results to share"** on the eBay test and the weekly check: a plain-text copy of every step and eBay's exact words (no keys or tokens), ready to paste into a message. See [FIRST-EBAY-CHECK.md](FIRST-EBAY-CHECK.md).
+- **Public status page** (Tools → Status → Public status page, off by default): `/uptime` shows anyone, without signing in, whether the app, AI, eBay and email are working, 30-day uptime, and the last 30 days of problems (times only, never error details). Share the link so people can check before messaging you.
+- **Your own sign-in history** (Settings → Signed-in devices → Recent sign-in activity): everyone, members included, sees their own last 25 sign-ins, failed tries, new devices and security changes, with IP addresses.
+- **Fire drill** (Settings → Backups → 🧯 Fire drill, and automatically every month): practises a full recovery from the newest backup in a scratch folder. It unpacks every database and photo, opens each shop with this version, opens every main screen, and checks the photos listings use are all there. It then estimates how long a real recovery would take (download, new server, unpack). A failure alerts you; the launch checklist shows the last result.
 - **Try a new version on your real data before deploying it:** download a backup (Settings → Backups → Download), then on your computer, with the new code:
 
   ```bash
@@ -176,6 +179,17 @@ See `docs/SECURITY.md` for the review and what's protected. Two settings matter 
   ```
 
   It copies everything to a scratch folder (your file is never changed), updates every shop, checks nothing was lost, opens every main screen and times it. It ends with "✅ Safe to deploy" or "🔴 Don't deploy this version yet" (exit code 1). The nightly GitHub check also runs it on its own test server's data.
+
+## AI: Claude, ChatGPT, Gemini, Kimi, DeepSeek
+
+FlipDesk works with any of these. Add one key or several, either in the server's settings (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MOONSHOT_API_KEY`, `DEEPSEEK_API_KEY`) or by pasting them in **Settings → AI**. Pasted keys are stored on the server, never shown again, and are included in backups.
+
+- **Order and fallback.** Settings → AI lists the ones in use, in order. Each request goes to the first. If it fails (down, overloaded, out of credit, bad answer), the next takes over by itself, and Status shows which one is failing. A refusal is not retried on another AI.
+- **Photos vs text.** Photo jobs (listing writer, photo fixes, store scanner) skip models that turn out not to read photos. Tick **Cheapest first for text-only jobs** to send help answers and announcements to the cheapest AI you have.
+- **Models.** Claude uses `claude-opus-5-5`. For the others FlipDesk asks each provider for its current model list and picks its newest general model. **Choose…** lets you pick another, and **Test** sends a tiny request and shows the time.
+- **Same quality checks everywhere.** Every answer is checked against the same listing format; one that doesn't match falls through to the next AI. ChatGPT and Gemini get the format as a strict schema. Kimi and DeepSeek get JSON mode with the format in the prompt.
+- **Privacy.** DeepSeek and Kimi (Moonshot AI) are companies based in China, so photos and text sent to them are processed there. On Google AI Studio's free tier, Google may use what you send to improve its products. Leave a provider out of the list to never use it.
+- **Spending.** Every call's tokens are counted and priced at list prices. These are estimates: set what you actually pay under each provider in Settings → AI. Settings → AI shows this month's spend by AI, by feature and by member. Set a **monthly limit**, and (hosted) a **per-member monthly limit**, which doesn't apply to you. You get alerts at 80% and 100%. At the limit AI pauses until the 1st; writing and listing by hand still work.
 
 ## Uptime monitor (recommended)
 

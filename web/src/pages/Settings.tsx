@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/browser";
 import { timeAgo, toast, useFetch, useMarketplaces } from "../ui";
 import { switchShop, useAccount, useWorkspace } from "../components/Account";
+import AiSettings from "../components/AiSettings";
 
 function ShareLink() {
   const [share, setShare] = useState<{ path: string; views: number } | null | undefined>(undefined);
@@ -117,7 +118,8 @@ function AccountSection({ email, optOut }: { email: string; optOut: boolean }) {
 }
 
 interface BackupCheckInfo { name: string; at: string; ok: boolean; photosChecked: number; photosTotal: number; problems: string[]; databases: { name: string; ok: boolean; detail: string }[] }
-interface BackupState { check?: BackupCheckInfo | null; last: { at?: string; bytes?: number; uploaded?: string | null; error?: string | null; failedAt?: string } | null; files: { name: string; bytes: number }[]; offsite: boolean; disabled: boolean }
+interface Drill { at: string; backup: string; ok: boolean; steps: { name: string; ms: number; ok: boolean; detail: string }[]; problems: string[]; estimate: string; minutes: number }
+interface BackupState { drill?: Drill | null; check?: BackupCheckInfo | null; last: { at?: string; bytes?: number; uploaded?: string | null; error?: string | null; failedAt?: string } | null; files: { name: string; bytes: number }[]; offsite: boolean; disabled: boolean }
 const mb = (b: number) => (b > 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`);
 
 function YourData() {
@@ -238,7 +240,45 @@ function Backups() {
         >
           {busy ? "Backing up…" : "Back up now"}
         </button>
+        {b.files.length > 0 && (
+          <button
+            className="btn-ghost"
+            disabled={busy}
+            title="Practise a full recovery from the newest backup in a scratch folder, and time it"
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const d = await api.post<Drill>("/api/backups/fire-drill", {});
+                setB({ ...b, drill: d });
+                toast(d.ok ? `🧯 Fire drill passed: ${d.estimate.split(":")[0]}` : `Fire drill failed: ${d.problems[0]}`, d.ok ? "ok" : "err");
+              } catch (e) {
+                toast((e as Error).message, "err");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            🧯 Fire drill
+          </button>
+        )}
       </div>
+      {b.drill && (
+        <details className="text-sm">
+          <summary className={`cursor-pointer ${b.drill.ok ? "text-green-400" : "text-red-400"}`}>
+            {b.drill.ok ? "✓" : "✕"} Fire drill {new Date(b.drill.at).toLocaleDateString()}: {b.drill.ok ? `if the server died, you'd be back in ${b.drill.estimate.split(":")[0].replace(/^About/, "about")}.` : b.drill.problems[0]} Runs monthly.
+          </summary>
+          <ol className="mt-1 space-y-0.5 text-xs">
+            {b.drill.steps.map((st) => (
+              <li key={st.name} className="flex gap-2">
+                <span className={st.ok ? "text-green-400" : "text-red-400"}>{st.ok ? "✓" : "✕"}</span>
+                <span className="text-zinc-300">{st.name}</span>
+                <span className="text-zinc-500">{st.detail} · {(st.ms / 1000).toFixed(1)} s</span>
+              </li>
+            ))}
+          </ol>
+          <p className="mt-1 text-xs text-zinc-500">{b.drill.estimate} Practised on a copy of {backupWhen(b.drill.backup)} in a scratch folder: nothing real was touched.</p>
+        </details>
+      )}
       {b.files.length > 0 && (
         <ul className="space-y-1 text-sm">
           {b.files.map((f) => (
@@ -422,8 +462,9 @@ function Passkeys() {
 
 interface DeviceRow { device: string; ip: string | null; firstSeen: string; lastSeen: string; thisOne: boolean }
 function Devices() {
-  const [st, setSt] = useState<{ devices: DeviceRow[]; canSignOut: boolean } | null>(null);
-  useEffect(() => void api.get<{ devices: DeviceRow[]; canSignOut: boolean }>("/api/devices").then(setSt).catch(() => setSt(null)), []);
+  type Ev = { at: string; action: string; detail: string; ip: string | null };
+  const [st, setSt] = useState<{ devices: DeviceRow[]; canSignOut: boolean; history?: Ev[] } | null>(null);
+  useEffect(() => void api.get<{ devices: DeviceRow[]; canSignOut: boolean; history?: Ev[] }>("/api/devices").then(setSt).catch(() => setSt(null)), []);
   if (!st || !st.canSignOut) return null;
   return (
     <section className="card space-y-3 p-4">
@@ -451,6 +492,20 @@ function Devices() {
       >
         Sign out everywhere else
       </button>
+      {!!st.history?.length && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-zinc-300">Recent sign-in activity ({st.history.length})</summary>
+          <ul className="mt-2 space-y-1">
+            {st.history.map((e, i) => (
+              <li key={i} className={`flex flex-wrap justify-between gap-x-3 text-xs ${/failed/.test(e.action) ? "text-amber-300" : "text-zinc-300"}`}>
+                <span>{/failed/.test(e.action) ? "⚠️" : /new device/.test(e.action) ? "📱" : "•"} {e.action}{e.detail ? `: ${e.detail}` : ""}</span>
+                <span className="text-zinc-500">{timeAgo(e.at)}{e.ip ? ` · ${e.ip}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs text-zinc-500">Something you don't recognize? Press “Sign out everywhere else”, then change your password.</p>
+        </details>
+      )}
     </section>
   );
 }
@@ -609,6 +664,7 @@ function SiteSections() {
       {!w?.shared && <TwoStep />}
       {!w?.shared && <Devices />}
       {!w?.shared && <YourData />}
+      {a?.canEditSite && <AiSettings hosted={w?.mode === "accounts"} />}
       {a?.canEditSite && <Backups />}
       {a?.canEditSite && <AlertSettings />}
       {a?.canEditSite && <ActivityLog />}
@@ -713,7 +769,7 @@ export default function Settings() {
       <section className="card space-y-3 p-4">
         <h2 className="font-semibold">Status</h2>
         <ul className="text-sm text-zinc-300">
-          <li>{s.status.ai ? "✅" : "⚠️"} AI listing writer {s.status.ai ? "live (Claude)" : "in demo mode - set ANTHROPIC_API_KEY in .env"}</li>
+          <li>{s.status.ai ? "✅" : "⚠️"} AI listing writer {s.status.ai ? "live" : "in demo mode - add a key in AI below"}</li>
           <li>{s.status.ebayLive ? "✅" : "⚠️"} eBay {s.status.ebayLive ? "connected" : s.status.ebayKeys ? "keys found - click Connect eBay on Marketplaces" : "in demo mode - add eBay keys to .env"}</li>
         </ul>
         <div>

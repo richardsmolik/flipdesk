@@ -4,12 +4,10 @@
  * so each answer is cheap). Without one, the best-matching doc sections are shown instead.
  */
 import fs from "node:fs";
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
 import { useAi } from "../context.js";
-import { reportHealth, trackAnthropic } from "../health.js";
-import { aiIsLive, MODEL } from "./ai.js";
+import { AiRefusal, askStructured, askText } from "./llm.js";
+import { aiIsLive } from "./ai.js";
 import { HOW } from "./onboarding.js";
 
 export interface Section { title: string; text: string; source: string }
@@ -102,36 +100,21 @@ export async function askHelp(question: string, history: HelpTurn[] = [], page =
   const sources = searchDocs(question, 3, opts);
   if (!aiIsLive()) return { answer: null as string | null, sources, demo: true };
   useAi("help"); // counts against the person's daily AI allowance
-  const client = new Anthropic();
-  const messages: Anthropic.Beta.BetaMessageParam[] = [
-    ...history.slice(-6).map((t) => ({ role: t.role, content: t.content.slice(0, 4000) })),
-    { role: "user", content: `${page ? `(I'm on the page ${page})\n` : ""}${question}` },
-  ];
   try {
-    const r = await client.beta.messages.create({
-      model: MODEL,
-      max_tokens: 8000,
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      output_config: { effort: "low" }, // quick how-to answers
-      // The docs are the same for every question: cache them so follow-ups cost a fraction.
-      // Static docs first and cached; the owner's own articles (which change now and then) after them.
-      system: [
-        { type: "text", text: `${SYSTEM}\n\n${docs().corpus}`, cache_control: { type: "ephemeral" } },
-        ...(extra().length ? [{ type: "text" as const, text: `<doc name="FlipDesk help articles (most specific, prefer these)">\n${extra().map((a) => `## ${a.title}\n${a.body}`).join("\n\n")}\n</doc>` }] : []),
-      ],
-      messages,
+    const r = await askText({
+      task: "help",
+      system: SYSTEM,
+      // The docs are the same for every question: Claude caches them so follow-ups cost a fraction.
+      // Static docs first; the owner's own articles (which change now and then) after them.
+      docs: [docs().corpus, ...(extra().length ? [`<doc name="FlipDesk help articles (most specific, prefer these)">\n${extra().map((a) => `## ${a.title}\n${a.body}`).join("\n\n")}\n</doc>`] : [])],
+      history: history.slice(-6).map((t) => ({ role: t.role, content: t.content.slice(0, 4000) })),
+      text: `${page ? `(I'm on the page ${page})\n` : ""}${question}`,
+      effort: "low", // quick how-to answers
+      maxTokens: 8000,
     });
-    reportHealth("ai", true);
-    if (r.stop_reason === "refusal") return { answer: "I can't help with that one. Try rephrasing, or use 💬 Send feedback.", sources, demo: false };
-    const answer = r.content
-      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-    return { answer: answer || "I couldn't find that in the docs.", sources, demo: false };
+    return { answer: r.text || "I couldn't find that in the docs.", sources, demo: false };
   } catch (e) {
-    reportHealth("ai", false, (e as Error).message);
+    if (e instanceof AiRefusal) return { answer: "I can't help with that one. Try rephrasing, or use 💬 Send feedback.", sources, demo: false };
     throw e;
   }
 }
@@ -153,16 +136,21 @@ export async function draftArticle(question: string, page = ""): Promise<{ title
     };
   }
   useAi("help-article");
-  const client = trackAnthropic(new Anthropic());
-  const r = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: betaZodOutputFormat(ArticleDraft) },
-    system: [{ type: "text", text: `You write short help articles for FlipDesk sellers, using ONLY the documentation below. If the docs don't answer it, write the best partial answer and end with "(Owner: please check this.)".\n\n${docs().corpus}`, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: `A seller asked${page ? ` on the page ${page}` : ""}: "${question}". Write the help article.` }],
-  });
-  if (r.stop_reason === "refusal" || !r.parsed_output) return { title, body: "", ai: false };
-  return { title: r.parsed_output.title.slice(0, 160), body: r.parsed_output.body.slice(0, 3000), ai: true };
+  try {
+    const r = await askStructured(
+      {
+        task: "help-article",
+        system: `You write short help articles for FlipDesk sellers, using ONLY the documentation below. If the docs don't answer it, write the best partial answer and end with "(Owner: please check this.)".`,
+        docs: [docs().corpus],
+        text: `A seller asked${page ? ` on the page ${page}` : ""}: "${question}". Write the help article.`,
+        effort: "low",
+        maxTokens: 4000,
+      },
+      ArticleDraft,
+    );
+    return { title: r.output.title.slice(0, 160), body: r.output.body.slice(0, 3000), ai: true };
+  } catch (e) {
+    if (e instanceof AiRefusal) return { title, body: "", ai: false };
+    throw e;
+  }
 }

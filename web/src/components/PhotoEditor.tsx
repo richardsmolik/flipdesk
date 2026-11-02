@@ -146,7 +146,7 @@ export default function PhotoEditor({ item, photoId, onClose, onSaved }: { item:
       onSaved(r.item);
       reset();
       setNotes(r.advice);
-      toast(r.demo ? "Auto-enhanced (demo: add ANTHROPIC_API_KEY for AI analysis)" : `AI applied: ${r.applied.join(", ")}${r.backgroundSkipped ? " (add a background-removal key to also clean the background)" : ""}`);
+      toast(r.demo ? "Auto-enhanced (demo: add an AI key in Settings → AI for AI analysis)" : `AI applied: ${r.applied.join(", ")}${r.backgroundSkipped ? " (add a background-removal key to also clean the background)" : ""}`);
     } catch (e) {
       toast((e as Error).message, "err");
     } finally {

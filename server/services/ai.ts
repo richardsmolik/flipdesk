@@ -6,19 +6,17 @@
  * (server-side "default" routing) so a rare safety decline gets retried on a
  * fallback model inside the same call.
  *
- * With no ANTHROPIC_API_KEY the writer runs a deterministic demo so the app
+ * With no AI key at all (see llm.ts) the writer runs a deterministic demo so the app
  * is fully usable offline.
  */
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
+import { AiRefusal, anyAi, askStructured, CLAUDE_MODEL } from "./llm.js";
 import fs from "node:fs";
 import path from "node:path";
 import type { Comp } from "./pricing.js";
 import { useAi } from "../context.js";
-import { trackAnthropic } from "../health.js";
 
-export const MODEL = "claude-opus-5-5";
+export const MODEL = CLAUDE_MODEL;
 
 export const CONDITIONS = ["new_with_tags", "new_without_tags", "like_new", "used_excellent", "used_good", "used_fair", "for_parts"] as const;
 
@@ -60,8 +58,9 @@ function mediaType(file: string): "image/jpeg" | "image/png" | "image/webp" | "i
   return "image/jpeg";
 }
 
+/** Any AI set up (Claude, ChatGPT, Gemini, Kimi or DeepSeek). See llm.ts. */
 export function aiIsLive() {
-  return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  return anyAi();
 }
 
 export interface GenerateInput {
@@ -71,15 +70,11 @@ export interface GenerateInput {
   comps?: Comp[];
 }
 
-export async function generateListing(input: GenerateInput): Promise<{ draft: ListingDraft; demo: boolean; model?: string }> {
+export async function generateListing(input: GenerateInput): Promise<{ draft: ListingDraft; demo: boolean; model?: string; provider?: string }> {
   if (!aiIsLive()) return { draft: demoDraft(input), demo: true };
   useAi("listing");
 
-  const client = trackAnthropic(new Anthropic());
-  const images = input.photoPaths.slice(0, 8).map((p) => ({
-    type: "image" as const,
-    source: { type: "base64" as const, media_type: mediaType(p), data: fs.readFileSync(p).toString("base64") },
-  }));
+  const images = input.photoPaths.slice(0, 8).map((p) => ({ mediaType: mediaType(p), data: fs.readFileSync(p).toString("base64") }));
 
   const compsText = input.comps?.length
     ? `Comparable listings:\n${input.comps
@@ -97,23 +92,14 @@ export async function generateListing(input: GenerateInput): Promise<{ draft: Li
     .filter(Boolean)
     .join("\n\n");
 
-  const response = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 16000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "medium", format: betaZodOutputFormat(ListingDraft) },
-    system: SYSTEM,
-    messages: [{ role: "user", content: [...images, { type: "text", text }] }],
-  });
-
-  if (response.stop_reason === "refusal") {
-    throw new Error("The AI declined to describe these photos. Try different photos or fill the listing in manually.");
+  try {
+    const r = await askStructured({ task: "listing", system: SYSTEM, text, images, effort: "medium", maxTokens: 16000 }, ListingDraft);
+    return { draft: r.output, demo: false, model: r.model, provider: r.provider };
+  } catch (e) {
+    if (e instanceof AiRefusal) throw new Error("The AI declined to describe these photos. Try different photos or fill the listing in manually.");
+    if (/cut off|no answer/.test((e as Error).message)) throw new Error("The AI response was incomplete. Please try again.");
+    throw e;
   }
-  if (response.stop_reason === "max_tokens" || !response.parsed_output) {
-    throw new Error("The AI response was incomplete. Please try again.");
-  }
-  return { draft: response.parsed_output, demo: false, model: response.model };
 }
 
 /** Offline demo: plausible draft built from the hint/filename so the UI flow works without a key. */
@@ -130,7 +116,7 @@ export function demoDraft(input: GenerateInput): ListingDraft {
   return {
     title,
     short_title: title.slice(0, 60),
-    description: `${title}\n\n- Brand: ${brand}\n- Condition: Pre-owned, good condition (see photos)\n- Ships fast & well packaged\n\n(Demo mode: add ANTHROPIC_API_KEY to generate real AI listings from your photos.)`,
+    description: `${title}\n\n- Brand: ${brand}\n- Condition: Pre-owned, good condition (see photos)\n- Ships fast & well packaged\n\n(Demo mode: add an AI key in Settings → AI to generate real listings from your photos.)`,
     brand,
     category: "",
     condition: "used_good",

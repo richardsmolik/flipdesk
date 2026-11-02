@@ -83,7 +83,7 @@ function NewItem() {
         const r = await api.post<{ draft: Draft; demo: boolean }>("/api/ai/generate", fd);
         await api.patch(`/api/items/${item.id}`, applyDraft(r.draft));
         sessionStorage.setItem(`draft-${item.id}`, JSON.stringify(r.draft));
-        toast(r.demo ? "Demo draft created - add ANTHROPIC_API_KEY for real AI" : "Listing written - review and crosslist");
+        toast(r.demo ? "Demo draft created - add an AI key in Settings → AI for real AI" : "Listing written - review and crosslist");
       }
       nav(`/items/${item.id}`);
     } catch (e) {

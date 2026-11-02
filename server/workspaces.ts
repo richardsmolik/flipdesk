@@ -34,6 +34,8 @@ import { runSelfCheck, speedLine, speedTrend, type SelfCheck } from "./services/
 import { newRecoveryCodes, newSecret, otpauthUrl, useRecoveryCode, verifyTotp } from "./services/totp.js";
 import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify, raiseAlert } from "./services/alerts.js";
+import { getAiRouting, keySource, listModels, pickModel, plan, priceOf, PROVIDER_IDS, PROVIDERS, providerReady, setAiCostSink, setAiKeys, setAiRouting, testProvider, type AiCall, type AiRouting, type ProviderId } from "./services/llm.js";
+import { fireDrill, type FireDrill } from "./services/fireDrill.js";
 import { currentDay, mergeDay, realTrend, recordTiming, type RealDay } from "./services/realSpeed.js";
 import { listVersions, markFailed, previousGood, flyReady, switchImage, currentImage } from "./services/versions.js";
 import { describeDevice, ensurePasskeys, finishLogin, finishRegistration, hasPasskeys, listPasskeys, loginOptions, registrationOptions, relyingParty, removePasskey, renamePasskey } from "./services/passkeys.js";
@@ -88,11 +90,17 @@ export class Workspaces {
     this.mainUploads = opts.mainUploads ?? process.env.FLIPDESK_UPLOADS ?? path.join(this.dataDir, "uploads");
     this.password = opts.password ?? process.env.FLIPDESK_PASSWORD ?? "";
     fs.mkdirSync(this.dataDir, { recursive: true });
-    if (this.multiuser) {
-      this.accounts = this.openAccounts();
-      setAiGate((ws, kind) => this.chargeAi(ws, kind));
-    } else setAiGate(null);
+    if (this.multiuser) this.accounts = this.openAccounts();
+    // Every AI request: monthly budget check (all modes), then the daily allowance per account (hosted).
+    setAiGate((ws, kind) => {
+      this.checkAiBudget(ws);
+      if (this.multiuser) this.chargeAi(ws, kind);
+    });
     this.site = this.openSite();
+    // The owner's AI choices (Settings → AI) and every call's cost.
+    setAiRouting(this.siteGet<AiRouting>("aiRouting", { order: [], models: {} }));
+    setAiKeys(this.siteGet<Partial<Record<ProviderId, string>>>("aiKeys", {}));
+    setAiCostSink((c) => this.recordAiCall(c));
     // Single-password mode, owner lost every passkey and recovery code: start once with FLIPDESK_PASSKEY_RESET=1.
     if (!this.multiuser && process.env.FLIPDESK_PASSKEY_RESET === "1") {
       this.site.prepare("DELETE FROM passkey_only WHERE owner_key = 'owner'").run();
@@ -159,6 +167,9 @@ export class Workspaces {
       CREATE TABLE IF NOT EXISTS owner_sessions (token_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS known_devices (actor_key TEXT NOT NULL, device_hash TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', ip TEXT,
         first_seen TEXT NOT NULL DEFAULT (datetime('now')), last_seen TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (actor_key, device_hash));
+      CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')), provider TEXT NOT NULL, model TEXT NOT NULL,
+        task TEXT NOT NULL, user_id INTEGER, ws_key TEXT, in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS ai_calls_at ON ai_calls(at);
       CREATE TABLE IF NOT EXISTS passkey_only (owner_key TEXT PRIMARY KEY, recovery TEXT NOT NULL DEFAULT '[]', enabled_at TEXT NOT NULL DEFAULT (datetime('now')));
       CREATE TABLE IF NOT EXISTS not_me (token_hash TEXT PRIMARY KEY, actor_key TEXT NOT NULL, device TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')),
         expires_at TEXT NOT NULL, used_at TEXT);
@@ -217,6 +228,82 @@ export class Workspaces {
     this.accounts
       .prepare("INSERT INTO ai_usage (user_id, day, calls) VALUES (?, date('now'), 1) ON CONFLICT(user_id, day) DO UPDATE SET calls = calls + 1")
       .run(ws.userId);
+  }
+
+  // ---------------- AI spending ----------------
+
+  aiBudget() {
+    const b = this.siteGet<{ monthly?: number | null; perMember?: number | null }>("aiBudget", {});
+    const env = Number(process.env.FLIPDESK_AI_MONTHLY_BUDGET);
+    return { monthly: b.monthly ?? (env > 0 ? env : null), perMember: b.perMember ?? null };
+  }
+  /** $ spent on AI this calendar month (UTC), all accounts or one. */
+  aiSpentThisMonth(userId?: number) {
+    const r = this.site
+      .prepare(`SELECT COALESCE(SUM(cost),0) AS c FROM ai_calls WHERE at >= strftime('%Y-%m-01','now') ${userId ? "AND user_id = ?" : ""}`)
+      .get(...(userId ? [userId] : [])) as { c: number };
+    return Math.round(r.c * 10000) / 10000;
+  }
+  private checkAiBudget(ws: WorkspaceContext | undefined) {
+    const b = this.aiBudget();
+    if (b.monthly !== null && this.aiSpentThisMonth() >= b.monthly)
+      throw Object.assign(new Error(`This month's AI budget ($${b.monthly}) is used up. AI features are paused until the 1st${this.multiuser ? " (the owner can raise the budget)" : " (raise it in Settings → AI)"}. You can still write and list items by hand.`), { status: 429 });
+    if (this.multiuser && b.perMember !== null && ws?.userId && !this.isOwnerId(ws.userId) && this.aiSpentThisMonth(ws.userId) >= b.perMember)
+      throw Object.assign(new Error(`You've used this month's AI allowance. It resets on the 1st. You can still write and list items by hand.`), { status: 429 });
+  }
+  private isOwnerId = (id: number) => Boolean((this.accounts?.prepare("SELECT is_owner FROM users WHERE id = ?").get(id) as { is_owner: number } | undefined)?.is_owner);
+
+  private recordAiCall(c: AiCall) {
+    this.site
+      .prepare("INSERT INTO ai_calls (provider, model, task, user_id, ws_key, in_tokens, out_tokens, cost) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(c.provider, c.model.slice(0, 100), c.task, c.ws?.userId ?? null, c.ws?.key ?? null, Math.round(c.inTokens), Math.round(c.outTokens), c.cost);
+    if (Math.random() < 0.01) this.site.prepare("DELETE FROM ai_calls WHERE at < datetime('now','-400 days')").run();
+    // Heads-up at 80% and 100% of the monthly budget (once each per month).
+    const b = this.aiBudget();
+    if (b.monthly) {
+      const spent = this.aiSpentThisMonth();
+      const month = new Date().toISOString().slice(0, 7);
+      const sent = this.siteGet<Record<string, boolean>>("aiBudgetAlerts", {});
+      for (const pct of [80, 100]) {
+        const key = `${month}:${pct}`;
+        if (spent >= (b.monthly * pct) / 100 && !sent[key]) {
+          this.siteSet("aiBudgetAlerts", { ...sent, [key]: true });
+          void this.tellOwner(pct === 100 ? "🛑 AI budget used up for this month" : "💸 80% of this month's AI budget is used", `$${spent.toFixed(2)} of $${b.monthly} spent on AI this month.${pct === 100 ? " AI features are paused until the 1st." : ""} Change it in Settings → AI.`).catch(() => {});
+          break;
+        }
+      }
+    }
+  }
+
+  /** Owner's Settings → AI: providers, choices, this month's spending. */
+  aiOverview() {
+    const r = getAiRouting();
+    const by = (col: string) =>
+      this.site.prepare(`SELECT ${col} AS k, COUNT(*) AS calls, ROUND(SUM(cost), 4) AS cost FROM ai_calls WHERE at >= strftime('%Y-%m-01','now') GROUP BY ${col} ORDER BY cost DESC`).all() as { k: string | number | null; calls: number; cost: number }[];
+    const saved = this.siteGet<Partial<Record<ProviderId, string>>>("aiKeys", {});
+    return {
+      providers: PROVIDER_IDS.map((id) => ({
+        id,
+        name: PROVIDERS[id].name,
+        note: PROVIDERS[id].note,
+        signup: PROVIDERS[id].signup,
+        keyEnv: PROVIDERS[id].keys[0],
+        ready: providerReady(id),
+        keySource: keySource(id),
+        keyHint: saved[id] ? `…${saved[id]!.slice(-4)}` : null,
+        model: r.models[id] ?? "",
+        price: priceOf(id),
+      })),
+      routing: { order: r.order, textOrder: r.textOrder ?? [], models: r.models },
+      plan: { photos: plan({ images: true }), text: plan() },
+      budget: this.aiBudget(),
+      spent: {
+        month: this.aiSpentThisMonth(),
+        byProvider: by("provider"),
+        byTask: by("task"),
+        byMember: this.multiuser ? by("user_id").map((x) => ({ ...x, k: x.k ? this.accountEmail(Number(x.k)) : "(server)" })) : [],
+      },
+    };
   }
 
   // ---------------- Server-wide settings ----------------
@@ -659,12 +746,14 @@ export class Workspaces {
       const t = to.toISOString().slice(0, 10);
       const n = (sql: string) => Number((a.prepare(sql).get(f, t) as { n: number }).n);
       const calls = n("SELECT COALESCE(SUM(calls),0) AS n FROM ai_usage WHERE day >= ? AND day < ?");
+      // Real cost from each call's tokens when tracked; the old per-call estimate for older weeks.
+      const tracked = (this.site.prepare("SELECT COALESCE(SUM(cost),0) AS c FROM ai_calls WHERE date(at) >= ? AND date(at) < ?").get(f, t) as { c: number }).c;
       rows.push({
         week: f,
         activeSellers: n("SELECT COUNT(DISTINCT d.user_id) AS n FROM activity_days d JOIN users u ON u.id = d.user_id AND u.is_owner = 0 WHERE d.day >= ? AND d.day < ?"),
         signups: n("SELECT COUNT(*) AS n FROM users WHERE is_owner = 0 AND date(created_at) >= ? AND date(created_at) < ?"),
         aiCalls: calls,
-        aiCost: Math.round(calls * costPer * 100) / 100,
+        aiCost: Math.round((tracked > 0 ? tracked : calls * costPer) * 100) / 100,
       });
     }
     const users = a.prepare("SELECT id FROM users WHERE is_owner = 0").all() as { id: number }[];
@@ -853,7 +942,7 @@ export class Workspaces {
     const backupAgeH = lastBackup?.at ? (Date.now() - Date.parse(lastBackup.at)) / 3600_000 : null;
     const services: Row[] = [
       { key: "server", label: "FlipDesk", state: "ok", detail: `Running since ${new Date(startedAt).toLocaleString("en-US", { timeZone: "UTC" })} UTC` },
-      from(globalCheck("ai"), "AI writer (Claude)", "ai", process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN ? null : "Not set up (demo writer in use)", "Answering"),
+      from(globalCheck("ai"), `AI writer (${plan().map((id) => PROVIDERS[id].name.split(" (")[0]).join(" → ") || "none"})`, "ai", plan().length ? null : "Not set up (demo writer in use)", "Answering"),
       from(globalCheck("ebay"), "eBay", "ebay", process.env.EBAY_CLIENT_ID ? null : "Not set up (demo mode)", "Reachable"),
       from(globalCheck("mail"), "Email", "mail", mailConfigured() ? null : "Not set up", "Sending"),
     ];
@@ -1331,11 +1420,17 @@ export class Workspaces {
 
     // AI & marketplaces
     const ai = globalCheck("ai");
-    add(!(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN)
-      ? { key: "ai", group: "Selling", label: "AI listing writer", state: "warn", detail: "No Anthropic key: the demo writer is used", fix: "Set ANTHROPIC_API_KEY (console.anthropic.com)" }
+    add(!plan().length
+      ? { key: "ai", group: "Selling", label: "AI listing writer", state: "warn", detail: "No AI key: the demo writer is used", fix: "Add a key in Settings → AI (Claude, ChatGPT, Gemini, Kimi or DeepSeek)", href: "/settings" }
       : stateOf(ai) === "down"
         ? { key: "ai", group: "Selling", label: "AI listing writer", state: "fail", detail: `Last try failed: ${ai!.lastError}`, href: "/status" }
-        : { key: "ai", group: "Selling", label: "AI listing writer", state: "ok", detail: ai ? "Key set and answering" : "Key set (not used since the server started)" });
+        : { key: "ai", group: "Selling", label: "AI listing writer", state: "ok", detail: `${plan().map((id) => PROVIDERS[id].name.split(" (")[0]).join(" → ")}${plan().length > 1 ? " (falls back in that order)" : ""}${ai ? ", answering" : ""}` });
+    if (plan().length) {
+      const b = this.aiBudget();
+      add(b.monthly !== null
+        ? { key: "ai-budget", group: "Selling", label: "AI monthly budget", state: "ok", detail: `$${this.aiSpentThisMonth().toFixed(2)} of $${b.monthly} used this month` }
+        : { key: "ai-budget", group: "Selling", label: "AI monthly budget", state: "optional", detail: "No limit set: AI spending isn't capped", href: "/settings" });
+    }
     const ebayKeys = Boolean(process.env.EBAY_CLIENT_ID && process.env.EBAY_CLIENT_SECRET);
     add(!ebayKeys
       ? { key: "ebay-keys", group: "Selling", label: "eBay developer keys", state: "warn", detail: "eBay is in demo mode", fix: "Follow docs/EBAY_SETUP.md" }
@@ -1388,6 +1483,10 @@ export class Workspaces {
       ? { key: "restore-check", group: "Data safety", label: "Backup restore check", state: "ok", detail: `Passed ${Math.round((age(chk.at) ?? 0) / 24)} days ago` }
       : { key: "restore-check", group: "Data safety", label: "Backup restore check", state: chk ? "fail" : "warn", detail: chk ? "Last check failed" : "Not run yet", href: "/settings" });
 
+    const drill = this.siteGet<FireDrill | null>("lastFireDrill", null);
+    add(drill
+      ? { key: "fire-drill", group: "Data safety", label: "Fire drill (practice recovery)", state: drill.ok ? "ok" : "fail", detail: drill.ok ? `Passed ${Math.round((age(drill.at) ?? 0) / 24)} days ago: recovery would take ${drill.estimate.split(":")[0].toLowerCase()}` : drill.problems[0] ?? "Failed", href: "/settings" }
+      : { key: "fire-drill", group: "Data safety", label: "Fire drill (practice recovery)", state: "warn", detail: "Not run yet (runs monthly once there's a backup)", href: "/settings" });
     add(this.password || this.multiuser
       ? this.twofa(this.multiuser ? o?.ws.userId : undefined)
         ? { key: "2fa", group: "Address & safety", label: "Two-step sign-in (owner)", state: "ok", detail: "On" }
@@ -1431,7 +1530,7 @@ export class Workspaces {
           ? { key: "stripe-webhook", group: "Others using it", label: "Stripe webhook", state: "ok", detail: `Last event ${Math.round(age(evt)! * 10) / 10} h ago` }
           : { key: "stripe-webhook", group: "Others using it", label: "Stripe webhook", state: "fail", detail: "Stripe hasn't reached FlipDesk yet", fix: `Add ${base || "your address"}/api/billing/webhook in Stripe → Webhooks` });
       } else add({ key: "stripe", group: "Others using it", label: "Payments", state: "optional", detail: "Off: everyone is free" });
-      add(process.env.ANTHROPIC_API_KEY ? { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "ok", detail: `${this.defaultAiLimit()} requests/day per person` } : { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "optional", detail: "No AI key" });
+      add(plan().length ? { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "ok", detail: `${this.defaultAiLimit()} requests/day per person` } : { key: "ai-cap", group: "Others using it", label: "AI spending cap", state: "optional", detail: "No AI key" });
     }
     const counted = out.filter((c) => c.state !== "optional");
     return { checks: out, ready: counted.filter((c) => c.state === "ok").length, total: counted.length, blockers: counted.filter((c) => c.state === "fail").length };
@@ -1512,6 +1611,51 @@ export class Workspaces {
     if (last?.at && Date.now() - Date.parse(last.at) < days * 86400_000) return null;
     if (!listBackups(this.dataDir).length) return null;
     return this.checkBackup();
+  }
+
+  // ---------------- Public status page ----------------
+
+  /** What anyone may see (when the owner turns it on): up/down per service, 30-day uptime, incident times. No error details. */
+  publicStatus(now = Date.now()) {
+    const since = new Date(now - 30 * 86400_000).toISOString().slice(0, 19).replace("T", " ");
+    const rows = this.site.prepare("SELECT service, started_at, ended_at FROM incidents WHERE ended_at IS NULL OR ended_at >= ? ORDER BY started_at DESC").all(since) as { service: string; started_at: string; ended_at: string | null }[];
+    const t = (x: string) => Date.parse(x.replace(" ", "T") + "Z");
+    const services = ["app", "ai", "ebay", "mail"].map((key) => {
+      const mine = rows.filter((r) => r.service === key);
+      const down = mine.some((r) => !r.ended_at);
+      const downMs = mine.reduce((a, r) => a + Math.max(0, (r.ended_at ? t(r.ended_at) : now) - Math.max(t(r.started_at), now - 30 * 86400_000)), 0);
+      return { key, label: key === "app" ? "FlipDesk app" : (Workspaces.INCIDENT_LABEL[key] ?? key).replace(/^The /, ""), state: down ? "down" : "ok", uptime30: Math.max(0, Math.round((1 - downMs / (30 * 86400_000)) * 10000) / 100) };
+    });
+    return {
+      name: this.siteGet<{ title?: string }>("publicStatus", {}).title || "FlipDesk",
+      overall: services.some((x) => x.state === "down") ? "degraded" : "ok",
+      services,
+      incidents: rows
+        .filter((r) => r.service !== "backup")
+        .slice(0, 20)
+        .map((r) => ({ label: (Workspaces.INCIDENT_LABEL[r.service] ?? r.service).replace(/^The /, ""), startedAt: new Date(t(r.started_at)).toISOString(), endedAt: r.ended_at ? new Date(t(r.ended_at)).toISOString() : null, minutes: Math.max(1, Math.round(((r.ended_at ? t(r.ended_at) : now) - t(r.started_at)) / 60_000)) })),
+      updatedAt: new Date(now).toISOString(),
+    };
+  }
+
+  // ---------------- Fire drill ----------------
+
+  /** Practise a full recovery from a backup (default: the newest) in a scratch folder; tell the owner if it fails. */
+  async fireDrillNow(name?: string) {
+    const pick = name ?? listBackups(this.dataDir)[0]?.name;
+    if (!pick) throw Object.assign(new Error("Make a backup first (Back up now)."), { status: 400 });
+    const r = await fireDrill(this.backupFile(pick));
+    this.siteSet("lastFireDrill", r);
+    if (!r.ok) await this.tellOwner("🔴 FlipDesk's fire drill failed", `Practising a recovery from ${pick} didn't work:\n${r.problems.slice(0, 3).join("\n")}\nMake a fresh backup and run the drill again (Settings → Backups).`);
+    return r;
+  }
+  /** Monthly (FLIPDESK_FIRE_DRILL_DAYS, default 30). */
+  async fireDrillIfDue() {
+    const last = this.siteGet<FireDrill | null>("lastFireDrill", null);
+    const days = Number(process.env.FLIPDESK_FIRE_DRILL_DAYS) || 30;
+    if (last && Date.now() - Date.parse(last.at) < days * 86400_000) return null;
+    if (!listBackups(this.dataDir).length) return null;
+    return this.fireDrillNow();
   }
 
   // ---------------- Nightly self-check ----------------
@@ -2102,6 +2246,13 @@ export class Workspaces {
       res.json({ ok: true });
     });
 
+    // ---- Public status page (/uptime), only when the owner turned it on ----
+    root.get("/api/public-status", (_req, res) => {
+      res.setHeader("Cache-Control", "public, max-age=30");
+      if (!this.siteGet<{ on?: boolean }>("publicStatus", {}).on) return void res.status(404).json({ error: "This status page isn't turned on." });
+      res.json(this.publicStatus());
+    });
+
     // ---- Passkey sign-in (no password needed; counts as both steps) ----
     root.post("/api/passkeys/login/options", async (req, res) => {
       if (!this.multiuser && !this.password) return void res.status(400).json({ error: "No sign-in needed here." });
@@ -2144,7 +2295,7 @@ export class Workspaces {
       if (req.path === "/health") {
         const ws = this.multiuser ? this.cache.values().next().value : this.get("main");
         if (ws) return void ws.app(Object.assign(req, { url: req.originalUrl }), res, next);
-        return void res.json({ ok: true, ai: process.env.ANTHROPIC_API_KEY ? "live" : "demo", ebay: "demo" });
+        return void res.json({ ok: true, ai: plan().length ? "live" : "demo", ebay: "demo" });
       }
       const user = this.multiuser ? this.userFor(req) : null;
       if (this.multiuser ? !user : !this.passwordOk(req)) return void res.status(401).json({ error: "login required", auth: this.multiuser ? "accounts" : "password" });
@@ -2349,7 +2500,14 @@ export class Workspaces {
     root.get("/api/devices", (req: R, res) => {
       if (req.fdShare) return void res.status(403).json({ error: "read-only" });
       if (this.multiuser && !req.fdUser) return void res.status(401).json({ error: "login required" });
-      res.json({ devices: this.devicesFor(req.fdUser?.id, req), canSignOut: this.multiuser || Boolean(this.password) });
+      // Your own recent sign-in activity (everyone sees their own; the owner's full log is the Activity log).
+      const actor = req.fdUser?.email ?? "owner";
+      const history = this.site
+        .prepare(
+          `SELECT at, action, detail, ip FROM audit WHERE LOWER(actor) = LOWER(?) AND action IN ('signed in','sign-in failed','new device','signed out','signed out everywhere','sign-in code sent','passkey added','passkey removed','two-step sign-in turned on','two-step sign-in turned off','passkey-only turned on','passkey-only turned off','password changed','password reset') ORDER BY id DESC LIMIT 25`,
+        )
+        .all(actor) as { at: string; action: string; detail: string; ip: string | null }[];
+      res.json({ devices: this.devicesFor(req.fdUser?.id, req), canSignOut: this.multiuser || Boolean(this.password), history });
     });
     root.post("/api/devices/sign-out-everywhere", (req: R, res) => {
       if (req.fdShare) return void res.status(403).json({ error: "read-only" });
@@ -2411,6 +2569,79 @@ export class Workspaces {
       if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
       this.audit(req, "self-check run");
       res.json(await this.selfCheckNow());
+    });
+
+    // ---- Public status page switch (owner) ----
+    root.get("/api/public-status/settings", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json({ on: false, title: "", ...this.siteGet("publicStatus", {}) });
+    });
+    root.put("/api/public-status/settings", json, (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const b = z.object({ on: z.boolean(), title: z.string().trim().max(60).default("") }).parse(req.body);
+      this.siteSet("publicStatus", b);
+      this.audit(req, b.on ? "public status page turned on" : "public status page turned off");
+      res.json(b);
+    });
+
+    // ---- AI providers, order, models, keys and budget (owner) ----
+    const P = z.enum(PROVIDER_IDS as [ProviderId, ...ProviderId[]]);
+    root.get("/api/ai", (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      res.json(this.aiOverview());
+    });
+    root.put("/api/ai/routing", json, (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const b = z.object({ order: z.array(P).max(5), textOrder: z.array(P).max(5).optional(), models: z.partialRecord(P, z.string().trim().max(120)).optional(), prices: z.partialRecord(P, z.tuple([z.number().min(0).max(1000), z.number().min(0).max(1000)])).optional() }).parse(req.body);
+      const next: AiRouting = { ...getAiRouting(), order: [...new Set(b.order)], textOrder: b.textOrder ? [...new Set(b.textOrder)] : getAiRouting().textOrder, models: Object.fromEntries(Object.entries({ ...getAiRouting().models, ...(b.models ?? {}) }).filter(([, v]) => v)), prices: { ...getAiRouting().prices, ...(b.prices ?? {}) } };
+      this.siteSet("aiRouting", next);
+      setAiRouting(next);
+      this.audit(req, "AI settings changed", `order: ${next.order.join(" → ") || "default"}`);
+      res.json(this.aiOverview());
+    });
+    root.put("/api/ai/keys/:id", json, (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const id = P.parse(req.params.id);
+      const key = z.object({ key: z.string().trim().max(400) }).parse(req.body).key;
+      const keys = { ...this.siteGet<Partial<Record<ProviderId, string>>>("aiKeys", {}) };
+      if (key) keys[id] = key;
+      else delete keys[id];
+      this.siteSet("aiKeys", keys);
+      setAiKeys(keys);
+      this.audit(req, key ? "AI key saved" : "AI key removed", PROVIDERS[id].name);
+      res.json(this.aiOverview());
+    });
+    root.get("/api/ai/models/:id", async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const id = P.parse(req.params.id);
+      try {
+        const models = await listModels(id, true);
+        res.json({ models, auto: pickModel(id, models) });
+      } catch (e) {
+        res.status(502).json({ error: (e as Error).message });
+      }
+    });
+    root.post("/api/ai/test/:id", async (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const id = P.parse(req.params.id);
+      if (!providerReady(id)) return void res.status(400).json({ error: `Add a ${PROVIDERS[id].name} key first.` });
+      try {
+        res.json(await testProvider(id));
+      } catch (e) {
+        res.status(502).json({ ok: false, error: (e as Error).message });
+      }
+    });
+    root.put("/api/ai/budget", json, (req: R, res) => {
+      if (!owner(req)) return void res.status(403).json({ error: "Owner only" });
+      const b = z.object({ monthly: z.number().min(0).max(100000).nullable(), perMember: z.number().min(0).max(100000).nullable() }).parse(req.body);
+      this.siteSet("aiBudget", b);
+      this.audit(req, "AI budget changed", `monthly ${b.monthly ?? "none"}, per member ${b.perMember ?? "none"}`);
+      res.json(this.aiOverview());
+    });
+    // Anyone signed in: their own AI spending this month (and the allowance, if there is one).
+    root.get("/api/ai/mine", (req: R, res) => {
+      const u = req.fdUser;
+      res.json({ spent: u ? this.aiSpentThisMonth(u.id) : this.aiSpentThisMonth(), allowance: u && !u.is_owner ? this.aiBudget().perMember : this.aiBudget().monthly });
     });
 
     // ---- Version and going back (owner) ----
@@ -2542,8 +2773,13 @@ export class Workspaces {
       next();
     });
     root.get("/api/backups", (_req, res) =>
-      void res.json({ last: this.siteGet("lastBackup", null), check: this.siteGet("lastBackupCheck", null), files: listBackups(this.dataDir), offsite: s3Configured(), disabled: process.env.BACKUP_DISABLED === "1" }),
+      void res.json({ last: this.siteGet("lastBackup", null), check: this.siteGet("lastBackupCheck", null), drill: this.siteGet("lastFireDrill", null), files: listBackups(this.dataDir), offsite: s3Configured(), disabled: process.env.BACKUP_DISABLED === "1" }),
     );
+    root.post("/api/backups/fire-drill", json, async (req, res) => {
+      const name = z.object({ name: z.string().max(100).optional() }).parse(req.body ?? {}).name;
+      this.audit(req, "fire drill run", name ?? "newest backup");
+      res.json(await this.fireDrillNow(name));
+    });
     root.post("/api/backups/:name/check", async (req, res) => void res.json(await this.checkBackup(String(req.params.name))));
     root.post("/api/backups", async (req, res) => {
       const r = await this.backupNow();

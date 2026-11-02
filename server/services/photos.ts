@@ -9,17 +9,15 @@
  *  - Background removal: Photoroom (PHOTOROOM_API_KEY), remove.bg (REMOVEBG_API_KEY) or Clipdrop.
  * The first edit keeps the original file so "Revert" always works.
  */
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
 import sharp from "sharp";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
-import { aiIsLive, MODEL } from "./ai.js";
+import { aiIsLive } from "./ai.js";
 import { useAi } from "../context.js";
-import { trackAnthropic } from "../health.js";
+import { AiRefusal, askStructured } from "./llm.js";
 
 export type EditOp =
   | { type: "rotate"; deg: number } // any angle; 90/180/270 for orientation, small values to straighten
@@ -260,23 +258,28 @@ export async function aiAdvice(db: Db, id: number): Promise<{ advice: PhotoAdvic
   if (!aiIsLive()) {
     return {
       demo: true,
-      advice: { rotate: "0", straighten_degrees: 0, crop: null, brightness: 1.05, contrast: 1.05, saturation: 1.05, warmth: 0, remove_background: false, issues: ["Demo mode: automatic levels only"], tips: ["Add ANTHROPIC_API_KEY for AI photo analysis"] },
+      advice: { rotate: "0", straighten_degrees: 0, crop: null, brightness: 1.05, contrast: 1.05, saturation: 1.05, warmth: 0, remove_background: false, issues: ["Demo mode: automatic levels only"], tips: ["Add an AI key (Settings → AI) for AI photo analysis"] },
     };
   }
   useAi("photo");
   const small = await sharp(fs.readFileSync(p.path)).rotate().resize(1200, 1200, { fit: "inside" }).jpeg({ quality: 85 }).toBuffer();
-  const client = trackAnthropic(new Anthropic());
-  const r = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: betaZodOutputFormat(PhotoAdvice) },
-    system: "You are a product photographer for online resale listings. Recommend precise, conservative corrections that make the item look accurate and appealing. Never suggest changes that misrepresent the item's true color or condition.",
-    messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: small.toString("base64") } }, { type: "text", text: "Analyze this listing photo and return the corrections." }] }],
-  });
-  if (r.stop_reason === "refusal" || !r.parsed_output) throw new Error("The AI couldn't analyze this photo.");
-  return { advice: r.parsed_output, demo: false };
+  try {
+    const r = await askStructured(
+      {
+        task: "photo",
+        system: "You are a product photographer for online resale listings. Recommend precise, conservative corrections that make the item look accurate and appealing. Never suggest changes that misrepresent the item's true color or condition.",
+        text: "Analyze this listing photo and return the corrections.",
+        images: [{ mediaType: "image/jpeg", data: small.toString("base64") }],
+        effort: "low",
+        maxTokens: 4000,
+      },
+      PhotoAdvice,
+    );
+    return { advice: r.output, demo: false };
+  } catch (e) {
+    if (e instanceof AiRefusal) throw new Error("The AI couldn't analyze this photo.");
+    throw e;
+  }
 }
 
 /** Turn advice into safe edit ops (clamped; crop only if it keeps most of the image). */

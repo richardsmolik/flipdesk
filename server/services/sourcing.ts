@@ -2,19 +2,17 @@
  * Sourcing mode: "Should I buy this?" in the aisle.
  * Photo or name -> identify -> sold comps -> best marketplace net -> max buy price -> verdict.
  */
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod/v4";
 import fs from "node:fs";
 import path from "node:path";
 import { getSetting, type Db } from "../db.js";
 import { MARKETPLACES } from "../marketplaces/registry.js";
-import { aiIsLive, MODEL } from "./ai.js";
+import { aiIsLive } from "./ai.js";
 import { recommend } from "./fees.js";
 import { researchPrice } from "./pricing.js";
 import { lookupBarcode, type BarcodeProduct } from "./barcode.js";
 import { useAi } from "../context.js";
-import { trackAnthropic } from "../health.js";
+import { AiRefusal, askStructured } from "./llm.js";
 
 export const QuickId = z.object({
   name: z.string().describe("What the item is, specific: brand + model/line + type"),
@@ -48,28 +46,25 @@ export async function quickIdentify(photoPath: string | undefined, hint: string 
     };
   }
   useAi("sourcing");
-  const client = trackAnthropic(new Anthropic());
-  const response = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    // Low effort: the seller is standing in a store; speed beats depth here.
-    output_config: { effort: "low", format: betaZodOutputFormat(QuickId) },
-    system:
-      "You are a veteran reseller helping someone decide in seconds whether to buy an item to resell. Identify it precisely, estimate realistic resale prices (sold, not asking), and flag risks. If unsure, say so via confidence.",
-    messages: [
+  try {
+    const r = await askStructured(
       {
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType(photoPath), data: fs.readFileSync(photoPath).toString("base64") } },
-          { type: "text", text: hint ? `Seller notes: ${hint}` : "Identify this item for resale." },
-        ],
+        task: "sourcing",
+        // Low effort: the seller is standing in a store; speed beats depth here.
+        system:
+          "You are a veteran reseller helping someone decide in seconds whether to buy an item to resell. Identify it precisely, estimate realistic resale prices (sold, not asking), and flag risks. If unsure, say so via confidence.",
+        text: hint ? `Seller notes: ${hint}` : "Identify this item for resale.",
+        images: [{ mediaType: mediaType(photoPath), data: fs.readFileSync(photoPath).toString("base64") }],
+        effort: "low",
+        maxTokens: 4000,
       },
-    ],
-  });
-  if (response.stop_reason === "refusal" || !response.parsed_output) throw new Error("Couldn't identify this item - try typing what it is.");
-  return { id: response.parsed_output, demo: false };
+      QuickId,
+    );
+    return { id: r.output, demo: false };
+  } catch (e) {
+    if (e instanceof AiRefusal || /no answer/.test((e as Error).message)) throw new Error("Couldn't identify this item - try typing what it is.");
+    throw e;
+  }
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
