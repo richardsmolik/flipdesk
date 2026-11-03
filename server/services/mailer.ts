@@ -7,14 +7,15 @@ import { reportHealth } from "../health.js";
 
 export const mailConfigured = () => Boolean(process.env.SMTP_HOST && process.env.SMTP_FROM);
 
-let sent: { to: string; subject: string; text: string }[] = [];
+export interface Attachment { filename: string; content: Buffer; contentType: string }
+let sent: { to: string; subject: string; text: string; attachments?: Attachment[] }[] = [];
 /** Tests read what would have been sent. */
 export const outbox = () => sent;
 export const clearOutbox = () => void (sent = []);
 
-export async function sendMail(to: string, subject: string, text: string) {
+export async function sendMail(to: string, subject: string, text: string, attachments?: Attachment[]) {
   if (process.env.SMTP_HOST === "test") {
-    sent.push({ to, subject, text });
+    sent.push({ to, subject, text, ...(attachments ? { attachments } : {}) });
     return true;
   }
   if (!mailConfigured()) return false;
@@ -26,7 +27,7 @@ export async function sendMail(to: string, subject: string, text: string) {
     auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
   });
   try {
-    await t.sendMail({ from: process.env.SMTP_FROM, to, subject, text });
+    await t.sendMail({ from: process.env.SMTP_FROM, to, subject, text, attachments });
     reportHealth("mail", true);
   } catch (e) {
     reportHealth("mail", false, (e as Error).message);

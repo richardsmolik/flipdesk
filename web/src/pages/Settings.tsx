@@ -510,6 +510,25 @@ function Devices() {
   );
 }
 
+/** Send item edits to live listings automatically (on by default). */
+function AutoPush() {
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => void api.get<{ on: boolean }>("/api/auto-push").then((r) => setOn(r.on)).catch(() => setOn(null)), []);
+  if (on === null) return null;
+  return (
+    <section className="card space-y-2 p-4">
+      <h2 className="font-semibold">⤴️ Send edits to live listings</h2>
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1" checked={on} onChange={async (e) => setOn((await api.put<{ on: boolean }>("/api/auto-push", { on: e.target.checked })).on)} />
+        <span>
+          When you change an item's title, description, price or details, update it everywhere it's listed.
+          <span className="block text-xs text-zinc-500">eBay, Etsy and Shopify update right away. Sites the Chrome extension handles show you exactly what to change, with copy buttons. A listing you gave its own price keeps it. Photos: use “Push changes to live listings” on the item.</span>
+        </span>
+      </label>
+    </section>
+  );
+}
+
 function TwoStep() {
   const [st, setSt] = useState<{ enabled: boolean; recoveryLeft: number; unavailable?: string } | null>(null);
   const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
@@ -660,6 +679,7 @@ function SiteSections() {
   return (
     <>
       {a?.user && <AccountSection email={a.user.email} optOut={Boolean(a.emailOptOut)} />}
+      {!w?.shared && <AutoPush />}
       {!w?.shared && <Passkeys />}
       {!w?.shared && <TwoStep />}
       {!w?.shared && <Devices />}

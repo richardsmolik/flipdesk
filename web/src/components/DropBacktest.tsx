@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { toast } from "../ui";
 
 interface Result { rule: { key: string; name: string }; sold: number; unsold: number; avgDays: number | null; avgPrice: number | null; daysSaved: number | null; revenueChange: number; revenueChangePct: number | null }
-interface Data { items: number; actual: { revenue: number; avgDays: number | null }; results: Result[]; takeaway: string | null }
+interface CatRule { category: string; items: number; rule: string; name: string; daysSaved: number; revenueChangePct: number }
+interface Data { byCategory: CatRule[]; current: Record<string, string>; items: number; actual: { revenue: number; avgDays: number | null }; results: Result[]; takeaway: string | null }
 
 /** Would automatic price drops have sold your items sooner, and for how much less? (no AI, free) */
 export default function DropBacktest() {
@@ -39,6 +41,36 @@ export default function DropBacktest() {
               </tbody>
             </table>
           </div>
+          {d.byCategory.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs text-zinc-400">Best rule per category (5+ sold items; at most 5% less money, almost all still sell):</div>
+              <ul className="text-sm">
+                {d.byCategory.map((c) => (
+                  <li key={c.category}>
+                    <b>{c.category}</b> ({c.items}): {c.name}
+                    {c.rule !== "none" ? <span className="text-zinc-400"> · {c.daysSaved} days sooner, {c.revenueChangePct}% money</span> : <span className="text-zinc-400"> · drops didn't help here</span>}
+                    {d.current[c.category] === c.rule && <span className="text-green-400"> ✓ in use</span>}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="btn-ghost text-xs"
+                  onClick={async () => {
+                    setD(await api.put<Data>("/api/drop-backtest/by-category", Object.fromEntries(d.byCategory.map((c) => [c.category, c.rule]))));
+                    toast("Per-category rules saved. They apply when automatic price drops are on (Settings).");
+                  }}
+                >
+                  Use these rules per category
+                </button>
+                {Object.keys(d.current).length > 0 && (
+                  <button className="btn-ghost text-xs" onClick={async () => (setD(await api.put<Data>("/api/drop-backtest/by-category", {})), toast("Back to one rule for everything"))}>
+                    One rule for everything
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           <p className="text-xs text-zinc-500">
             How it's worked out: each buyer pays what they really paid, and turns up as long after the price reaches that amount as they really did. Items that sold by offer sell the same day. "Wouldn't sell" means the rule's floor stayed above what the buyer paid. It's a model, not a promise; set your rule in Settings → Automatic price drops.
           </p>

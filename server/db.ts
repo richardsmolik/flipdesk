@@ -550,7 +550,9 @@ export interface ListingRow {
 export interface JobRow {
   id: number;
   marketplace: string;
-  type: "publish" | "delist" | "update";
+  type: "publish" | "delist" | "update" | "revise";
+  /** revise jobs: JSON {fields: [...]} of what changed. */
+  payload?: string | null;
   item_id: number;
   listing_id: number | null;
   status: string;

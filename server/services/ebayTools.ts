@@ -1,3 +1,4 @@
+import { PRESETS } from "./dropBacktest.js";
 import { getItem, getSetting, logActivity, tx, type Db, type ListingRow } from "../db.js";
 import { ebaySendOffer } from "../marketplaces/ebay.js";
 import type { MarketplaceId } from "../marketplaces/registry.js";
@@ -137,22 +138,32 @@ export function applyAutoPriceDrops(db: Db) {
   const rule = getSetting<AutoDropRule>(db, "autoDrop", { enabled: false, afterDays: 21, everyDays: 7, dropPct: 5 });
   if (!rule.enabled) return [];
   const last = getSetting<Record<string, string>>(db, "autoDrop.last", {});
-  const due = db
+  // Per-category rules from the price-drop backtest ("none" = never drop that category).
+  const perCat = getSetting<Record<string, string>>(db, "autoDrop.byCategory", {});
+  const ruleFor = (category: string) => {
+    const key = perCat[(category ?? "").split(">")[0].trim() || "Other"];
+    if (!key) return rule;
+    if (key === "none") return null;
+    const p = PRESETS.find((x) => x.key === key);
+    return p ? { ...rule, afterDays: p.afterDays, everyDays: p.everyDays, dropPct: p.dropPct } : rule;
+  };
+  const rows = db
     .prepare(
-      `SELECT DISTINCT i.id, i.price, i.min_price, MIN(l.listed_at) AS first_listed
+      `SELECT DISTINCT i.id, i.price, i.min_price, i.category, julianday('now') - julianday(MIN(l.listed_at)) AS age
        FROM items i JOIN listings l ON l.item_id = i.id AND l.status = 'active'
-       WHERE i.status = 'active' GROUP BY i.id
-       HAVING julianday('now') - julianday(first_listed) >= ?`,
+       WHERE i.status = 'active' GROUP BY i.id`,
     )
-    .all(rule.afterDays) as { id: number; price: number; min_price: number | null }[];
+    .all() as { id: number; price: number; min_price: number | null; category: string; age: number | null }[];
   const now = Date.now();
-  const ids = due
+  const due = rows
+    .map((d) => ({ ...d, r: ruleFor(d.category) }))
+    .filter((d) => d.r && d.age !== null && d.age >= d.r.afterDays)
     .filter((d) => {
       const prev = last[d.id];
-      return !prev || now - Date.parse(prev) >= rule.everyDays * 86400_000;
+      return !prev || now - Date.parse(prev) >= d.r!.everyDays * 86400_000;
     })
-    .filter((d) => d.min_price === null || d.price > d.min_price)
-    .map((d) => d.id);
+    .filter((d) => d.min_price === null || d.price > d.min_price);
+  const ids = due.map((d) => d.id);
   let res: { itemId: number; from: number; to: number }[] = [];
   if (rule.smart) {
     const model = learn(db);
@@ -163,7 +174,10 @@ export function applyAutoPriceDrops(db: Db) {
       if ((a.action === "drop" || a.action === "small_drop") && a.newPrice) res.push(...bulkPrice(db, [id], { set: a.newPrice }, "smart_drop"));
     }
   } else {
-    res = bulkPrice(db, ids, { pct: -Math.abs(rule.dropPct) }, "auto_drop");
+    // Group by drop size (per-category rules can differ).
+    const byPct = new Map<number, number[]>();
+    for (const d of due) byPct.set(d.r!.dropPct, [...(byPct.get(d.r!.dropPct) ?? []), d.id]);
+    for (const [pct, group] of byPct) res.push(...bulkPrice(db, group, { pct: -Math.abs(pct) }, "auto_drop"));
   }
   for (const r of res) last[r.itemId] = new Date().toISOString();
   db.prepare("INSERT INTO settings (key, value) VALUES ('autoDrop.last', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(

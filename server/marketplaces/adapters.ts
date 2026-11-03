@@ -7,7 +7,7 @@
  */
 import { getSetting, type Db, type Item, type ListingRow } from "../db.js";
 import { MARKETPLACES, type MarketplaceId } from "./registry.js";
-import { ebayDelist, ebayIsLive, ebayPublish, ebayUpdatePrice } from "./ebay.js";
+import { ebayDelist, ebayIsLive, ebayPublish, ebayReviseItem, ebayUpdatePrice } from "./ebay.js";
 import { personalEnv } from "../context.js";
 
 export interface PublishResult {
@@ -22,6 +22,8 @@ export interface Adapter {
   publish(db: Db, item: Item, price: number): Promise<PublishResult | { deferred: true }>;
   delist(db: Db, item: Item, listing: ListingRow): Promise<void | { deferred: true }>;
   updatePrice(db: Db, item: Item, listing: ListingRow, price: number): Promise<void | { deferred: true }>;
+  /** Push changed details (title, description, tags, photos, price) to a live listing. */
+  revise?(db: Db, item: Item, listing: ListingRow, fields: string[]): Promise<void>;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -72,6 +74,15 @@ const etsyAdapter: Adapter = {
     if (!etsyLive()) return sleep(80);
     // Price lives on the listing inventory for v3; simple listings accept price on update.
     await etsy("PATCH", `/shops/${personalEnv("ETSY_SHOP_ID")}/listings/${listing.external_id}`, { price });
+  },
+  async revise(_db, item, listing, fields) {
+    if (!etsyLive()) return void (await sleep(60));
+    const body: Record<string, unknown> = {};
+    if (fields.includes("title")) body.title = item.title.slice(0, 140);
+    if (fields.includes("description")) body.description = item.description;
+    if (fields.includes("keywords")) body.tags = item.keywords.slice(0, 13).map((k) => k.slice(0, 20));
+    if (fields.includes("price")) body.price = listing.price;
+    if (Object.keys(body).length) await etsy("PATCH", `/shops/${personalEnv("ETSY_SHOP_ID")}/listings/${listing.external_id}`, body);
   },
 };
 
@@ -140,11 +151,36 @@ const shopifyAdapter: Adapter = {
       p: { id: listing.external_id, status: "ARCHIVED" },
     });
   },
-  async updatePrice() {
-    // Price changes go through productVariantsBulkUpdate; republish is simpler for single-variant items.
+  async updatePrice(_db, _item, listing, price) {
     if (!shopifyLive()) return sleep(80);
+    await shopifySetPrice(listing.external_id!, price);
+  },
+  async revise(_db, item, listing, fields) {
+    if (!shopifyLive()) return void (await sleep(60));
+    const p: Record<string, unknown> = { id: listing.external_id };
+    if (fields.includes("title")) p.title = item.title;
+    if (fields.includes("description")) p.descriptionHtml = item.description.replace(/\n/g, "<br>");
+    if (fields.includes("keywords")) p.tags = item.keywords;
+    if (fields.includes("brand")) p.vendor = item.brand || undefined;
+    if (Object.keys(p).length > 1) {
+      const d = await shopify<{ productUpdate: { userErrors: { message: string }[] } }>(`mutation($p: ProductUpdateInput!) { productUpdate(product: $p) { userErrors { message } } }`, { p });
+      if (d.productUpdate.userErrors.length) throw new Error(d.productUpdate.userErrors.map((e) => e.message).join("; "));
+    }
+    if (fields.includes("price")) await shopifySetPrice(listing.external_id!, listing.price);
   },
 };
+
+/** Set the price of a single-variant Shopify product (its first variant). */
+async function shopifySetPrice(productId: string, price: number) {
+  const q = await shopify<{ product: { variants: { nodes: { id: string }[] } } | null }>(`query($id: ID!) { product(id: $id) { variants(first: 1) { nodes { id } } } }`, { id: productId });
+  const variant = q.product?.variants.nodes[0]?.id;
+  if (!variant) throw new Error("Shopify product not found (deleted there?)");
+  const r = await shopify<{ productVariantsBulkUpdate: { userErrors: { message: string }[] } }>(
+    `mutation($productId: ID!, $variants: [ProductVariantsBulkInput!]!) { productVariantsBulkUpdate(productId: $productId, variants: $variants) { userErrors { message } } }`,
+    { productId, variants: [{ id: variant, price: price.toFixed(2) }] },
+  );
+  if (r.productVariantsBulkUpdate.userErrors.length) throw new Error(r.productVariantsBulkUpdate.userErrors.map((e) => e.message).join("; "));
+}
 
 // ---------------- Amazon (SP-API) ----------------
 // Amazon requires an approved SP-API developer profile and listings must match
@@ -162,6 +198,9 @@ const amazonAdapter: Adapter = {
   async updatePrice() {
     await sleep(60);
   },
+  async revise() {
+    await sleep(40); // demo until Amazon SP-API is set up
+  },
 };
 
 // ---------------- eBay ----------------
@@ -171,6 +210,11 @@ const ebayAdapter: Adapter = {
   publish: ebayPublish,
   delist: ebayDelist,
   updatePrice: ebayUpdatePrice,
+  async revise(db, item, listing, fields) {
+    // Title, description, specifics and photos live on the inventory item; eBay updates the live listing from it.
+    if (fields.some((f) => f !== "price")) await ebayReviseItem(db, item);
+    if (fields.includes("price")) await ebayUpdatePrice(db, item, listing, listing.price);
+  },
 };
 
 // ---------------- Extension-driven marketplaces ----------------

@@ -336,3 +336,43 @@ export function rewriteReport(db: Db) {
     otherStaleSoldPct: base.n >= 5 ? Math.round(((base.sold ?? 0) / base.n) * 100) : null,
   };
 }
+
+// ---------------- Category re-check for brand-new items ----------------
+
+/**
+ * A brand-new item's category is only known after the first draft. If category routing is on and another AI
+ * is clearly the best for that category, it re-prices the item (same photos, short request) and its price is
+ * used, scaled across the range. Returns what changed, or null.
+ */
+export async function recheckForCategory(db: Db, provider: ProviderId | undefined, draft: ListingDraft, photoPaths: string[]) {
+  if (!provider || !categoryRoutingOn(db)) return null;
+  const top = (draft.category.split(">")[0] ?? "").trim();
+  const best = categoryWinners(db)[top.toLowerCase()];
+  if (!best || best === provider) return null;
+  useAi("category-recheck");
+  const images = photoPaths
+    .slice(0, 3)
+    .filter((p) => fs.existsSync(p))
+    .map((p) => ({ mediaType: /\.png$/i.test(p) ? "image/png" : "image/jpeg", data: fs.readFileSync(p).toString("base64") }));
+  const r = await askStructured(
+    {
+      task: "category-recheck",
+      only: best,
+      system: "You are an expert reseller. Give a realistic resale price based on what similar items actually sell for, not asking prices.",
+      text: `Title: ${draft.title}\nBrand: ${draft.brand}\nCategory: ${draft.category}\nCondition: ${draft.condition.replace(/_/g, " ")}\nSize: ${draft.size}\nFlaws: ${draft.flaws.join("; ") || "none noted"}\nWhat will it most likely sell for (USD, item only)?`,
+      images,
+      effort: "low",
+      maxTokens: 1500,
+    },
+    Prediction,
+  );
+  const before = draft.price.recommended;
+  const after = r2(r.output.price);
+  if (!(after > 0) || !(before > 0)) return null;
+  const k = after / before;
+  for (const key of ["low", "high"] as const) draft.price[key] = r2(draft.price[key] * k);
+  draft.price.recommended = after;
+  draft.price.quick_sale = r2(r.output.quick_sale > 0 ? r.output.quick_sale : draft.price.quick_sale * k);
+  const name = PROVIDERS[best].name.split(" (")[0];
+  return { provider: best, name, category: top, before, after, note: `${name} is the most accurate AI for ${top} on your past sales, so it re-checked the price: $${before.toFixed(2)} → $${after.toFixed(2)}.` };
+}

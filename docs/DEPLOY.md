@@ -222,6 +222,21 @@ Reports → **Which AI prices best?** tests the AIs you pick on items you've alr
 - **Best AI per category:** the price test now also finds the best AI within each category (5+ items). Turn on "Send each category to its best AI" in the 🧠 card. When an item already has a category, that AI goes first, with the others still as backup.
 - **One-page AI summary** (Reports → 📄 One-page AI summary, or /ai-report): this month's time saved, AI spend, cost per sale, price accuracy, and what FlipDesk learned. Printable or save as PDF. Time saved uses stated assumptions: 8 minutes per listing, 2 per photo fix, 3 per fresh title, 3 per help answer, 1 per store scan.
 
+### Edits, rules and routines
+
+- **Edits reach every live listing** (Settings → Send edits to live listings; on by default). When you save a change to an item's title, description, price, tags or details, every site it's live on is updated. eBay, Etsy and Shopify update right away. On sites the Chrome extension handles, the extension opens the listing and shows exactly what to change, with copy buttons. A listing you gave its own price keeps it; only listings that followed the item's price get the new one. Changed photos: press "⤴️ Push changes to live listings" on the item (eBay takes the new photos; other sites get a reminder). If a site rejects an update, the listing stays live and the reason goes in the activity log. (Fixed along the way: Shopify price changes used to be skipped.)
+- **Category re-check for new items:** with "Send each category to its best AI" on, a brand-new item first goes to your usual AI. If its category turns out to have a better AI, that AI re-checks the price, and the item says so.
+- **Price-drop rules per category:** the price-drop test also picks the best ready-made rule for each category with 5+ sales: the most days saved for at most 5% less money, with almost everything still selling. Otherwise it picks "no drops". "Use these rules per category" makes the automatic drops follow them; other categories use your normal rule.
+- **This week's 5 things** (dashboard and the Monday summary), most useful first:
+  - orders to ship;
+  - listings that failed;
+  - prices two AIs disagreed on;
+  - suggested price drops (when automatic drops are off);
+  - old listings that need a fresh title;
+  - problem reports to send;
+  - drafts to list.
+- **Monthly AI summary email:** in the first week of each month, each shop that used AI gets last month's summary by email, with a PDF attached and a link to the page. Hosted: to the account's email, unless reminder emails are off. Single-password mode: a phone alert, plus email to `FLIPDESK_OWNER_EMAIL`. Turn it off on the summary page, which also lets you look at earlier months.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:

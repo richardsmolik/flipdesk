@@ -8,16 +8,17 @@ import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
 import { ebaySmokeTest, runWeeklyEbay, weeklyEbay } from "./services/ebaySmoke.js";
 import { estimateCost, getBacktest, listBacktests, pickCases, startBacktest } from "./services/backtest.js";
+import { recheckForCategory } from "./services/aiInsights.js";
 import { applyFreshTitle, calibrations, categoryRoutingOn, categoryWinners, correctionOn, correctPrices, getPriceWhy, preferFor, recordAiTitle, reportCardSettings, rewriteReport, savePriceWhy, secondOpinion, secondOpinionSettings, staleItems, suggestFreshTitle, titleReport } from "./services/aiInsights.js";
 import { dropBacktest } from "./services/dropBacktest.js";
+import { weeklyTodo } from "./services/weeklyTodo.js";
 import { PROVIDER_IDS, PROVIDERS, providerReady, type ProviderId } from "./services/llm.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
-import { ebayReviseItem } from "./marketplaces/ebay.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
 import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
-import { claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, requestDelist } from "./services/jobs.js";
+import { autoPushOn, claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, queueRevise, REVISE_FIELDS, requestDelist } from "./services/jobs.js";
 import { researchPrice } from "./services/pricing.js";
 import { NeedsVariationError, cancelSale, recordSale, restock, saveVariations } from "./services/sync.js";
 import { bulkPrice, relist, sendOffersToWatchers, staleListings } from "./services/ebayTools.js";
@@ -352,6 +353,13 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     }
     if (body.price !== undefined && body.price !== item.price && item.price > 0) recordPriceChange(db, id, item.price, body.price, "manual");
     if (sets.length) db.prepare(`UPDATE items SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`).run(...args, id);
+    // Changed what buyers see? Send it to the live listings (Settings: "Send edits to live listings").
+    const changed = REVISE_FIELDS.filter((k) => k !== "photos" && (body as Record<string, unknown>)[k] !== undefined && JSON.stringify((body as Record<string, unknown>)[k]) !== JSON.stringify((item as unknown as Record<string, unknown>)[k]));
+    let pushed: ReturnType<typeof queueRevise> = [];
+    if (changed.length && autoPushOn(db)) {
+      pushed = queueRevise(db, id, changed, { oldPrice: item.price });
+      if (pushed.length) void processApiJobs(db);
+    }
     if (body.quantity !== undefined && body.quantity !== item.quantity) {
       for (const l of item.listings.filter((x) => x.status === "active")) {
         const want = listingQty(l.marketplace as MarketplaceId, body.quantity);
@@ -363,7 +371,29 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
       }
       void processApiJobs(db);
     }
-    res.json(getItem(db, id));
+    res.json({ ...getItem(db, id)!, pushed });
+  });
+
+  // Monthly AI summary email for this shop (on by default).
+  api.get("/ai-summary-email", (_req, res) => void res.json({ on: getSetting<{ on?: boolean }>(db, "aiSummaryEmail", {}).on !== false }));
+  api.put("/ai-summary-email", (req, res) => {
+    const on = z.object({ on: z.boolean() }).parse(req.body).on;
+    setSetting(db, "aiSummaryEmail", { on });
+    res.json({ on });
+  });
+  api.get("/auto-push", (_req, res) => void res.json({ on: autoPushOn(db) }));
+  api.put("/auto-push", (req, res) => {
+    setSetting(db, "autoPush", { on: z.object({ on: z.boolean() }).parse(req.body).on });
+    res.json({ on: autoPushOn(db) });
+  });
+
+  // Push everything to the live listings now (e.g. after changing photos).
+  api.post("/items/:id/push", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!getItem(db, id)) return void res.status(404).json({ error: "Not found" });
+    const pushed = queueRevise(db, id, [...REVISE_FIELDS]);
+    await processApiJobs(db);
+    res.json({ pushed, item: getItem(db, id) });
   });
 
   api.delete("/items/:id", (req, res) => {
@@ -473,7 +503,16 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     if (result.demo) return void res.json({ ...result, uploaded: photoPaths });
     const provider = result.provider as ProviderId | undefined;
     // Learn from results: correct this AI's known lean, get a second opinion on pricier items, remember the title.
-    const correction = correctPrices(db, provider, result.draft);
+    // New item, category only known now: if another AI is clearly best for it, let that AI re-check the price.
+    let recheck: Awaited<ReturnType<typeof recheckForCategory>> = null;
+    if (!prefer) {
+      try {
+        recheck = await recheckForCategory(db, provider, result.draft, photoPaths);
+      } catch {
+        /* a bonus: never block the draft */
+      }
+    }
+    const correction = correctPrices(db, recheck?.provider ?? provider, result.draft);
     let second = null;
     try {
       second = await secondOpinion(db, provider, result.draft, photoPaths);
@@ -494,12 +533,12 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
         confidence: p.confidence,
         reasoning: p.reasoning,
         comps: (usedComps ?? []).slice(0, 8).map((c) => ({ title: c.title, price: c.price, sold: c.sold, source: c.source })),
-        correction: correction?.note ?? null,
+        correction: [recheck?.note, correction?.note].filter(Boolean).join(" ") || null,
         secondOpinion: second ? { name: second.name, price: second.price, diffPct: second.diffPct, agree: second.agree } : null,
         preferredFor: prefer && provider === prefer ? (known?.category.split(">")[0].trim() ?? null) : null,
       });
     }
-    res.json({ ...result, uploaded: photoPaths, correction, secondOpinion: second });
+    res.json({ ...result, uploaded: photoPaths, correction: recheck || correction ? { ...correction, note: [recheck?.note, correction?.note].filter(Boolean).join(" ") } : null, recheck, secondOpinion: second });
   });
 
   api.get("/pricing", async (req, res) => {
@@ -930,23 +969,23 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const b = z.object({ title: z.string().trim().min(3).max(80), provider: z.string().max(20).nullable().optional() }).parse(req.body);
     applyFreshTitle(db, Number(req.params.id), b.title, b.provider ?? null);
     const item = getItem(db, Number(req.params.id))!;
-    // eBay (API): update the live listing now. Other sites need the change made there (or via the extension).
-    const live = item.listings.filter((l) => l.status === "active");
-    let ebay: "updated" | "failed" | null = null;
-    let ebayError: string | null = null;
-    if (live.some((l) => l.marketplace === "ebay")) {
-      try {
-        await ebayReviseItem(db, item);
-        ebay = "updated";
-      } catch (e) {
-        ebay = "failed";
-        ebayError = (e as Error).message;
-      }
-    }
-    res.json({ item, ebay, ebayError, editElsewhere: live.filter((l) => l.marketplace !== "ebay").map((l) => l.marketplace) });
+    // Send the new title to every live listing: API sites now, extension sites when the extension runs.
+    const pushed = queueRevise(db, item.id, ["title"]);
+    await processApiJobs(db);
+    const ebayJob = db.prepare("SELECT status, result FROM jobs WHERE type = 'revise' AND item_id = ? AND marketplace = 'ebay' ORDER BY id DESC LIMIT 1").get(item.id) as { status: string; result: string | null } | undefined;
+    const ebay = !ebayJob ? null : ebayJob.status === "done" ? ("updated" as const) : ("failed" as const);
+    const ebayError = ebay === "failed" ? ((JSON.parse(ebayJob!.result ?? "{}") as { error?: string }).error ?? "will retry") : null;
+    res.json({ item: getItem(db, item.id), ebay, ebayError, pushed, editElsewhere: pushed.filter((p) => p.mode === "extension").map((p) => p.marketplace) });
   });
   // Price-drop backtest: replay drop rules on your past sales (no AI, free).
   api.get("/drop-backtest", (_req, res) => void res.json(dropBacktest(db)));
+  // This week's 5 most useful things to do (dashboard + Monday summary).
+  api.get("/weekly-todo", (_req, res) => void res.json(weeklyTodo(db)));
+  api.put("/drop-backtest/by-category", (req, res) => {
+    const map = z.record(z.string().max(80), z.enum(["none", "gentle", "steady", "fast"])).parse(req.body);
+    setSetting(db, "autoDrop.byCategory", map);
+    res.json(dropBacktest(db));
+  });
   api.put("/ai-insights/settings", (req, res) => {
     const b = z.object({ correction: z.boolean().optional(), secondOpinion: z.object({ on: z.boolean(), threshold: z.number().min(0).max(100000) }).optional(), reportCard: z.boolean().optional(), byCategory: z.boolean().optional() }).parse(req.body);
     if (b.byCategory !== undefined) setSetting(db, "aiByCategory", { on: b.byCategory });

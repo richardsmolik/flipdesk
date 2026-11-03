@@ -11,6 +11,16 @@ import PhotoEditor from "../components/PhotoEditor";
 import PhoneUpload from "../components/PhoneUpload";
 import Duplicates from "../components/Duplicates";
 
+interface Pushed { marketplace: string; mode: "api" | "extension"; fields: string[] }
+const MP_NAMES: Record<string, string> = { ebay: "eBay", poshmark: "Poshmark", mercari: "Mercari", depop: "Depop", vinted: "Vinted", grailed: "Grailed", facebook: "Facebook", etsy: "Etsy", shopify: "Shopify", amazon: "Amazon", whatnot: "Whatnot" };
+/** "Updating eBay and Etsy now; the extension will walk you through Poshmark." */
+function pushedText(p: Pushed[]) {
+  const names = (mode: string) => [...new Set(p.filter((x) => x.mode === mode).map((x) => MP_NAMES[x.marketplace] ?? x.marketplace))];
+  const api = names("api");
+  const ext = names("extension");
+  return [api.length && `Updating ${api.join(", ")} now.`, ext.length && `The Chrome extension will walk you through ${ext.join(", ")}.`].filter(Boolean).join(" ");
+}
+
 /** What came back with an AI draft: a price corrected for the AI's known lean, and a second AI's price. */
 interface AiNotes {
   correction?: { note: string } | null;
@@ -280,10 +290,10 @@ function EditItem({ id }: { id: number }) {
 
   const save = async () => {
     const { title, description, brand, category, condition, color, size, specifics, keywords, cost, price, min_price, quantity, quantity_purchased, weight_oz, location, source, notes } = form;
-    const r = await api.patch<Item>(`/api/items/${id}`, { title, description, brand, category, condition, color, size, specifics, keywords, cost, price, min_price, quantity, quantity_purchased, weight_oz, location, source, notes });
+    const r = await api.patch<Item & { pushed?: Pushed[] }>(`/api/items/${id}`, { title, description, brand, category, condition, color, size, specifics, keywords, cost, price, min_price, quantity, quantity_purchased, weight_oz, location, source, notes });
     setData(r);
     reloadRecs();
-    toast("Saved");
+    toast(r.pushed?.length ? `Saved. ${pushedText(r.pushed)}` : "Saved");
     return r;
   };
   saveRef.current = dirty ? save : () => toast("Nothing to save");
@@ -629,6 +639,21 @@ function EditItem({ id }: { id: number }) {
               {item.quantity < 1 ? "No units left - restock first" : busy === "Crosslisting…" ? busy : `🔁 Crosslist to ${picked.length} site${picked.length === 1 ? "" : "s"}`}
             </button>
           </div>
+
+          {item.listings.some((l) => l.status === "active") && (
+            <button
+              className="btn-ghost w-full text-sm"
+              disabled={!!busy || dirty}
+              title={dirty ? "Save first" : "Send title, description, price, details and photos to every live listing"}
+              onClick={async () => {
+                const r = await api.post<{ pushed: Pushed[]; item: Item }>(`/api/items/${id}/push`);
+                setData(r.item);
+                toast(r.pushed.length ? pushedText(r.pushed) : "Nothing live to update");
+              }}
+            >
+              ⤴️ Push changes to live listings
+            </button>
+          )}
 
           <button className="w-full text-xs text-zinc-600 hover:text-red-400" onClick={async () => { if (confirm("Delete this item and its listing records?")) { await api.del(`/api/items/${id}`); nav("/inventory"); } }}>
             Delete item

@@ -40,10 +40,20 @@ function Stat({ big, label }: { big: string; label: string }) {
 export default function AiReport() {
   const [s, setS] = useState<Summary | null>(null);
   const [err, setErr] = useState("");
-  useEffect(() => void api.get<Summary>("/api/ai/summary").then(setS, (e: Error) => setErr(e.message)), []);
+  const [month, setMonth] = useState(() => new URLSearchParams(location.search).get("month") ?? new Date().toISOString().slice(0, 7));
+  const [emailOn, setEmailOn] = useState<boolean | null>(null);
+  useEffect(() => void api.get<Summary>(`/api/ai/summary?month=${month}`).then(setS, (e: Error) => setErr(e.message)), [month]);
+  useEffect(() => void api.get<{ on: boolean }>("/api/ai-summary-email").then((r) => setEmailOn(r.on)).catch(() => setEmailOn(null)), []);
+  const months = Array.from({ length: 6 }, (_, i) => {
+    const d = new Date();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() - i);
+    return d.toISOString().slice(0, 7);
+  });
   if (err) return <div className="text-red-400">{err}</div>;
   if (!s) return <div className="text-zinc-500">Putting it together…</div>;
-  const month = new Date(`${s.month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+  const monthName = new Date(`${s.month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+  const current = s.month === new Date().toISOString().slice(0, 7);
   const best = s.accuracy?.scores.slice().sort((a, b) => (a.typicalMiss ?? 1e9) - (b.typicalMiss ?? 1e9))[0];
   const you = s.accuracy?.scores.find((x) => x.who === "Your list price");
   return (
@@ -51,11 +61,22 @@ export default function AiReport() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <Link to="/reports" className="text-xs text-zinc-500 hover:text-zinc-300 print:hidden">← Reports</Link>
-          <h1 className="text-2xl font-semibold">🤖 AI in {month}</h1>
-          <p className="text-sm text-zinc-400 print:text-zinc-600">{s.shop} · so far this month</p>
+          <h1 className="text-2xl font-semibold">🤖 AI in {monthName}</h1>
+          <p className="text-sm text-zinc-400 print:text-zinc-600">{s.shop}{current ? " · so far this month" : ""}</p>
         </div>
-        <button className="btn-primary print:hidden" onClick={() => window.print()}>Print or save as PDF</button>
+        <div className="flex flex-wrap items-center gap-2 print:hidden">
+          <select className="input w-auto py-1 text-sm" value={month} onChange={(e) => (setMonth(e.target.value), history.replaceState(null, "", `/ai-report?month=${e.target.value}`))} aria-label="Month">
+            {months.map((m) => <option key={m} value={m}>{new Date(`${m}-01T00:00:00Z`).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}</option>)}
+          </select>
+          <button className="btn-primary" onClick={() => window.print()}>Print or save as PDF</button>
+        </div>
       </div>
+      {emailOn !== null && (
+        <label className="flex items-center gap-2 text-sm text-zinc-400 print:hidden">
+          <input type="checkbox" checked={emailOn} onChange={async (e) => setEmailOn((await api.put<{ on: boolean }>("/api/ai-summary-email", { on: e.target.checked })).on)} />
+          Email me this summary (with a PDF) in the first week of each month
+        </label>
+      )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat big={hours(s.minutesSaved)} label="time saved (estimate)" />

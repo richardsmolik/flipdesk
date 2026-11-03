@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { money } from "../api";
+import { api, money } from "../api";
 import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
 import { GetStarted } from "../components/Onboarding";
 import { GoalsCard, TodayCard } from "../components/Today";
@@ -89,6 +89,29 @@ function ProfitChart({ data }: { data: Dash["daily"] }) {
   );
 }
 
+/** This week's 5 most useful things to do (same list as the Monday summary). */
+function WeekTodo() {
+  const [t, setT] = useState<{ kind: string; title: string; detail: string; href: string }[] | null>(null);
+  useEffect(() => void api.get<typeof t>("/api/weekly-todo").then(setT).catch(() => setT(null)), []);
+  if (!t?.length) return null;
+  return (
+    <section className="card p-4">
+      <h2 className="font-semibold">👉 This week: {t.length} thing{t.length === 1 ? "" : "s"} worth doing</h2>
+      <ol className="mt-2 space-y-1.5 text-sm">
+        {t.map((x, i) => (
+          <li key={i} className="flex gap-2">
+            <span className="text-zinc-500">{i + 1}.</span>
+            <Link to={x.href} className="min-w-0 hover:underline">
+              <span className="text-zinc-100">{x.title}</span>
+              {x.detail && <span className="block truncate text-xs text-zinc-500">{x.detail}</span>}
+            </Link>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const { data: d } = useFetch<Dash>("/api/dashboard");
   const [gsKey, bump] = useReducer((x: number) => x + 1, 0);
@@ -119,6 +142,8 @@ export default function Dashboard() {
         <div className="lg:col-span-2"><TodayCard /></div>
         <GoalsCard />
       </div>
+
+      <WeekTodo />
 
       {d.alerts.filter((a) => a.severity === "critical").map((a) => (
         <Link key={a.id} to="/inbox" className="block rounded-lg border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-100 hover:bg-red-950">

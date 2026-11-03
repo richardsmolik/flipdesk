@@ -1,4 +1,5 @@
 /** Weekly summary pushed to your phone (default: Monday 8am, your time zone). */
+import { weeklyTodo } from "./weeklyTodo.js";
 import { getSetting, type Db } from "../db.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { notify, type NotifySettings } from "./alerts.js";
@@ -87,7 +88,15 @@ export function buildDigest(db: Db) {
   if (inbox) todo.push(`clear ${inbox} Inbox item${inbox === 1 ? "" : "s"}`);
   if (drafts) todo.push(`list ${drafts} draft${drafts === 1 ? "" : "s"}`);
   if (allStale.n) todo.push("drop prices or bundle stale stock");
-  if (todo.length) lines.push(`👉 This week: ${todo.join(" · ")}`);
+  // The 5 most useful things to do this week (see weeklyTodo.ts); the short version if that list is empty.
+  let five: { title: string; detail: string }[] = [];
+  try {
+    five = weeklyTodo(db);
+  } catch {
+    five = [];
+  }
+  if (five.length) lines.push(`👉 This week:\n${five.map((t, i) => `${i + 1}. ${t.title}${t.detail ? ` (${t.detail})` : ""}`).join("\n")}`);
+  else if (todo.length) lines.push(`👉 This week: ${todo.join(" · ")}`);
 
   return {
     title: wk.n ? `FlipDesk weekly: ${money(wk.profit)} profit` : "FlipDesk weekly summary",

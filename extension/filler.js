@@ -108,11 +108,52 @@
     );
   }
 
+  const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+  /** An item changed in FlipDesk: show exactly what to change on this listing, with copy buttons. */
+  function revise(work) {
+    const { item, listing, marketplace } = work;
+    let fields = [];
+    try {
+      fields = JSON.parse(work.job.payload || "{}").fields || [];
+    } catch {
+      /* show everything */
+    }
+    const show = {
+      title: ["Title", item.title],
+      price: ["Price", listing ? "$" + listing.price : ""],
+      description: ["Description", item.description],
+      keywords: ["Tags", (item.keywords || []).join(", ")],
+      condition: ["Condition", String(item.condition || "").replace(/_/g, " ")],
+      brand: ["Brand", item.brand],
+      size: ["Size", item.size],
+      color: ["Color", item.color],
+      specifics: ["Item details", Object.entries(item.specifics || {}).map(([k, v]) => k + ": " + v).join("; ")],
+      photos: ["Photos", "Re-upload the photos from FlipDesk (item page)"],
+    };
+    const rows = fields
+      .filter((f) => show[f])
+      .map((f) => {
+        const v = String(show[f][1]);
+        return '<div style="margin-top:4px"><b>' + show[f][0] + ":</b> " + esc(v.slice(0, 160)) + (v.length > 160 ? "…" : "") + "</div>";
+      });
+    const copies = fields
+      .filter((f) => show[f] && f !== "photos")
+      .slice(0, 3)
+      .map((f) => ["Copy " + show[f][0].toLowerCase(), () => navigator.clipboard.writeText(f === "price" ? String(listing ? listing.price : "") : String(show[f][1]))]);
+    panel('<b style="color:#3987e5">Update ' + esc(item.sku) + "</b> on " + esc(marketplace.name) + ": use the site's Edit button and change:" + rows.join(""), [
+      ...copies,
+      ["Done - it's updated", () => complete({ ok: true }).then(() => panel("✓ Updated.", [])), true],
+      ["Couldn't", () => complete({ ok: false, error: "user could not update" }).then(() => panel("Reported.", []))],
+    ]);
+  }
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type !== "flipdesk:job") return;
     const { work } = msg;
     if (work.job.type === "publish") fill(work);
     else if (work.job.type === "delist") delist(work);
+    else if (work.job.type === "revise") revise(work);
     else
       panel(`Update ${work.item.sku} on ${work.marketplace.name}: set price to <b>$${work.listing.price}</b> and quantity to <b>${work.listing.quantity}</b>, then save.`, [
         ["Done", () => complete({ ok: true }).then(() => panel("✓ Updated.", [])), true],

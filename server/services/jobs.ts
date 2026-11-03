@@ -1,4 +1,4 @@
-import { getItem, logActivity, tx, type Db, type Item, type JobRow, type ListingRow } from "../db.js";
+import { getItem, getSetting, logActivity, tx, type Db, type Item, type JobRow, type ListingRow } from "../db.js";
 import { adapterFor, isExtensionMarketplace } from "../marketplaces/adapters.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { saveProblem, withRecording } from "./replay.js";
@@ -7,6 +7,48 @@ import { ebayIsLive } from "../marketplaces/ebay.js";
 /** Units to offer on a marketplace: all remaining units, or 1 on single-quantity sites. */
 export function listingQty(m: MarketplaceId, remaining: number) {
   return MARKETPLACES[m].multiQty ? Math.max(1, remaining) : 1;
+}
+
+/** What can change on a live listing (besides quantity, which has its own job). */
+export const REVISE_FIELDS = ["title", "description", "price", "keywords", "specifics", "condition", "brand", "size", "color", "photos"] as const;
+
+function ensurePayload(db: Db) {
+  try {
+    db.exec("ALTER TABLE jobs ADD COLUMN payload TEXT");
+  } catch {
+    /* already there */
+  }
+}
+
+export const autoPushOn = (db: Db) => getSetting<{ on?: boolean }>(db, "autoPush", {}).on !== false;
+
+/**
+ * Queue "revise" jobs so live listings show an item's changes. One pending job per listing (fields merged).
+ * A listing with its own price (different from the item's old price) keeps it: only listings that followed
+ * the item price get the new one.
+ */
+export function queueRevise(db: Db, itemId: number, fields: string[], opts: { oldPrice?: number } = {}) {
+  ensurePayload(db);
+  const item = getItem(db, itemId);
+  if (!item) return [];
+  const out: { marketplace: MarketplaceId; mode: "api" | "extension"; fields: string[] }[] = [];
+  for (const l of item.listings.filter((x) => x.status === "active")) {
+    let f = fields.filter((x) => (REVISE_FIELDS as readonly string[]).includes(x));
+    if (f.includes("price")) {
+      if (opts.oldPrice === undefined || Math.abs(l.price - opts.oldPrice) < 0.005) db.prepare("UPDATE listings SET price = ? WHERE id = ?").run(item.price, l.id);
+      else f = f.filter((x) => x !== "price");
+    }
+    if (!f.length) continue;
+    const m = l.marketplace as MarketplaceId;
+    const pending = db.prepare("SELECT id, payload FROM jobs WHERE type = 'revise' AND listing_id = ? AND status = 'pending'").get(l.id) as { id: number; payload: string | null } | undefined;
+    if (pending) {
+      const merged = [...new Set([...((JSON.parse(pending.payload ?? "{}") as { fields?: string[] }).fields ?? []), ...f])];
+      db.prepare("UPDATE jobs SET payload = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify({ fields: merged }), pending.id);
+      f = merged;
+    } else db.prepare("INSERT INTO jobs (marketplace, type, item_id, listing_id, payload) VALUES (?, 'revise', ?, ?, ?)").run(m, itemId, l.id, JSON.stringify({ fields: f }));
+    out.push({ marketplace: m, mode: isExtensionMarketplace(m) ? "extension" : "api", fields: f });
+  }
+  return out;
 }
 
 export function enqueue(db: Db, marketplace: MarketplaceId, type: JobRow["type"], itemId: number, listingId: number | null) {
@@ -120,6 +162,15 @@ export function completeJob(db: Db, jobId: number, ok: boolean, data: { external
     );
     if (!job.listing_id) return;
     const name = MARKETPLACES[job.marketplace as MarketplaceId]?.name ?? job.marketplace;
+    if (!ok && job.type === "revise") {
+      // The listing is still live, just not updated: keep it active, say what didn't go through.
+      logActivity(db, "error", `${name}: couldn't update the live listing: ${data.error ?? "unknown error"}`, job.item_id);
+      return;
+    }
+    if (ok && job.type === "revise") {
+      logActivity(db, "revised", `Updated on ${name}: ${(JSON.parse(job.payload ?? "{}") as { fields?: string[] }).fields?.join(", ") ?? "details"}`, job.item_id);
+      return;
+    }
     if (!ok) {
       db.prepare("UPDATE listings SET status = 'error', error = ? WHERE id = ?").run(data.error ?? "failed", job.listing_id);
       logActivity(db, "error", `${name} ${job.type} failed: ${data.error ?? "unknown error"}`, job.item_id);
@@ -169,6 +220,11 @@ export async function processApiJobs(db: Db, limit = 20) {
         completeJob(db, job.id, true, r);
       } else if (job.type === "delist") {
         await adapter.delist(db, view, listing);
+        completeJob(db, job.id, true);
+      } else if (job.type === "revise") {
+        const fields = (JSON.parse(job.payload ?? "{}") as { fields?: string[] }).fields ?? [];
+        if (adapter.revise) await adapter.revise(db, view, listing, fields);
+        else if (fields.includes("price")) await adapter.updatePrice(db, view, listing, listing.price);
         completeJob(db, job.id, true);
       } else {
         await adapter.updatePrice(db, view, listing, listing.price);

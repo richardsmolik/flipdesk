@@ -112,4 +112,6 @@ setInterval(guard("nudges", () => shops.sendNudges()), 60 * 60_000).unref();
 setInterval(guard("self-check", () => shops.selfCheckIfDue()), 60 * 60_000).unref();
 // Speed from real use: save today's timings, tell the owner once a day if a screen is slow for real users.
 setInterval(guard("real-speed", () => shops.flushRealSpeed()), 60 * 60_000).unref();
+// First week of the month: last month's AI summary by email (with a PDF) to each shop that used AI.
+setInterval(guard("ai-summary", () => shops.monthlySummaryIfDue()), 60 * 60_000).unref();
 setTimeout(guard("self-check", () => shops.selfCheckIfDue()), 10 * 60_000).unref();

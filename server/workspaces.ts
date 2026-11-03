@@ -38,6 +38,7 @@ import { getAiRouting, keySource, listModels, pickModel, plan, priceOf, PROVIDER
 import { fireDrill, type FireDrill } from "./services/fireDrill.js";
 import { calibrations, rewriteReport, titleReport } from "./services/aiInsights.js";
 import { dropBacktest } from "./services/dropBacktest.js";
+import { textPdf } from "./services/pdf.js";
 import { currentDay, mergeDay, realTrend, recordTiming, type RealDay } from "./services/realSpeed.js";
 import { listVersions, markFailed, previousGood, flyReady, switchImage, currentImage } from "./services/versions.js";
 import { describeDevice, ensurePasskeys, finishLogin, finishRegistration, hasPasskeys, listPasskeys, loginOptions, registrationOptions, relyingParty, removePasskey, renamePasskey } from "./services/passkeys.js";
@@ -297,11 +298,14 @@ export class Workspaces {
   }
 
   /** This month (to date) for one shop: what AI did, cost, minutes saved (stated assumptions), accuracy, lessons. */
-  aiSummary(ws: Workspace) {
-    const month = new Date().toISOString().slice(0, 7);
+  aiSummary(ws: Workspace, monthArg?: string) {
+    const month = /^\d{4}-\d{2}$/.test(monthArg ?? "") ? monthArg! : new Date().toISOString().slice(0, 7);
+    const start = `${month}-01`;
+    const [yy, mm] = month.split("-").map(Number);
+    const end = new Date(Date.UTC(yy, mm, 1)).toISOString().slice(0, 10);
     const tasks = this.site
-      .prepare("SELECT task, provider, COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost FROM ai_calls WHERE ws_key = ? AND at >= strftime('%Y-%m-01','now') GROUP BY task, provider")
-      .all(ws.key) as { task: string; provider: string; calls: number; cost: number }[];
+      .prepare("SELECT task, provider, COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost FROM ai_calls WHERE ws_key = ? AND at >= ? AND at < ? GROUP BY task, provider")
+      .all(ws.key, start, end) as { task: string; provider: string; calls: number; cost: number }[];
     const n = (t: string) => tasks.filter((x) => x.task === t).reduce((a, x) => a + x.calls, 0);
     // Minutes a seller would otherwise spend by hand (rough, stated on the page).
     const MINUTES: Record<string, number> = { listing: 8, photo: 2, sourcing: 1, "title-rewrite": 3, help: 3 };
@@ -340,6 +344,81 @@ export class Workspaces {
       accuracy: bt ? { at: bt.at, items: bt.cases.length, winner: bt.winner, scores: bt.scores.filter((x) => x.medianAbsPct !== null).map((x) => ({ who: x.name, typicalMiss: x.medianAbsPct, n: x.n })) } : null,
       lessons,
     };
+  }
+
+  /** Plain-text version of a month's AI summary (for the email and the PDF). */
+  aiSummaryLines(s: ReturnType<Workspaces["aiSummary"]>) {
+    const hrs = s.minutesSaved < 90 ? `${s.minutesSaved} minutes` : `${(s.minutesSaved / 60).toFixed(1)} hours`;
+    const best = s.accuracy?.scores.slice().sort((a, b) => (a.typicalMiss ?? 1e9) - (b.typicalMiss ?? 1e9))[0];
+    const usd = (n: number) => "$" + n.toFixed(2);
+    const lines = [
+      `Time saved (estimate): ${hrs}`,
+      `Spent on AI: ${usd(s.cost)} (${s.requests} requests)${s.costPerHourSaved !== null ? `, about ${usd(s.costPerHourSaved)} per hour saved` : ""}`,
+      s.perSale.perSale !== null ? `AI cost per sale (last 30 days): ${usd(s.perSale.perSale)}${s.perSale.shareOfProfit !== null ? ` (${s.perSale.shareOfProfit}% of profit)` : ""}` : "",
+      "",
+      "What it did:",
+      `- Wrote ${s.listingsWritten} listing${s.listingsWritten === 1 ? "" : "s"}`,
+      s.photosFixed ? `- Fixed ${s.photosFixed} photos` : "",
+      s.titlesRefreshed ? `- Suggested ${s.titlesRefreshed} fresh titles for old listings` : "",
+      s.helpAnswers ? `- Answered ${s.helpAnswers} help questions` : "",
+      s.byProvider.length ? `- By AI: ${s.byProvider.map((p) => `${p.name} ${p.calls} (${usd(p.cost)})`).join(", ")}` : "",
+      "",
+      s.accuracy ? `Price accuracy (on ${s.accuracy.items} past sales): ${best ? `${best.who.split(" (")[0]} typically ${best.typicalMiss}% off` : "no clear winner"}` : "Price accuracy: not tested yet (Reports -> Which AI prices best?)",
+      "",
+      "What FlipDesk learned:",
+      ...s.lessons.corrections.map((c) => `- ${c.provider} prices ${Math.abs(c.bias)}% too ${c.bias > 0 ? "high" : "low"} on your items; its prices are adjusted`),
+      s.lessons.titles ? `- ${s.lessons.titles}` : "",
+      s.lessons.rewrites?.rewritten ? `- ${s.lessons.rewrites.rewritten} old listings got fresh titles; ${s.lessons.rewrites.soldSince} sold since` : "",
+      s.lessons.drops ? `- ${s.lessons.drops}` : "",
+      "",
+      `Time saved assumes ${Object.entries(s.minutesAssumed).map(([k, m]) => `${m} min per ${k.replace("-", " ")}`).join(", ")}.`,
+    ];
+    // Drop empty optional lines, keeping single blank separators.
+    return lines.filter((l, i) => l !== "" || (i > 0 && lines[i - 1] !== "" && lines.slice(i + 1).some((x) => x !== "")));
+  }
+
+  /**
+   * In the first week of each month, email last month's AI summary (with a PDF) to each shop that used AI:
+   * the account's email (unless they turned emails off), or the owner (phone alert + email) in single mode.
+   */
+  async monthlySummaryIfDue(now = new Date()) {
+    if (now.getUTCDate() > 7) return [];
+    const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    const sent = this.siteGet<Record<string, string>>("aiSummarySent", {});
+    const out: { key: string; to: string | null }[] = [];
+    for (const ws of this.all().filter((w) => !w.demo)) {
+      if (sent[ws.key] === last) continue;
+      if (getSetting<{ on?: boolean }>(ws.db, "aiSummaryEmail", {}).on === false) continue;
+      const s = this.aiSummary(ws, last);
+      if (!s.requests) continue;
+      const monthName = new Date(`${last}-01T00:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+      const title = `Your AI month: ${monthName}`;
+      const lines = this.aiSummaryLines(s);
+      const base = process.env.PUBLIC_BASE_URL?.replace(/\/$/, "");
+      const link = base ? `See it in FlipDesk: ${base}/ai-report?month=${last}\n` : "";
+      const body = `${lines.join("\n")}\n\n${link}The PDF is attached. Turn these emails off in FlipDesk -> Reports -> One-page AI summary.`;
+      const pdf = { filename: `flipdesk-ai-${last}.pdf`, content: textPdf(`FlipDesk: AI in ${monthName}`, lines), contentType: "application/pdf" };
+      let to: string | null = null;
+      if (this.multiuser && ws.userId) {
+        const u = this.accounts!.prepare("SELECT email, email_opt_out FROM users WHERE id = ?").get(ws.userId) as { email: string; email_opt_out: number } | undefined;
+        if (u && !u.email_opt_out && (mailConfigured() || process.env.SMTP_HOST === "test")) {
+          await sendMail(u.email, title, body, [pdf]).catch(() => false);
+          to = u.email;
+        }
+      } else {
+        const o = this.ownerContact();
+        await runInWorkspace(ws, () => notify(ws.db, "weekly", title, lines.slice(0, 4).join("\n"))).catch(() => false);
+        const email = o?.email ?? process.env.FLIPDESK_OWNER_EMAIL ?? null;
+        if (email && (mailConfigured() || process.env.SMTP_HOST === "test")) {
+          await sendMail(email, title, body, [pdf]).catch(() => false);
+          to = email;
+        }
+      }
+      sent[ws.key] = last;
+      this.siteSet("aiSummarySent", sent);
+      out.push({ key: ws.key, to });
+    }
+    return out;
   }
 
   /** Owner's Settings → AI: providers, choices, this month's spending. */
@@ -2722,7 +2801,7 @@ export class Workspaces {
       if (req.fdShare) return void res.status(403).json({ error: "read-only" });
       const ws = this.current(req, req.fdUser ?? null);
       if (!ws) return void res.status(404).json({ error: "No shop" });
-      res.json(this.aiSummary(ws));
+      res.json(this.aiSummary(ws, typeof req.query.month === "string" ? req.query.month : undefined));
     });
     // Anyone signed in: their own AI spending this month (and the allowance, if there is one).
     root.get("/api/ai/mine", (req: R, res) => {
