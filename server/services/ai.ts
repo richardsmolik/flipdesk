@@ -68,6 +68,8 @@ export interface GenerateInput {
   hint?: string;
   cost?: number;
   comps?: Comp[];
+  /** Try this AI first (best AI for the item's category, from the backtest). */
+  prefer?: import("./llm.js").ProviderId;
 }
 
 export async function generateListing(input: GenerateInput): Promise<{ draft: ListingDraft; demo: boolean; model?: string; provider?: string }> {
@@ -93,7 +95,7 @@ export async function generateListing(input: GenerateInput): Promise<{ draft: Li
     .join("\n\n");
 
   try {
-    const r = await askStructured({ task: "listing", system: SYSTEM, text, images, effort: "medium", maxTokens: 16000 }, ListingDraft);
+    const r = await askStructured({ task: "listing", system: SYSTEM, text, images, effort: "medium", maxTokens: 16000, prefer: input.prefer }, ListingDraft);
     return { draft: r.output, demo: false, model: r.model, provider: r.provider };
   } catch (e) {
     if (e instanceof AiRefusal) throw new Error("The AI declined to describe these photos. Try different photos or fill the listing in manually.");

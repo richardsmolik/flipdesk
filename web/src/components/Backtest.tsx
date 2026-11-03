@@ -6,7 +6,8 @@ import { useAccount } from "./Account";
 interface Score { predictor: string; name: string; n: number; medianAbsPct: number | null; mae: number | null; within20: number | null; bias: number | null; daysMedianErr: number | null; cost: number }
 interface Case { saleId: number; title: string; listedAt: string; soldAt: string; actual: number; actualDays: number; yourPrice: number | null; compMedian: number | null }
 interface Row { saleId: number; predictor: string; price: number | null; days: number | null; error?: string }
-interface Run { id: string; at: string; status: "running" | "done" | "failed"; done: number; total: number; providers: string[]; photos: boolean; scores: Score[]; winner: string | null; cost: number; error?: string; cases: Case[] | number; rows: Row[] | number }
+interface CatWin { category: string; n: number; winner: string | null; scores: { predictor: string; medianAbsPct: number | null; n: number }[] }
+interface Run { byCategory?: CatWin[]; id: string; at: string; status: "running" | "done" | "failed"; done: number; total: number; providers: string[]; photos: boolean; scores: Score[]; winner: string | null; cost: number; error?: string; cases: Case[] | number; rows: Row[] | number }
 interface State { runs: Run[]; sold: number; providers: { id: string; name: string }[] }
 const pct = (x: number | null) => (x === null ? "-" : `${x}%`);
 const usd = (x: number | null) => (x === null ? "-" : `$${x.toFixed(2)}`);
@@ -144,6 +145,22 @@ export default function Backtest() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {run.providers.length > 1 && !!run.byCategory?.length && (
+            <div className="text-sm">
+              <div className="text-xs text-zinc-400">Best AI by category (5+ items each):</div>
+              <ul className="mt-1 space-y-0.5 text-xs">
+                {run.byCategory.map((c) => (
+                  <li key={c.category}>
+                    <b>{c.category}</b> ({c.n}): {c.winner ? `${short(run.scores.find((x) => x.predictor === c.winner)?.name ?? c.winner)} best` : "no clear winner"}{" "}
+                    <span className="text-zinc-500">
+                      {c.scores.filter((x) => run.providers.includes(x.predictor) && x.medianAbsPct !== null).map((x) => `${short(run.scores.find((y) => y.predictor === x.predictor)?.name ?? x.predictor)} ${x.medianAbsPct}%`).join(" · ")}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs text-zinc-500">Turn on “Send each category to its best AI” in the 🧠 card above to use these.</p>
             </div>
           )}
           {winner && acct?.canEditSite && run.providers.length > 1 && (

@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import { getItem, getSetting, logActivity, setSetting, type Db } from "../db.js";
 import { generateListing, type ListingDraft } from "./ai.js";
-import { correctPrices, recordAiTitle } from "./aiInsights.js";
+import { correctPrices, preferFor, recordAiTitle, savePriceWhy } from "./aiInsights.js";
 import type { ProviderId } from "./llm.js";
 import { researchPrice } from "./pricing.js";
 
@@ -58,9 +58,11 @@ export async function runAutoWrite(db: Db, itemId: number) {
   setStatus(db, itemId, { state: "writing" });
   try {
     const comps = item.notes ? (await researchPrice(db, item.notes)).comps.filter((c) => c.source !== "demo") : [];
-    const { draft, demo, provider } = await generateListing({ photoPaths: paths, hint: item.notes || undefined, cost: item.cost || undefined, comps: comps.length ? comps : undefined });
+    const { draft, demo, provider, model } = await generateListing({ photoPaths: paths, hint: item.notes || undefined, cost: item.cost || undefined, comps: comps.length ? comps : undefined, prefer: preferFor(db, item.category) });
     if (!demo) {
-      correctPrices(db, provider as ProviderId | undefined, draft); // known lean of this AI, from your backtest
+      const corr = correctPrices(db, provider as ProviderId | undefined, draft); // known lean of this AI, from your backtest
+      const p = draft.price;
+      savePriceWhy(db, itemId, { at: new Date().toISOString(), provider: provider ?? null, model: model ?? null, price: p.recommended, low: p.low, high: p.high, quickSale: p.quick_sale, confidence: p.confidence, reasoning: p.reasoning, comps: comps.slice(0, 8).map((c) => ({ title: c.title, price: c.price, sold: c.sold, source: c.source })), correction: corr?.note ?? null, secondOpinion: null, preferredFor: null });
       if (provider && !getItem(db, itemId)?.title) recordAiTitle(db, draft.title, provider, itemId);
     }
     const fresh = getItem(db, itemId)!; // re-read: you may have typed while the AI worked

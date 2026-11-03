@@ -1,3 +1,4 @@
+import { FreshTitle, PriceWhy } from "../components/PriceWhy";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, CONDITIONS, money, uploadWithProgress, type Item } from "../api";
@@ -329,6 +330,11 @@ function EditItem({ id }: { id: number }) {
   return (
     <div className="space-y-5">
       <AiNotesBanner itemId={id} tick={notesTick} />
+      {(() => {
+        const listed = item.listings.map((l) => l.listed_at).filter((x): x is string => Boolean(x)).sort()[0] ?? item.created_at;
+        const days = (Date.now() - Date.parse(listed.includes("T") ? listed : listed.replace(" ", "T") + "Z")) / 86400_000;
+        return item.status === "active" && days >= 30 ? <FreshTitle itemId={id} onApplied={(t) => (setForm((f) => ({ ...f, title: t })), reload())} /> : null;
+      })()}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <Link to="/inventory" className="text-xs text-zinc-500 hover:text-zinc-300">← Inventory</Link>
@@ -545,6 +551,7 @@ function EditItem({ id }: { id: number }) {
               <div><label className="label">Floor</label><input className="input" type="number" step="0.01" value={form.min_price ?? ""} placeholder="min" onChange={(e) => set("min_price", e.target.value === "" ? null : Number(e.target.value))} /></div>
               <div><label className="label">Cost/unit</label><input className="input" type="number" step="0.01" value={form.cost ?? 0} onChange={(e) => set("cost", Number(e.target.value))} /></div>
             </div>
+            <PriceWhy itemId={id} currentPrice={item.price} />
             {priceAdvice && (
               <div className="rounded-md border border-zinc-800 bg-zinc-950 p-2 text-xs" title={`Based on ${priceAdvice.basis} · confidence ${priceAdvice.confidence}`}>
                 <div className="text-zinc-300">💡 {priceAdvice.reason}</div>

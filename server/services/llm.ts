@@ -154,6 +154,8 @@ export interface AskOpts {
   maxTokens?: number;
   /** Use exactly this AI (no fallback): for comparing AIs, e.g. the backtest. */
   only?: ProviderId;
+  /** Try this AI first (the usual order after it), e.g. the best AI for this item's category. */
+  prefer?: ProviderId;
 }
 export class AiRefusal extends Error {}
 
@@ -231,7 +233,8 @@ async function claude(o: AskOpts, schema?: z.ZodType) {
 
 /** Try each provider in turn. Refusals stop (another AI shouldn't be shopped for the same request). */
 async function viaProviders<T>(o: AskOpts, run: (id: ProviderId) => Promise<T>) {
-  const order = o.only ? (providerReady(o.only) ? [o.only] : []) : plan({ images: Boolean(o.images?.length) });
+  let order = o.only ? (providerReady(o.only) ? [o.only] : []) : plan({ images: Boolean(o.images?.length) });
+  if (!o.only && o.prefer && order.includes(o.prefer)) order = [o.prefer, ...order.filter((p) => p !== o.prefer)];
   if (!order.length) throw Object.assign(new Error(o.images?.length ? "No AI that can read photos is set up. Add a key in Settings → AI." : "No AI is set up. Add a key in Settings → AI."), { status: 400 });
   const errors: string[] = [];
   for (const id of order) {

@@ -9,10 +9,11 @@
  * - Monthly report card: re-runs the backtest on new sales and tells you if the best AI changed.
  */
 import fs from "node:fs";
+import { z } from "zod/v4";
 import type { Db } from "../db.js";
 import { getSetting, setSetting } from "../db.js";
 import { askStructured, plan, PROVIDERS, providerReady, PROVIDER_IDS, type ProviderId } from "./llm.js";
-import { normTitle, tokens } from "./comps.js";
+import { findLocalComps, normTitle, tokens } from "./comps.js";
 import { getBacktest, Prediction, startBacktest, type Backtest } from "./backtest.js";
 import { notify, raiseAlert } from "./alerts.js";
 import { useAi } from "../context.js";
@@ -203,4 +204,135 @@ export async function announceReportCard(db: Db, id: string, previousWinner: str
     : "Not enough answers to compare the AIs this month.";
   raiseAlert(db, { kind: "ai-report", severity: "info", title, body });
   await notify(db, "weekly", title, body).catch(() => false);
+}
+
+// ---------------- Best AI per category ----------------
+
+export const categoryRoutingOn = (db: Db) => getSetting<{ on?: boolean }>(db, "aiByCategory", {}).on === true;
+
+/** Category -> best AI, from the newest finished backtest that had per-category winners. */
+export function categoryWinners(db: Db): Record<string, ProviderId> {
+  const b = getSetting<Backtest[]>(db, "backtests", []).find((x) => x.status === "done" && x.byCategory?.some((c) => c.winner));
+  return Object.fromEntries((b?.byCategory ?? []).filter((c) => c.winner && providerReady(c.winner as ProviderId)).map((c) => [c.category.toLowerCase(), c.winner as ProviderId]));
+}
+/** The AI to try first for an item in this category (when turned on), or undefined. */
+export function preferFor(db: Db, category: string | null | undefined): ProviderId | undefined {
+  if (!category || !categoryRoutingOn(db)) return undefined;
+  return categoryWinners(db)[(category.split(">")[0] ?? "").trim().toLowerCase()];
+}
+
+// ---------------- Why this price ----------------
+
+export interface PriceWhy {
+  at: string;
+  provider: string | null;
+  model: string | null;
+  price: number;
+  low: number;
+  high: number;
+  quickSale: number;
+  confidence: string;
+  reasoning: string;
+  comps: { title: string; price: number; sold: boolean; source: string }[];
+  correction: string | null;
+  secondOpinion: { name: string; price: number; diffPct: number; agree: boolean } | null;
+  preferredFor: string | null;
+}
+export function savePriceWhy(db: Db, itemId: number, w: PriceWhy) {
+  setSetting(db, `priceWhy.${itemId}`, w);
+}
+export const getPriceWhy = (db: Db, itemId: number) => getSetting<PriceWhy | null>(db, `priceWhy.${itemId}`, null);
+
+// ---------------- Fresh titles for stale listings ----------------
+
+const FreshTitle = z.object({
+  title: z.string().describe("A new title, max 80 characters: brand, item, key features, size/color. Words buyers search for. No ALL CAPS, no filler like 'L@@K'."),
+  why: z.string().describe("One short sentence: what changed and why it should find more buyers"),
+});
+
+function ensureRewrites(db: Db) {
+  db.exec("CREATE TABLE IF NOT EXISTS title_rewrites (id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, old_title TEXT NOT NULL, new_title TEXT NOT NULL, provider TEXT, at TEXT NOT NULL DEFAULT (datetime('now')))");
+}
+
+const LISTED = "COALESCE((SELECT MIN(listed_at) FROM listings l WHERE l.item_id = i.id AND l.listed_at IS NOT NULL), i.created_at)";
+
+/** Active items listed 30+ days ago that haven't sold (oldest first). */
+export function staleItems(db: Db, days = 30, limit = 50) {
+  ensureRewrites(db);
+  return db
+    .prepare(
+      `SELECT i.id, i.title, i.price, i.brand, i.category, CAST(julianday('now') - julianday(${LISTED}) AS INTEGER) AS days,
+        (SELECT MAX(at) FROM title_rewrites r WHERE r.item_id = i.id) AS rewritten_at
+       FROM items i WHERE i.status = 'active' AND i.title != '' AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id)
+       AND julianday('now') - julianday(${LISTED}) >= ?
+       ORDER BY days DESC LIMIT ?`,
+    )
+    .all(days, limit) as { id: number; title: string; price: number; brand: string; category: string; days: number; rewritten_at: string | null }[];
+}
+
+/** Ask the AI for a fresh title, using titles of similar items that did sell. */
+export async function suggestFreshTitle(db: Db, itemId: number) {
+  const it = db.prepare("SELECT title, brand, category, condition, size, color, specifics FROM items WHERE id = ?").get(itemId) as { title: string; brand: string; category: string; condition: string; size: string; color: string; specifics: string } | undefined;
+  if (!it) throw Object.assign(new Error("Not found"), { status: 404 });
+  useAi("title-rewrite");
+  // Similar sold titles: by the current title, else by brand (+ category) when the title is too vague to match.
+  let comps = findLocalComps(db, it.title, 12);
+  if (!comps.length && it.brand) comps = findLocalComps(db, [it.brand, (it.category.split(">").pop() ?? "").trim()].filter(Boolean).join(" "), 12);
+  if (!comps.length && it.brand) comps = findLocalComps(db, it.brand, 12);
+  const sold = comps.map((c) => `- ${c.title} ($${c.price})`);
+  const r = await askStructured(
+    {
+      task: "title-rewrite",
+      system: "You rewrite resale listing titles so more buyers find them in eBay/Poshmark/Mercari search. Keep every fact true (never invent brand, model, size or material). Use the words buyers type; lead with brand and item.",
+      text: [`This listing hasn't sold in 30+ days. Current title: ${it.title}`, it.brand && `Brand: ${it.brand}`, it.category && `Category: ${it.category}`, it.size && `Size: ${it.size}`, it.color && `Color: ${it.color}`, `Item specifics: ${it.specifics}`, sold.length ? `Titles of similar items that sold:\n${sold.join("\n")}` : ""]
+        .filter(Boolean)
+        .join("\n"),
+      effort: "low",
+      maxTokens: 1500,
+      prefer: preferFor(db, it.category),
+    },
+    FreshTitle,
+  );
+  return { title: r.output.title.slice(0, 80), why: r.output.why, provider: r.provider };
+}
+
+/** Use a new title (the old one is kept for the report). */
+export function applyFreshTitle(db: Db, itemId: number, title: string, provider: string | null) {
+  ensureRewrites(db);
+  const old = db.prepare("SELECT title FROM items WHERE id = ?").get(itemId) as { title: string } | undefined;
+  if (!old) throw Object.assign(new Error("Not found"), { status: 404 });
+  db.prepare("INSERT INTO title_rewrites (item_id, old_title, new_title, provider) VALUES (?, ?, ?, ?)").run(itemId, old.title, title, provider);
+  db.prepare("UPDATE items SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, itemId);
+  if (provider) recordAiTitle(db, title, provider, itemId);
+}
+
+/** Did rewritten listings sell? Compared with other stale listings over the same time. */
+export function rewriteReport(db: Db) {
+  ensureRewrites(db);
+  const rows = db
+    .prepare(
+      `SELECT r.item_id, r.at, (SELECT MIN(sold_at) FROM sales s WHERE s.item_id = r.item_id AND s.sold_at >= r.at) AS sold_at
+       FROM title_rewrites r WHERE r.id = (SELECT MAX(id) FROM title_rewrites x WHERE x.item_id = r.item_id) AND r.at >= datetime('now','-180 days')`,
+    )
+    .all() as { item_id: number; at: string; sold_at: string | null }[];
+  const t = (s: string) => Date.parse(s.includes("T") ? s : s.replace(" ", "T") + "Z");
+  const matured = rows.filter((r) => Date.now() - t(r.at) >= 30 * 86400_000);
+  const soldIn30 = matured.filter((r) => r.sold_at && t(r.sold_at) - t(r.at) <= 30 * 86400_000).length;
+  const days = rows.filter((r) => r.sold_at).map((r) => (t(r.sold_at!) - t(r.at)) / 86400_000);
+  // Baseline: listings that were 30-180 days old a month ago and never rewritten: share that sold in the month since.
+  const base = db
+    .prepare(
+      `SELECT COUNT(*) AS n, SUM(CASE WHEN EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id AND s.sold_at >= datetime('now','-30 days')) THEN 1 ELSE 0 END) AS sold
+       FROM items i WHERE i.title != '' AND NOT EXISTS (SELECT 1 FROM title_rewrites r WHERE r.item_id = i.id)
+       AND NOT EXISTS (SELECT 1 FROM sales s WHERE s.item_id = i.id AND s.sold_at < datetime('now','-30 days'))
+       AND julianday('now','-30 days') - julianday(${LISTED}) BETWEEN 30 AND 180`,
+    )
+    .get() as { n: number; sold: number | null };
+  return {
+    rewritten: rows.length,
+    soldSince: rows.filter((r) => r.sold_at).length,
+    medianDaysAfter: days.length ? Math.round(median(days)! * 10) / 10 : null,
+    soldWithin30Pct: matured.length >= 5 ? Math.round((soldIn30 / matured.length) * 100) : null,
+    otherStaleSoldPct: base.n >= 5 ? Math.round(((base.sold ?? 0) / base.n) * 100) : null,
+  };
 }

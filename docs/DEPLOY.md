@@ -214,6 +214,14 @@ Reports → **Which AI prices best?** tests the AIs you pick on items you've alr
 - **Monthly AI report card** (off by default): once a month, after 10+ new sales and with 2+ AIs set up, the backtest re-runs on your newest 30 sales. An Inbox note and phone alert say which AI is best, and whether that changed.
 - **AI cost per sale:** this shop's AI spend over the last 30 days divided by its sales, next to profit per sale and as a share of profit, split by feature. The owner's weekly report includes it too.
 
+### More from your results
+
+- **Would price drops have sold things sooner?** (Reports, free, no AI). Replays automatic price-drop rules on items you've already sold: gentle, steady, fast, and your own setting from Settings → Automatic price drops. For each it shows average days to sell, how much sooner, how much money it would cost, and how many items wouldn't have sold at its floor. The model: each buyer pays what they really paid, and turns up as long after the price reaches that amount as they really did. Offer sales sell the same day.
+- **Why this price** (item page): which AI suggested the price, its range, confidence and reasoning, the comparable listings it was shown, and any lean correction or second opinion. Saved each time the AI writes the draft.
+- **Fresh titles for old listings:** items listed 30+ days without a sale show "✨ Suggest a fresh title" on their page. The AI is shown the titles of similar items that did sell; it never invents facts. Using the title updates the live eBay listing right away (except listings with sizes/colors); other sites need the title changed there. The 🧠 card lists old listings and shows how refreshed ones sold, against other old listings.
+- **Best AI per category:** the price test now also finds the best AI within each category (5+ items). Turn on "Send each category to its best AI" in the 🧠 card. When an item already has a category, that AI goes first, with the others still as backup.
+- **One-page AI summary** (Reports → 📄 One-page AI summary, or /ai-report): this month's time saved, AI spend, cost per sale, price accuracy, and what FlipDesk learned. Printable or save as PDF. Time saved uses stated assumptions: 8 minutes per listing, 2 per photo fix, 3 per fresh title, 3 per help answer, 1 per store scan.
+
 ## Uptime monitor (recommended)
 
 FlipDesk can't tell you it's down when it's down. A free uptime service can:

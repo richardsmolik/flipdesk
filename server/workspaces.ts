@@ -36,6 +36,8 @@ import { draftWhatsNew, recentChanges } from "./services/changelog.js";
 import { notify, raiseAlert } from "./services/alerts.js";
 import { getAiRouting, keySource, listModels, pickModel, plan, priceOf, PROVIDER_IDS, PROVIDERS, providerReady, setAiCostSink, setAiKeys, setAiRouting, testProvider, type AiCall, type AiRouting, type ProviderId } from "./services/llm.js";
 import { fireDrill, type FireDrill } from "./services/fireDrill.js";
+import { calibrations, rewriteReport, titleReport } from "./services/aiInsights.js";
+import { dropBacktest } from "./services/dropBacktest.js";
 import { currentDay, mergeDay, realTrend, recordTiming, type RealDay } from "./services/realSpeed.js";
 import { listVersions, markFailed, previousGood, flyReady, switchImage, currentImage } from "./services/versions.js";
 import { describeDevice, ensurePasskeys, finishLogin, finishRegistration, hasPasskeys, listPasskeys, loginOptions, registrationOptions, relyingParty, removePasskey, renamePasskey } from "./services/passkeys.js";
@@ -291,6 +293,52 @@ export class Workspaces {
       profitPerSale: s.n ? Math.round((s.p / s.n) * 100) / 100 : null,
       shareOfProfit: s.p > 0 ? Math.round((ai.c / s.p) * 1000) / 10 : null,
       byTask,
+    };
+  }
+
+  /** This month (to date) for one shop: what AI did, cost, minutes saved (stated assumptions), accuracy, lessons. */
+  aiSummary(ws: Workspace) {
+    const month = new Date().toISOString().slice(0, 7);
+    const tasks = this.site
+      .prepare("SELECT task, provider, COUNT(*) AS calls, COALESCE(SUM(cost),0) AS cost FROM ai_calls WHERE ws_key = ? AND at >= strftime('%Y-%m-01','now') GROUP BY task, provider")
+      .all(ws.key) as { task: string; provider: string; calls: number; cost: number }[];
+    const n = (t: string) => tasks.filter((x) => x.task === t).reduce((a, x) => a + x.calls, 0);
+    // Minutes a seller would otherwise spend by hand (rough, stated on the page).
+    const MINUTES: Record<string, number> = { listing: 8, photo: 2, sourcing: 1, "title-rewrite": 3, help: 3 };
+    const minutes = Object.entries(MINUTES).reduce((a, [t, m]) => a + n(t) * m, 0);
+    const cost = tasks.reduce((a, x) => a + x.cost, 0);
+    const bt = getSetting<{ id: string; at: string; status: string; winner: string | null; scores: { predictor: string; name: string; medianAbsPct: number | null; n: number }[]; cases: unknown[] }[]>(ws.db, "backtests", []).find((b) => b.status === "done");
+    const byProvider = Object.values(
+      tasks.reduce<Record<string, { provider: string; calls: number; cost: number }>>((acc, x) => {
+        const e = (acc[x.provider] ??= { provider: x.provider, calls: 0, cost: 0 });
+        e.calls += x.calls;
+        e.cost += x.cost;
+        return acc;
+      }, {}),
+    ).map((x) => ({ ...x, name: PROVIDERS[x.provider as ProviderId]?.name.split(" (")[0] ?? x.provider, cost: Math.round(x.cost * 100) / 100 }));
+    const lessons = (() => {
+      try {
+        return { titles: titleReport(ws.db).verdict, rewrites: rewriteReport(ws.db), drops: dropBacktest(ws.db).takeaway, corrections: Object.values(calibrations(ws.db)) };
+      } catch {
+        return { titles: null, rewrites: null, drops: null, corrections: [] };
+      }
+    })();
+    return {
+      month,
+      shop: ws.key === "main" ? "Your shop" : ws.demo ? "Sample shop" : this.accountEmail(ws.userId ?? 0),
+      requests: tasks.reduce((a, x) => a + x.calls, 0),
+      cost: Math.round(cost * 100) / 100,
+      listingsWritten: n("listing"),
+      photosFixed: n("photo"),
+      titlesRefreshed: n("title-rewrite"),
+      helpAnswers: n("help"),
+      minutesSaved: minutes,
+      minutesAssumed: MINUTES,
+      costPerHourSaved: minutes ? Math.round((cost / (minutes / 60)) * 100) / 100 : null,
+      byProvider,
+      perSale: this.aiPerSale(ws),
+      accuracy: bt ? { at: bt.at, items: bt.cases.length, winner: bt.winner, scores: bt.scores.filter((x) => x.medianAbsPct !== null).map((x) => ({ who: x.name, typicalMiss: x.medianAbsPct, n: x.n })) } : null,
+      lessons,
     };
   }
 
@@ -2668,6 +2716,13 @@ export class Workspaces {
       const ws = this.current(req, req.fdUser ?? null);
       if (!ws) return void res.status(404).json({ error: "No shop" });
       res.json(this.aiPerSale(ws));
+    });
+    // One-page AI summary for the shop you're in: cost, accuracy, time saved, what it learned.
+    root.get("/api/ai/summary", (req: R, res) => {
+      if (req.fdShare) return void res.status(403).json({ error: "read-only" });
+      const ws = this.current(req, req.fdUser ?? null);
+      if (!ws) return void res.status(404).json({ error: "No shop" });
+      res.json(this.aiSummary(ws));
     });
     // Anyone signed in: their own AI spending this month (and the allowance, if there is one).
     root.get("/api/ai/mine", (req: R, res) => {

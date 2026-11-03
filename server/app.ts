@@ -8,10 +8,12 @@ import { getItem, getSetting, hydrateItem, hydrateItems, logActivity, setSetting
 import { getProblem, listProblems, problemForJob, saveProblem } from "./services/replay.js";
 import { ebaySmokeTest, runWeeklyEbay, weeklyEbay } from "./services/ebaySmoke.js";
 import { estimateCost, getBacktest, listBacktests, pickCases, startBacktest } from "./services/backtest.js";
-import { calibrations, correctionOn, correctPrices, recordAiTitle, reportCardSettings, secondOpinion, secondOpinionSettings, titleReport } from "./services/aiInsights.js";
+import { applyFreshTitle, calibrations, categoryRoutingOn, categoryWinners, correctionOn, correctPrices, getPriceWhy, preferFor, recordAiTitle, reportCardSettings, rewriteReport, savePriceWhy, secondOpinion, secondOpinionSettings, staleItems, suggestFreshTitle, titleReport } from "./services/aiInsights.js";
+import { dropBacktest } from "./services/dropBacktest.js";
 import { PROVIDER_IDS, PROVIDERS, providerReady, type ProviderId } from "./services/llm.js";
 import { MARKETPLACES, MARKETPLACE_IDS, isMarketplaceId, type MarketplaceId } from "./marketplaces/registry.js";
 import { adapterFor } from "./marketplaces/adapters.js";
+import { ebayReviseItem } from "./marketplaces/ebay.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
 import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
@@ -464,7 +466,10 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     if (!photoPaths.length && !hint) return void res.status(400).json({ error: "Add at least one photo or a short description." });
     const comps = hint ? (await researchPrice(db, hint)).comps : [];
     const cost = req.body.cost ? Number(req.body.cost) : undefined;
-    const result = await generateListing({ photoPaths, hint, cost, comps: comps.some((c) => c.source !== "demo") ? comps : undefined });
+    const usedComps = comps.some((c) => c.source !== "demo") ? comps : undefined;
+    const known = itemId ? (db.prepare("SELECT category FROM items WHERE id = ?").get(itemId) as { category: string } | undefined) : undefined;
+    const prefer = preferFor(db, known?.category);
+    const result = await generateListing({ photoPaths, hint, cost, comps: usedComps, prefer });
     if (result.demo) return void res.json({ ...result, uploaded: photoPaths });
     const provider = result.provider as ProviderId | undefined;
     // Learn from results: correct this AI's known lean, get a second opinion on pricier items, remember the title.
@@ -476,6 +481,24 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
       /* a second opinion is a bonus: never block the draft */
     }
     if (provider) recordAiTitle(db, result.draft.title, provider, itemId);
+    if (itemId) {
+      const p = result.draft.price;
+      savePriceWhy(db, itemId, {
+        at: new Date().toISOString(),
+        provider: provider ?? null,
+        model: result.model ?? null,
+        price: p.recommended,
+        low: p.low,
+        high: p.high,
+        quickSale: p.quick_sale,
+        confidence: p.confidence,
+        reasoning: p.reasoning,
+        comps: (usedComps ?? []).slice(0, 8).map((c) => ({ title: c.title, price: c.price, sold: c.sold, source: c.source })),
+        correction: correction?.note ?? null,
+        secondOpinion: second ? { name: second.name, price: second.price, diffPct: second.diffPct, agree: second.agree } : null,
+        preferredFor: prefer && provider === prefer ? (known?.category.split(">")[0].trim() ?? null) : null,
+      });
+    }
     res.json({ ...result, uploaded: photoPaths, correction, secondOpinion: second });
   });
 
@@ -889,20 +912,48 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   });
 
   // What FlipDesk learned about the AIs from your results (see services/aiInsights.ts).
-  api.get("/ai-insights", (_req, res) => {
-    res.json({
-      correction: { on: correctionOn(db), calibrations: Object.values(calibrations(db)) },
-      secondOpinion: secondOpinionSettings(db),
-      reportCard: reportCardSettings(db),
-      titles: titleReport(db),
-    });
+  const insights = () => ({
+    correction: { on: correctionOn(db), calibrations: Object.values(calibrations(db)) },
+    secondOpinion: secondOpinionSettings(db),
+    reportCard: reportCardSettings(db),
+    titles: titleReport(db),
+    byCategory: { on: categoryRoutingOn(db), winners: categoryWinners(db) },
+    rewrites: rewriteReport(db),
   });
+  api.get("/ai-insights", (_req, res) => void res.json(insights()));
+  // Why the AI suggested this item's price (saved when it wrote the draft).
+  api.get("/items/:id/price-why", (req, res) => void res.json(getPriceWhy(db, Number(req.params.id))));
+  // Fresh titles for listings that haven't sold in 30+ days.
+  api.get("/titles/stale", (_req, res) => void res.json({ items: staleItems(db), report: rewriteReport(db) }));
+  api.post("/items/:id/fresh-title", async (req, res) => void res.json(await suggestFreshTitle(db, Number(req.params.id))));
+  api.post("/items/:id/fresh-title/apply", async (req, res) => {
+    const b = z.object({ title: z.string().trim().min(3).max(80), provider: z.string().max(20).nullable().optional() }).parse(req.body);
+    applyFreshTitle(db, Number(req.params.id), b.title, b.provider ?? null);
+    const item = getItem(db, Number(req.params.id))!;
+    // eBay (API): update the live listing now. Other sites need the change made there (or via the extension).
+    const live = item.listings.filter((l) => l.status === "active");
+    let ebay: "updated" | "failed" | null = null;
+    let ebayError: string | null = null;
+    if (live.some((l) => l.marketplace === "ebay")) {
+      try {
+        await ebayReviseItem(db, item);
+        ebay = "updated";
+      } catch (e) {
+        ebay = "failed";
+        ebayError = (e as Error).message;
+      }
+    }
+    res.json({ item, ebay, ebayError, editElsewhere: live.filter((l) => l.marketplace !== "ebay").map((l) => l.marketplace) });
+  });
+  // Price-drop backtest: replay drop rules on your past sales (no AI, free).
+  api.get("/drop-backtest", (_req, res) => void res.json(dropBacktest(db)));
   api.put("/ai-insights/settings", (req, res) => {
-    const b = z.object({ correction: z.boolean().optional(), secondOpinion: z.object({ on: z.boolean(), threshold: z.number().min(0).max(100000) }).optional(), reportCard: z.boolean().optional() }).parse(req.body);
+    const b = z.object({ correction: z.boolean().optional(), secondOpinion: z.object({ on: z.boolean(), threshold: z.number().min(0).max(100000) }).optional(), reportCard: z.boolean().optional(), byCategory: z.boolean().optional() }).parse(req.body);
+    if (b.byCategory !== undefined) setSetting(db, "aiByCategory", { on: b.byCategory });
     if (b.correction !== undefined) setSetting(db, "aiCorrection", { on: b.correction });
     if (b.secondOpinion) setSetting(db, "secondOpinion", b.secondOpinion);
     if (b.reportCard !== undefined) setSetting(db, "aiReportCard", { ...reportCardSettings(db), on: b.reportCard });
-    res.json({ correction: { on: correctionOn(db), calibrations: Object.values(calibrations(db)) }, secondOpinion: secondOpinionSettings(db), reportCard: reportCardSettings(db), titles: titleReport(db) });
+    res.json(insights());
   });
 
   // Weekly eBay check (full test on the sandbox, read-only on a real account).

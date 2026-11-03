@@ -9,7 +9,10 @@ interface Insights {
   secondOpinion: { on: boolean; threshold: number };
   reportCard: { on: boolean; lastRunAt?: string; lastWinner?: string | null };
   titles: { rows: TitleGroup[]; verdict: string | null };
+  byCategory: { on: boolean; winners: Record<string, string> };
+  rewrites: { rewritten: number; soldSince: number; medianDaysAfter: number | null; soldWithin30Pct: number | null; otherStaleSoldPct: number | null };
 }
+interface Stale { id: number; title: string; price: number; days: number; rewritten_at: string | null }
 interface PerSale { days: number; aiCost: number; aiCalls: number; sales: number; perSale: number | null; profitPerSale: number | null; shareOfProfit: number | null; byTask: { task: string; calls: number; cost: number }[] }
 const NAMES: Record<string, string> = { claude: "Claude", openai: "ChatGPT", gemini: "Gemini", kimi: "Kimi", deepseek: "DeepSeek" };
 const TASKS: Record<string, string> = { listing: "Listing writer", photo: "Photo fixes", sourcing: "Store scanner", help: "Help answers", "help-article": "Help articles", "whats-new": "Announcements", backtest: "Backtests", "second-opinion": "Second opinions", test: "Connection tests" };
@@ -19,9 +22,11 @@ export default function AiInsights() {
   const [d, setD] = useState<Insights | null>(null);
   const [cps, setCps] = useState<PerSale | null>(null);
   const [threshold, setThreshold] = useState("");
+  const [stale, setStale] = useState<Stale[] | null>(null);
   useEffect(() => {
     void api.get<Insights>("/api/ai-insights").then((x) => (setD(x), setThreshold(String(x.secondOpinion.threshold)))).catch(() => setD(null));
     void api.get<PerSale>("/api/ai/per-sale").then(setCps).catch(() => setCps(null));
+    void api.get<{ items: Stale[] }>("/api/titles/stale").then((x) => setStale(x.items)).catch(() => setStale(null));
   }, []);
   if (!d) return null;
   const save = async (b: Record<string, unknown>) => {
@@ -121,6 +126,44 @@ export default function AiInsights() {
         ) : (
           <p className="text-sm text-zinc-500">FlipDesk now remembers every title an AI writes. Once those items sell, this shows whether they sold faster than titles you wrote.</p>
         )}
+      </div>
+      <div className="space-y-1 border-t border-zinc-800 pt-3">
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={d.byCategory.on} onChange={(e) => void save({ byCategory: e.target.checked })} />
+          <span>
+            <span className="font-medium">Send each category to its best AI</span>
+            <span className="block text-xs text-zinc-500">Uses the per-category winners from your latest price test (5+ items in a category). When an item already has a category (rewrites, fresh titles, auto-write after you set it), that AI goes first; the others still back it up.</span>
+          </span>
+        </label>
+        {Object.keys(d.byCategory.winners).length ? (
+          <p className="ml-6 text-xs text-zinc-400">{Object.entries(d.byCategory.winners).map(([c, p]) => `${c[0].toUpperCase()}${c.slice(1)}: ${NAMES[p] ?? p}`).join(" · ")}</p>
+        ) : (
+          <p className="ml-6 text-xs text-zinc-500">No per-category winners yet: run the price test with 2+ AIs on enough sales.</p>
+        )}
+      </div>
+
+      <div className="space-y-2 border-t border-zinc-800 pt-3">
+        <div className="text-sm font-medium">🕰️ Fresh titles for listings that haven't sold in 30+ days</div>
+        {d.rewrites.rewritten > 0 && (
+          <p className="text-sm">
+            {d.rewrites.rewritten} title{d.rewrites.rewritten === 1 ? "" : "s"} refreshed, {d.rewrites.soldSince} sold since{d.rewrites.medianDaysAfter !== null ? ` (typically ${d.rewrites.medianDaysAfter} days after)` : ""}.
+            {d.rewrites.soldWithin30Pct !== null && d.rewrites.otherStaleSoldPct !== null && ` ${d.rewrites.soldWithin30Pct}% sold within a month, vs ${d.rewrites.otherStaleSoldPct}% of other old listings.`}
+          </p>
+        )}
+        {stale === null ? null : stale.length ? (
+          <ul className="space-y-1 text-sm">
+            {stale.slice(0, 8).map((x) => (
+              <li key={x.id} className="flex items-center justify-between gap-2">
+                <a className="min-w-0 truncate text-brand hover:underline" href={`/items/${x.id}`}>{x.title}</a>
+                <span className="shrink-0 text-xs text-zinc-500">{x.days} days{x.rewritten_at ? " · refreshed" : ""}</span>
+              </li>
+            ))}
+            {stale.length > 8 && <li className="text-xs text-zinc-500">…and {stale.length - 8} more</li>}
+          </ul>
+        ) : (
+          <p className="text-sm text-zinc-500">Nothing's been sitting 30+ days. 👍</p>
+        )}
+        <p className="text-xs text-zinc-500">Open one and press ✨ Suggest a fresh title. Live eBay listings update right away; other sites need the title changed there.</p>
       </div>
     </section>
   );

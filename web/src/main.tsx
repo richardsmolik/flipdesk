@@ -7,6 +7,7 @@ import { Toaster } from "./ui";
 import { MobileBar, Sidebar, useNavCounts } from "./components/Nav";
 import { Welcome, type OnboardingState } from "./components/Onboarding";
 import { Shortcuts } from "./components/Shortcuts";
+import AiReport from "./pages/AiReport";
 import Uptime from "./pages/Uptime";
 import { AuthScreen, DemoBanner, NotMePage, PlanBanner, ResetPage, SharePage, ShopSwitch, useBilling, useWorkspace } from "./components/Account";
 import Billing from "./pages/Billing";
@@ -97,6 +98,7 @@ function Shell() {
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/source" element={<Source />} />
           <Route path="/reports" element={<Reports />} />
+          <Route path="/ai-report" element={<AiReport />} />
           <Route path="/bundles" element={<Bundles />} />
           <Route path="/shipping" element={<Shipping />} />
           <Route path="/bins" element={<BinList />} />

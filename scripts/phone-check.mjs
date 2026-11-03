@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 const { chromium } = createRequire(import.meta.url)("playwright");
 const B = process.argv[2] ?? "http://localhost:8787";
 const OUT = process.argv[3];
-const ROUTES = ["/", "/inbox", "/items/new", "/shoot", "/bulk", "/inventory", "/inventory?view=sold", "/bundles", "/source", "/mileage", "/shipping", "/bins", "/sales", "/reports", "/tools", "/queue", "/status", "/help", "/connections", "/switch", "/settings", "/launch", "/items/1"];
+const ROUTES = ["/", "/inbox", "/items/new", "/shoot", "/bulk", "/inventory", "/inventory?view=sold", "/bundles", "/source", "/mileage", "/shipping", "/bins", "/sales", "/reports", "/tools", "/queue", "/status", "/help", "/connections", "/switch", "/settings", "/launch", "/ai-report", "/items/1"];
 const b = await chromium.launch();
 const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
 const p = await ctx.newPage();

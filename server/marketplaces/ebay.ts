@@ -300,6 +300,14 @@ export async function ebayDelist(db: Db, item: Item, _listing: ListingRow) {
 }
 
 /** Syncs both price and available quantity for the listing. */
+/** Push changed item details (title, description, specifics) to a live eBay listing: eBay updates the published offer. */
+export async function ebayReviseItem(db: Db, item: Item) {
+  if (!ebayIsLive(db)) return sleep(50);
+  if (item.variations.length) throw new Error("Listings with sizes/colors: edit the title on eBay for now.");
+  const images = await resolveImageUrls(db, item);
+  await call(db, "PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(item.sku)}`, toInventoryItem(item, images));
+}
+
 export async function ebayUpdatePrice(db: Db, item: Item, listing: ListingRow, price: number) {
   if (!ebayIsLive(db)) return sleep(80);
   if (item.variations.length) {

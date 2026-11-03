@@ -35,7 +35,10 @@ export interface Case {
   yourPrice: number | null;
   compsBefore: { title: string; price: number; sold_at: string }[];
   compMedian: number | null;
+  /** Top-level category ("Shoes", "Clothing"…), for per-category winners. */
+  category?: string;
 }
+export interface CategoryWinner { category: string; n: number; winner: string | null; scores: { predictor: string; medianAbsPct: number | null; n: number }[] }
 export interface Row { saleId: number; predictor: string; price: number | null; days: number | null; error?: string }
 export interface Score { predictor: string; name: string; n: number; medianAbsPct: number | null; mae: number | null; within20: number | null; bias: number | null; daysMedianErr: number | null; cost: number }
 export interface Backtest {
@@ -52,6 +55,7 @@ export interface Backtest {
   winner: string | null;
   cost: number;
   error?: string;
+  byCategory?: CategoryWinner[];
 }
 
 const DAY = 86400_000;
@@ -68,14 +72,14 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 export function pickCases(db: Db, n = 20): Case[] {
   const sales = db
     .prepare(
-      `SELECT s.id AS saleId, s.item_id AS itemId, s.sale_price, s.quantity, s.sold_at, i.title, i.created_at, i.original_price, i.price,
+      `SELECT s.id AS saleId, s.item_id AS itemId, s.sale_price, s.quantity, s.sold_at, i.title, i.category, i.created_at, i.original_price, i.price,
         (SELECT MIN(listed_at) FROM listings l WHERE l.item_id = i.id AND l.listed_at IS NOT NULL) AS listed_at,
         (SELECT old_price FROM price_changes p WHERE p.item_id = i.id ORDER BY p.at, p.id LIMIT 1) AS first_price
        FROM sales s JOIN items i ON i.id = s.item_id
        WHERE s.sale_price > 0 AND i.title != ''
        ORDER BY s.sold_at DESC LIMIT ?`,
     )
-    .all(Math.min(500, n * 4)) as { saleId: number; itemId: number; sale_price: number; quantity: number; sold_at: string; title: string; created_at: string; original_price: number | null; price: number; listed_at: string | null; first_price: number | null }[];
+    .all(Math.min(500, n * 4)) as { saleId: number; itemId: number; sale_price: number; quantity: number; sold_at: string; title: string; category: string; created_at: string; original_price: number | null; price: number; listed_at: string | null; first_price: number | null }[];
   const seen = new Set<number>();
   const out: Case[] = [];
   for (const s of sales) {
@@ -100,6 +104,7 @@ export function pickCases(db: Db, n = 20): Case[] {
       yourPrice: your && your > 0 ? your : null,
       compsBefore: comps,
       compMedian: comps.length >= 3 ? median(comps.map((c) => c.price)) : null,
+      category: topCategory(s.category),
     });
     if (out.length >= n) break;
   }
@@ -153,6 +158,23 @@ export function estimateCost(n: number, providers: ProviderId[], photos: boolean
     return { provider: p, cost: r2(((inTok * pi + outTok * po) / 1e6) * n * 100) / 100 };
   });
   return { requests: n * providers.length, perProvider: per, total: Math.round(per.reduce((a, x) => a + x.cost, 0) * 10000) / 10000 };
+}
+
+/** "Clothing > Men > Jackets" -> "Clothing". */
+export const topCategory = (c: string | null | undefined) => (c ?? "").split(">")[0].trim() || "Other";
+
+/** Winners per top-level category (5+ items in it, and each AI needs 5+ answers there). */
+export function scoreByCategory(cases: Case[], rows: Row[], providers: ProviderId[]): CategoryWinner[] {
+  const groups = new Map<string, Case[]>();
+  for (const c of cases) groups.set(c.category ?? "Other", [...(groups.get(c.category ?? "Other") ?? []), c]);
+  return [...groups.entries()]
+    .filter(([, cs]) => cs.length >= 5)
+    .map(([category, cs]) => {
+      const ids = new Set(cs.map((c) => c.saleId));
+      const sc = score(cs, rows.filter((r) => ids.has(r.saleId)), providers);
+      return { category, n: cs.length, winner: sc.winner, scores: sc.scores.map((x) => ({ predictor: x.predictor, medianAbsPct: x.medianAbsPct, n: x.n })) };
+    })
+    .sort((a, b) => b.n - a.n);
 }
 
 export function score(cases: Case[], rows: Row[], providers: ProviderId[], costs: Record<string, number> = {}): { scores: Score[]; winner: string | null } {
@@ -221,6 +243,7 @@ export function startBacktest(db: Db, opts: { n: number; providers: ProviderId[]
       const s = score(cases, b.rows, providers, costs);
       b.scores = s.scores;
       b.winner = s.winner;
+      b.byCategory = scoreByCategory(cases, b.rows, providers);
       b.cost = Math.round(Object.values(costs).reduce((a, x) => a + x, 0) * 10000) / 10000;
       b.status = b.rows.every((r) => r.error) ? "failed" : "done";
       if (b.status === "failed") b.error = b.rows.find((r) => r.error)?.error;
