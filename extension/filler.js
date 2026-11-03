@@ -111,8 +111,8 @@
   const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
   /** An item changed in FlipDesk: show exactly what to change on this listing, with copy buttons. */
-  function revise(work) {
-    const { item, listing, marketplace } = work;
+  function revise(work, attempt = 0) {
+    const { item, listing, marketplace, job } = work;
     let fields = [];
     try {
       fields = JSON.parse(work.job.payload || "{}").fields || [];
@@ -131,18 +131,36 @@
       specifics: ["Item details", Object.entries(item.specifics || {}).map(([k, v]) => k + ": " + v).join("; ")],
       photos: ["Photos", "Re-upload the photos from FlipDesk (item page)"],
     };
+    // "Fill it for me": on the listing's edit page, put the new values straight into the matching fields.
+    const site = self.FLIPDESK_SITES[job.marketplace] || {};
+    const filled = [];
+    const tryFill = (key, words, value) => {
+      if (!fields.includes(key) || value === undefined || value === null || value === "") return;
+      const el = find(site[key], words);
+      if (el) (setNative(el, String(value)), filled.push(key));
+    };
+    tryFill("title", ["title", "what are you selling", "item name"], item.title.slice(0, site.titleMax || marketplace.titleMax || 80));
+    tryFill("description", ["description", "describe"], item.description.slice(0, marketplace.descriptionMax || 5000));
+    tryFill("price", ["price", "listing price"], listing ? Number(listing.price).toFixed(0) : "");
+    tryFill("brand", ["brand", "designer"], item.brand);
+    // Edit forms often load late: try a few times before falling back to copy buttons.
+    if (!filled.length && attempt < 4 && fields.some((f) => ["title", "description", "price", "brand"].includes(f))) return setTimeout(() => revise(work, attempt + 1), 1500);
     const rows = fields
       .filter((f) => show[f])
       .map((f) => {
         const v = String(show[f][1]);
-        return '<div style="margin-top:4px"><b>' + show[f][0] + ":</b> " + esc(v.slice(0, 160)) + (v.length > 160 ? "…" : "") + "</div>";
+        return '<div style="margin-top:4px">' + (filled.includes(f) ? "✓ " : "") + "<b>" + show[f][0] + ":</b> " + esc(v.slice(0, 160)) + (v.length > 160 ? "…" : "") + "</div>";
       });
     const copies = fields
-      .filter((f) => show[f] && f !== "photos")
+      .filter((f) => show[f] && f !== "photos" && !filled.includes(f))
       .slice(0, 3)
       .map((f) => ["Copy " + show[f][0].toLowerCase(), () => navigator.clipboard.writeText(f === "price" ? String(listing ? listing.price : "") : String(show[f][1]))]);
-    panel('<b style="color:#3987e5">Update ' + esc(item.sku) + "</b> on " + esc(marketplace.name) + ": use the site's Edit button and change:" + rows.join(""), [
+    const intro = filled.length
+      ? "filled in " + filled.join(", ") + " (✓). Check them" + (filled.length < fields.length ? ", change the rest" : "") + ", then press the site's Save button."
+      : "open the site's Edit page (FlipDesk fills it in there), or change these by hand:";
+    panel('<b style="color:#3987e5">Update ' + esc(item.sku) + "</b> on " + esc(marketplace.name) + ": " + intro + rows.join(""), [
       ...copies,
+      ["Fill again", () => revise(work, 0)],
       ["Done - it's updated", () => complete({ ok: true }).then(() => panel("✓ Updated.", [])), true],
       ["Couldn't", () => complete({ ok: false, error: "user could not update" }).then(() => panel("Reported.", []))],
     ]);

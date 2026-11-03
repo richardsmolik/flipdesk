@@ -18,7 +18,8 @@ import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
 import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
-import { autoPushOn, claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, queueRevise, REVISE_FIELDS, requestDelist } from "./services/jobs.js";
+import { autoPushOn, claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, pushDelayMinutes, queueRevise, releaseHeld, REVISE_FIELDS, requestDelist } from "./services/jobs.js";
+import { itemHistory, recordChanges, undoBatch } from "./services/history.js";
 import { researchPrice } from "./services/pricing.js";
 import { NeedsVariationError, cancelSale, recordSale, restock, saveVariations } from "./services/sync.js";
 import { bulkPrice, relist, sendOffersToWatchers, staleListings } from "./services/ebayTools.js";
@@ -355,9 +356,10 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     if (sets.length) db.prepare(`UPDATE items SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`).run(...args, id);
     // Changed what buyers see? Send it to the live listings (Settings: "Send edits to live listings").
     const changed = REVISE_FIELDS.filter((k) => k !== "photos" && (body as Record<string, unknown>)[k] !== undefined && JSON.stringify((body as Record<string, unknown>)[k]) !== JSON.stringify((item as unknown as Record<string, unknown>)[k]));
+    const batch = recordChanges(db, id, changed.map((k) => ({ field: k, old: (item as unknown as Record<string, unknown>)[k], new: (body as Record<string, unknown>)[k] })));
     let pushed: ReturnType<typeof queueRevise> = [];
     if (changed.length && autoPushOn(db)) {
-      pushed = queueRevise(db, id, changed, { oldPrice: item.price });
+      pushed = queueRevise(db, id, changed, { oldPrice: item.price, batch });
       if (pushed.length) void processApiJobs(db);
     }
     if (body.quantity !== undefined && body.quantity !== item.quantity) {
@@ -381,19 +383,40 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     setSetting(db, "aiSummaryEmail", { on });
     res.json({ on });
   });
-  api.get("/auto-push", (_req, res) => void res.json({ on: autoPushOn(db) }));
+  api.get("/auto-push", (_req, res) => void res.json({ on: autoPushOn(db), delayMinutes: pushDelayMinutes(db) }));
   api.put("/auto-push", (req, res) => {
-    setSetting(db, "autoPush", { on: z.object({ on: z.boolean() }).parse(req.body).on });
-    res.json({ on: autoPushOn(db) });
+    const b = z.object({ on: z.boolean(), delayMinutes: z.number().int().min(0).max(1440).optional() }).parse(req.body);
+    setSetting(db, "autoPush", { on: b.on, delayMinutes: b.delayMinutes ?? pushDelayMinutes(db) });
+    res.json({ on: autoPushOn(db), delayMinutes: pushDelayMinutes(db) });
   });
 
   // Push everything to the live listings now (e.g. after changing photos).
   api.post("/items/:id/push", async (req, res) => {
     const id = Number(req.params.id);
     if (!getItem(db, id)) return void res.status(404).json({ error: "Not found" });
-    const pushed = queueRevise(db, id, [...REVISE_FIELDS]);
+    releaseHeld(db, id); // anything waiting for the batch time goes now too
+    const pushed = queueRevise(db, id, [...REVISE_FIELDS], { now: true });
     await processApiJobs(db);
     res.json({ pushed, item: getItem(db, id) });
+  });
+
+  // Change history: what changed, where it went, whether it helped; and undo.
+  api.get("/items/:id/history", (req, res) => void res.json(itemHistory(db, Number(req.params.id))));
+  api.post("/items/:id/history/:batch/undo", async (req, res) => {
+    const id = Number(req.params.id);
+    const before = getItem(db, id);
+    if (!before) return void res.status(404).json({ error: "Not found" });
+    const u = undoBatch(db, id, String(req.params.batch));
+    if (!u.restore.length) return void res.status(409).json({ error: "Everything in that change has been changed again since, so there's nothing to undo.", skipped: u.skipped });
+    const sets = u.restore.map((c) => `${c.field} = ?`).join(", ");
+    db.prepare(`UPDATE items SET ${sets}, updated_at = datetime('now') WHERE id = ?`).run(...u.restore.map((c) => (typeof c.new === "object" && c.new !== null ? JSON.stringify(c.new) : (c.new as string | number | null))), id);
+    const price = u.restore.find((c) => c.field === "price");
+    if (price && before.price > 0) recordPriceChange(db, id, before.price, Number(price.new), "manual");
+    const undoBatchId = recordChanges(db, id, u.restore, `undo`)!;
+    u.mark(undoBatchId);
+    const pushed = queueRevise(db, id, u.restore.map((c) => c.field), { oldPrice: before.price, batch: undoBatchId, now: true });
+    await processApiJobs(db);
+    res.json({ restored: u.restore.map((c) => c.field), skipped: u.skipped, pushed, item: getItem(db, id) });
   });
 
   api.delete("/items/:id", (req, res) => {
@@ -967,10 +990,10 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   api.post("/items/:id/fresh-title", async (req, res) => void res.json(await suggestFreshTitle(db, Number(req.params.id))));
   api.post("/items/:id/fresh-title/apply", async (req, res) => {
     const b = z.object({ title: z.string().trim().min(3).max(80), provider: z.string().max(20).nullable().optional() }).parse(req.body);
-    applyFreshTitle(db, Number(req.params.id), b.title, b.provider ?? null);
+    const batch = applyFreshTitle(db, Number(req.params.id), b.title, b.provider ?? null);
     const item = getItem(db, Number(req.params.id))!;
     // Send the new title to every live listing: API sites now, extension sites when the extension runs.
-    const pushed = queueRevise(db, item.id, ["title"]);
+    const pushed = queueRevise(db, item.id, ["title"], { batch, now: true });
     await processApiJobs(db);
     const ebayJob = db.prepare("SELECT status, result FROM jobs WHERE type = 'revise' AND item_id = ? AND marketplace = 'ebay' ORDER BY id DESC LIMIT 1").get(item.id) as { status: string; result: string | null } | undefined;
     const ebay = !ebayJob ? null : ebayJob.status === "done" ? ("updated" as const) : ("failed" as const);

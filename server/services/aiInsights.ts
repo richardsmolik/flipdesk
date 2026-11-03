@@ -17,6 +17,7 @@ import { findLocalComps, normTitle, tokens } from "./comps.js";
 import { getBacktest, Prediction, startBacktest, type Backtest } from "./backtest.js";
 import { notify, raiseAlert } from "./alerts.js";
 import { useAi } from "../context.js";
+import { recordChanges } from "./history.js";
 import type { ListingDraft } from "./ai.js";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -304,6 +305,7 @@ export function applyFreshTitle(db: Db, itemId: number, title: string, provider:
   db.prepare("INSERT INTO title_rewrites (item_id, old_title, new_title, provider) VALUES (?, ?, ?, ?)").run(itemId, old.title, title, provider);
   db.prepare("UPDATE items SET title = ?, updated_at = datetime('now') WHERE id = ?").run(title, itemId);
   if (provider) recordAiTitle(db, title, provider, itemId);
+  return recordChanges(db, itemId, [{ field: "title", old: old.title, new: title }], "fresh title");
 }
 
 /** Did rewritten listings sell? Compared with other stale listings over the same time. */

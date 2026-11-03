@@ -85,7 +85,7 @@ describe("edits reach every live listing", () => {
     // the extension gets the poshmark update with what changed
     const work = claimExtensionJob(db, ["poshmark"])!;
     expect(work.job).toMatchObject({ type: "revise", marketplace: "poshmark" });
-    expect(JSON.parse((work.job as { payload: string }).payload)).toEqual({ fields: ["title"] });
+    expect(JSON.parse((work.job as { payload: string }).payload)).toMatchObject({ fields: ["title"] });
     // nothing changed -> nothing queued; turning auto-push off stops it
     expect((await request(app).patch(`/api/items/${id}`).send({ title: "New Better Title" }).expect(200)).body.pushed).toEqual([]);
     await request(app).put("/api/auto-push").send({ on: false }).expect(200);

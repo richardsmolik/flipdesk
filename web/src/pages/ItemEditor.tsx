@@ -1,4 +1,5 @@
 import { FreshTitle, PriceWhy } from "../components/PriceWhy";
+import ItemHistory from "../components/ItemHistory";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, CONDITIONS, money, uploadWithProgress, type Item } from "../api";
@@ -11,11 +12,13 @@ import PhotoEditor from "../components/PhotoEditor";
 import PhoneUpload from "../components/PhoneUpload";
 import Duplicates from "../components/Duplicates";
 
-interface Pushed { marketplace: string; mode: "api" | "extension"; fields: string[] }
+interface Pushed { marketplace: string; mode: "api" | "extension"; fields: string[]; sendAt?: string }
 const MP_NAMES: Record<string, string> = { ebay: "eBay", poshmark: "Poshmark", mercari: "Mercari", depop: "Depop", vinted: "Vinted", grailed: "Grailed", facebook: "Facebook", etsy: "Etsy", shopify: "Shopify", amazon: "Amazon", whatnot: "Whatnot" };
 /** "Updating eBay and Etsy now; the extension will walk you through Poshmark." */
 function pushedText(p: Pushed[]) {
   const names = (mode: string) => [...new Set(p.filter((x) => x.mode === mode).map((x) => MP_NAMES[x.marketplace] ?? x.marketplace))];
+  const later = p.find((x) => x.sendAt)?.sendAt;
+  if (later) return `Your live listings get it at ${new Date(later).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} (edits are sent in batches; “Push changes” sends now).`;
   const api = names("api");
   const ext = names("extension");
   return [api.length && `Updating ${api.join(", ")} now.`, ext.length && `The Chrome extension will walk you through ${ext.join(", ")}.`].filter(Boolean).join(" ");
@@ -654,6 +657,8 @@ function EditItem({ id }: { id: number }) {
               ⤴️ Push changes to live listings
             </button>
           )}
+
+          <ItemHistory itemId={id} onChanged={() => void reload()} />
 
           <button className="w-full text-xs text-zinc-600 hover:text-red-400" onClick={async () => { if (confirm("Delete this item and its listing records?")) { await api.del(`/api/items/${id}`); nav("/inventory"); } }}>
             Delete item

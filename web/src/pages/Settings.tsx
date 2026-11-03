@@ -512,19 +512,33 @@ function Devices() {
 
 /** Send item edits to live listings automatically (on by default). */
 function AutoPush() {
-  const [on, setOn] = useState<boolean | null>(null);
-  useEffect(() => void api.get<{ on: boolean }>("/api/auto-push").then((r) => setOn(r.on)).catch(() => setOn(null)), []);
-  if (on === null) return null;
+  const [st, setSt] = useState<{ on: boolean; delayMinutes: number } | null>(null);
+  useEffect(() => void api.get<{ on: boolean; delayMinutes: number }>("/api/auto-push").then(setSt).catch(() => setSt(null)), []);
+  if (st === null) return null;
+  const on = st.on;
+  const save = async (next: { on: boolean; delayMinutes: number }) => setSt(await api.put<{ on: boolean; delayMinutes: number }>("/api/auto-push", next));
   return (
     <section className="card space-y-2 p-4">
       <h2 className="font-semibold">⤴️ Send edits to live listings</h2>
       <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" className="mt-1" checked={on} onChange={async (e) => setOn((await api.put<{ on: boolean }>("/api/auto-push", { on: e.target.checked })).on)} />
+        <input type="checkbox" className="mt-1" checked={on} onChange={(e) => void save({ ...st, on: e.target.checked })} />
         <span>
           When you change an item's title, description, price or details, update it everywhere it's listed.
-          <span className="block text-xs text-zinc-500">eBay, Etsy and Shopify update right away. Sites the Chrome extension handles show you exactly what to change, with copy buttons. A listing you gave its own price keeps it. Photos: use “Push changes to live listings” on the item.</span>
+          <span className="block text-xs text-zinc-500">eBay, Etsy and Shopify update right away. On sites the Chrome extension handles, it fills in the changes on the listing's edit page for you to save. A listing you gave its own price keeps it. Photos: use “Push changes to live listings” on the item. Every change is in the item's 🕘 History, with undo.</span>
         </span>
       </label>
+      {on && (
+        <label className="ml-6 flex flex-wrap items-center gap-2 text-sm">
+          Send
+          <select className="input w-auto py-1" value={st.delayMinutes} onChange={(e) => void save({ ...st, delayMinutes: Number(e.target.value) })}>
+            <option value={0}>right away</option>
+            <option value={15}>in batches every 15 minutes</option>
+            <option value={60}>in batches once an hour</option>
+            <option value={240}>in batches every 4 hours</option>
+          </select>
+          <span className="w-full text-xs text-zinc-500">Batches gather a flurry of small edits into one update per listing, so marketplaces see fewer changes.</span>
+        </label>
+      )}
     </section>
   );
 }

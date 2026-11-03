@@ -21,17 +21,37 @@ function ensurePayload(db: Db) {
 }
 
 export const autoPushOn = (db: Db) => getSetting<{ on?: boolean }>(db, "autoPush", {}).on !== false;
+/** Minutes to wait before sending edits (0 = right away; e.g. 60 = gather edits and send once an hour). */
+export const pushDelayMinutes = (db: Db) => Math.max(0, Number(getSetting<{ delayMinutes?: number }>(db, "autoPush", {}).delayMinutes ?? 0));
+interface RevisePayload { fields?: string[]; batches?: string[]; notBefore?: string }
+const readPayload = (p: string | null | undefined) => JSON.parse(p ?? "{}") as RevisePayload;
+/** A revise job held back until its batch time. */
+export const heldBack = (payload: string | null | undefined, now = Date.now()) => {
+  const nb = readPayload(payload).notBefore;
+  return Boolean(nb && Date.parse(nb) > now);
+};
+/** Send this item's waiting edits now (the "Push changes" button). */
+export function releaseHeld(db: Db, itemId: number) {
+  ensurePayload(db);
+  for (const j of db.prepare("SELECT id, payload FROM jobs WHERE item_id = ? AND type = 'revise' AND status = 'pending'").all(itemId) as { id: number; payload: string | null }[]) {
+    const p = readPayload(j.payload);
+    delete p.notBefore;
+    db.prepare("UPDATE jobs SET payload = ? WHERE id = ?").run(JSON.stringify(p), j.id);
+  }
+}
 
 /**
  * Queue "revise" jobs so live listings show an item's changes. One pending job per listing (fields merged).
  * A listing with its own price (different from the item's old price) keeps it: only listings that followed
  * the item price get the new one.
  */
-export function queueRevise(db: Db, itemId: number, fields: string[], opts: { oldPrice?: number } = {}) {
+export function queueRevise(db: Db, itemId: number, fields: string[], opts: { oldPrice?: number; batch?: string | null; now?: boolean } = {}) {
   ensurePayload(db);
   const item = getItem(db, itemId);
   if (!item) return [];
-  const out: { marketplace: MarketplaceId; mode: "api" | "extension"; fields: string[] }[] = [];
+  const out: { marketplace: MarketplaceId; mode: "api" | "extension"; fields: string[]; sendAt?: string }[] = [];
+  const delay = opts.now ? 0 : pushDelayMinutes(db);
+  const notBefore = delay ? new Date(Date.now() + delay * 60_000).toISOString() : undefined;
   for (const l of item.listings.filter((x) => x.status === "active")) {
     let f = fields.filter((x) => (REVISE_FIELDS as readonly string[]).includes(x));
     if (f.includes("price")) {
@@ -41,12 +61,25 @@ export function queueRevise(db: Db, itemId: number, fields: string[], opts: { ol
     if (!f.length) continue;
     const m = l.marketplace as MarketplaceId;
     const pending = db.prepare("SELECT id, payload FROM jobs WHERE type = 'revise' AND listing_id = ? AND status = 'pending'").get(l.id) as { id: number; payload: string | null } | undefined;
+    let sendAt = notBefore;
     if (pending) {
-      const merged = [...new Set([...((JSON.parse(pending.payload ?? "{}") as { fields?: string[] }).fields ?? []), ...f])];
-      db.prepare("UPDATE jobs SET payload = ?, updated_at = datetime('now') WHERE id = ?").run(JSON.stringify({ fields: merged }), pending.id);
+      // Merge into the waiting job; it keeps its original send time (or goes now if asked).
+      const p = readPayload(pending.payload);
+      const merged = [...new Set([...(p.fields ?? []), ...f])];
+      sendAt = opts.now ? undefined : p.notBefore;
+      db.prepare("UPDATE jobs SET payload = ?, updated_at = datetime('now') WHERE id = ?").run(
+        JSON.stringify({ fields: merged, batches: [...new Set([...(p.batches ?? []), ...(opts.batch ? [opts.batch] : [])])], ...(sendAt ? { notBefore: sendAt } : {}) }),
+        pending.id,
+      );
       f = merged;
-    } else db.prepare("INSERT INTO jobs (marketplace, type, item_id, listing_id, payload) VALUES (?, 'revise', ?, ?, ?)").run(m, itemId, l.id, JSON.stringify({ fields: f }));
-    out.push({ marketplace: m, mode: isExtensionMarketplace(m) ? "extension" : "api", fields: f });
+    } else
+      db.prepare("INSERT INTO jobs (marketplace, type, item_id, listing_id, payload) VALUES (?, 'revise', ?, ?, ?)").run(
+        m,
+        itemId,
+        l.id,
+        JSON.stringify({ fields: f, batches: opts.batch ? [opts.batch] : [], ...(sendAt ? { notBefore: sendAt } : {}) }),
+      );
+    out.push({ marketplace: m, mode: isExtensionMarketplace(m) ? "extension" : "api", fields: f, ...(sendAt ? { sendAt } : {}) });
   }
   return out;
 }
@@ -200,6 +233,7 @@ export async function processApiJobs(db: Db, limit = 20) {
   for (const job of jobs) {
     const m = job.marketplace as MarketplaceId;
     if (isExtensionMarketplace(m)) continue;
+    if (job.type === "revise" && heldBack(job.payload)) continue; // waiting for its batch time
     if (processed++ >= limit) break;
     db.prepare("UPDATE jobs SET status = 'claimed', attempts = attempts + 1, updated_at = datetime('now') WHERE id = ?").run(job.id);
     const item = getItem(db, job.item_id);
@@ -256,12 +290,15 @@ export function claimExtensionJob(db: Db, marketplaces: MarketplaceId[]) {
   const ms = marketplaces.filter(isExtensionMarketplace);
   if (!ms.length) return null;
   // Delists first: a sold item still live elsewhere is the costliest mistake (double sale).
+  ensurePayload(db);
+  // Revise jobs waiting for their batch time are skipped until then.
   const job = db
     .prepare(
       `SELECT * FROM jobs WHERE status = 'pending' AND marketplace IN (${ms.map(() => "?").join(",")})
+       AND NOT (type = 'revise' AND COALESCE(json_extract(payload, '$.notBefore'), '') > ?)
        ORDER BY CASE type WHEN 'delist' THEN 0 ELSE 1 END, id LIMIT 1`,
     )
-    .get(...ms) as JobRow | undefined;
+    .get(...ms, new Date().toISOString()) as JobRow | undefined;
   if (!job) return null;
   db.prepare("UPDATE jobs SET status = 'claimed', attempts = attempts + 1, updated_at = datetime('now') WHERE id = ?").run(job.id);
   // Re-queue jobs the extension claimed but never reported back on (tab closed, crash).
