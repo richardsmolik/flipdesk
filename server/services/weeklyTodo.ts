@@ -7,6 +7,7 @@ import type { Db } from "../db.js";
 import { getItem, getSetting } from "../db.js";
 import { advise, learn } from "./priceAdvice.js";
 import { staleItems, type PriceWhy } from "./aiInsights.js";
+import { failedUpdates } from "./jobs.js";
 
 export interface Todo { kind: string; title: string; detail: string; href: string; priority: number }
 
@@ -21,8 +22,11 @@ export function weeklyTodo(db: Db, limit = 5): Todo[] {
   if (ship.n) out.push({ kind: "ship", title: `Ship ${ship.n} order${ship.n === 1 ? "" : "s"}`, detail: ship.oldest ? `Oldest sold ${ship.oldest.slice(0, 10)}` : "", href: "/shipping", priority: 100 });
 
   // 2. Listings that failed to post or update.
-  const failed = one<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND updated_at >= datetime('now','-14 days')");
-  if (failed.n) out.push({ kind: "failed", title: `Fix ${failed.n} listing${failed.n === 1 ? "" : "s"} that didn't go through`, detail: "See the reason and retry", href: "/queue", priority: 90 });
+  const failed = one<{ n: number }>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'failed' AND type NOT IN ('revise', 'update') AND updated_at >= datetime('now','-14 days')");
+  const upd = failedUpdates(db).length;
+  const publish = failed.n;
+  if (upd) out.push({ kind: "failed-update", title: `Retry ${upd} update${upd === 1 ? "" : "s"} that didn't reach a live listing`, detail: "The listing still shows the old details", href: "/#failed-updates", priority: 92 });
+  if (publish) out.push({ kind: "failed", title: `Fix ${publish} listing${publish === 1 ? "" : "s"} that didn't go through`, detail: "See the reason and retry", href: "/queue", priority: 90 });
 
   // 3. Prices the AIs disagreed on (still for sale).
   const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'priceWhy.%'").all() as { key: string; value: string }[];

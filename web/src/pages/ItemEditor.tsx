@@ -1,5 +1,6 @@
 import { FreshTitle, PriceWhy } from "../components/PriceWhy";
 import ItemHistory from "../components/ItemHistory";
+import { EditTips, TitleTest } from "../components/EditTools";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, CONDITIONS, money, uploadWithProgress, type Item } from "../api";
@@ -658,6 +659,8 @@ function EditItem({ id }: { id: number }) {
             </button>
           )}
 
+          <EditTips itemId={id} />
+          <TitleTest itemId={id} live={item.listings.some((l) => l.status === "active")} title={item.title} onChanged={() => void reload()} />
           <ItemHistory itemId={id} onChanged={() => void reload()} />
 
           <button className="w-full text-xs text-zinc-600 hover:text-red-400" onClick={async () => { if (confirm("Delete this item and its listing records?")) { await api.del(`/api/items/${id}`); nav("/inventory"); } }}>

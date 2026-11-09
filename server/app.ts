@@ -18,8 +18,11 @@ import { adapterFor } from "./marketplaces/adapters.js";
 import { accountDeletionChallenge, ebayRequiredAspects, suggestCategory, ebayConsentUrl, ebayCreateLocation, ebayEnvironment, ebayExchangeCode, ebayHasAppKeys, ebayIsLive, ebayLocations, ebayOptInBusinessPolicies, ebayOptedInPrograms, fetchPolicies, parseEbayRedirect } from "./marketplaces/ebay.js";
 import { aiIsLive, generateListing } from "./services/ai.js";
 import { breakdown, recommend } from "./services/fees.js";
-import { autoPushOn, claimExtensionJob, completeJob, crosslist, enqueue, listingQty, processApiJobs, pushDelayMinutes, queueRevise, releaseHeld, REVISE_FIELDS, requestDelist } from "./services/jobs.js";
-import { itemHistory, recordChanges, undoBatch } from "./services/history.js";
+import { autoPushOn, claimExtensionJob, completeJob, crosslist, enqueue, failedUpdates, listingQty, processApiJobs, pushDelayMinutes, queueRevise, releaseHeld, retryUpdates, REVISE_FIELDS, requestDelist } from "./services/jobs.js";
+import { buyerHours, buyerHoursOn } from "./services/buyerHours.js";
+import { editLessons, editSuggestions } from "./services/editLessons.js";
+import { startTitleTest, stopTitleTest, titleTestFor, titleTestsTick } from "./services/titleTest.js";
+import { applyUndo, bulkGroups, itemHistory, recordChanges, undoGroup } from "./services/history.js";
 import { researchPrice } from "./services/pricing.js";
 import { NeedsVariationError, cancelSale, recordSale, restock, saveVariations } from "./services/sync.js";
 import { bulkPrice, relist, sendOffersToWatchers, staleListings } from "./services/ebayTools.js";
@@ -383,11 +386,38 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     setSetting(db, "aiSummaryEmail", { on });
     res.json({ on });
   });
-  api.get("/auto-push", (_req, res) => void res.json({ on: autoPushOn(db), delayMinutes: pushDelayMinutes(db) }));
+  const autoPushState = () => ({ on: autoPushOn(db), delayMinutes: pushDelayMinutes(db), buyerHours: buyerHoursOn(db), hours: buyerHours(db) });
+  api.get("/auto-push", (_req, res) => void res.json(autoPushState()));
   api.put("/auto-push", (req, res) => {
-    const b = z.object({ on: z.boolean(), delayMinutes: z.number().int().min(0).max(1440).optional() }).parse(req.body);
-    setSetting(db, "autoPush", { on: b.on, delayMinutes: b.delayMinutes ?? pushDelayMinutes(db) });
-    res.json({ on: autoPushOn(db), delayMinutes: pushDelayMinutes(db) });
+    const b = z.object({ on: z.boolean(), delayMinutes: z.number().int().min(0).max(1440).optional(), buyerHours: z.boolean().optional() }).parse(req.body);
+    setSetting(db, "autoPush", { on: b.on, delayMinutes: b.delayMinutes ?? pushDelayMinutes(db), buyerHours: b.buyerHours ?? buyerHoursOn(db) });
+    res.json(autoPushState());
+  });
+  // Updates that didn't reach a live listing: list, and try again.
+  api.get("/failed-updates", (_req, res) => void res.json(failedUpdates(db)));
+  api.post("/failed-updates/retry", async (req, res) => {
+    const b = z.object({ jobIds: z.array(z.number().int()).optional() }).parse(req.body ?? {});
+    const n = retryUpdates(db, b.jobIds);
+    await processApiJobs(db, 100);
+    res.json({ retried: n, stillFailing: failedUpdates(db) });
+  });
+  // What kinds of edits have worked in this shop, and which apply to one item.
+  api.get("/edit-lessons", (_req, res) => void res.json(editLessons(db)));
+  api.get("/items/:id/edit-suggestions", (req, res) => void res.json(editSuggestions(db, Number(req.params.id))));
+  // Title A/B test.
+  api.get("/items/:id/title-test", (req, res) => {
+    titleTestsTick(db);
+    res.json(titleTestFor(db, Number(req.params.id)));
+  });
+  api.post("/items/:id/title-test", (req, res) => {
+    const b = z.object({ b: z.string().trim().min(3).max(80), days: z.number().int().min(3).max(30).default(7) }).parse(req.body);
+    res.json(startTitleTest(db, Number(req.params.id), b.b, b.days));
+  });
+  api.post("/items/:id/title-test/stop", async (req, res) => {
+    const b = z.object({ keep: z.enum(["a", "b"]).default("a") }).parse(req.body ?? {});
+    const t = stopTitleTest(db, Number(req.params.id), b.keep);
+    await processApiJobs(db);
+    res.json(t);
   });
 
   // Push everything to the live listings now (e.g. after changing photos).
@@ -404,19 +434,17 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
   api.get("/items/:id/history", (req, res) => void res.json(itemHistory(db, Number(req.params.id))));
   api.post("/items/:id/history/:batch/undo", async (req, res) => {
     const id = Number(req.params.id);
-    const before = getItem(db, id);
-    if (!before) return void res.status(404).json({ error: "Not found" });
-    const u = undoBatch(db, id, String(req.params.batch));
-    if (!u.restore.length) return void res.status(409).json({ error: "Everything in that change has been changed again since, so there's nothing to undo.", skipped: u.skipped });
-    const sets = u.restore.map((c) => `${c.field} = ?`).join(", ");
-    db.prepare(`UPDATE items SET ${sets}, updated_at = datetime('now') WHERE id = ?`).run(...u.restore.map((c) => (typeof c.new === "object" && c.new !== null ? JSON.stringify(c.new) : (c.new as string | number | null))), id);
-    const price = u.restore.find((c) => c.field === "price");
-    if (price && before.price > 0) recordPriceChange(db, id, before.price, Number(price.new), "manual");
-    const undoBatchId = recordChanges(db, id, u.restore, `undo`)!;
-    u.mark(undoBatchId);
-    const pushed = queueRevise(db, id, u.restore.map((c) => c.field), { oldPrice: before.price, batch: undoBatchId, now: true });
+    const r = applyUndo(db, id, String(req.params.batch));
+    if (!r.restored.length) return void res.status(409).json({ error: "Everything in that change has been changed again since, so there's nothing to undo.", skipped: r.skipped });
     await processApiJobs(db);
-    res.json({ restored: u.restore.map((c) => c.field), skipped: u.skipped, pushed, item: getItem(db, id) });
+    res.json({ ...r, item: getItem(db, id) });
+  });
+  // Bulk edits: undo a whole bulk change across every item it touched.
+  api.get("/bulk-changes", (_req, res) => void res.json(bulkGroups(db)));
+  api.post("/bulk-changes/:grp/undo", async (req, res) => {
+    const r = undoGroup(db, String(req.params.grp));
+    await processApiJobs(db, 100);
+    res.json(r);
   });
 
   api.delete("/items/:id", (req, res) => {
@@ -1226,6 +1254,7 @@ export function createApp(db: Db, opts: { uploadDir?: string; password?: string;
     const b = z.object({ itemIds: z.array(z.number()).min(1), pct: z.number().optional(), amount: z.number().optional(), set: z.number().optional() }).parse(req.body);
     const r = bulkPrice(db, b.itemIds, b);
     void processApiJobs(db, 100);
+    res.setHeader("X-Bulk-Group", r.group ?? "");
     res.json(r);
   });
   api.post("/tools/send-offers", async (req, res) => {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { EditLessons, FailedUpdates } from "../components/EditTools";
 import { Link } from "react-router-dom";
 import { api, money } from "../api";
 import { MpBadge, Stat, timeAgo, useFetch, useMarketplaces } from "../ui";
@@ -143,7 +144,11 @@ export default function Dashboard() {
         <GoalsCard />
       </div>
 
+      <FailedUpdates />
+
       <WeekTodo />
+
+      <EditLessons />
 
       {d.alerts.filter((a) => a.severity === "critical").map((a) => (
         <Link key={a.id} to="/inbox" className="block rounded-lg border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-100 hover:bg-red-950">

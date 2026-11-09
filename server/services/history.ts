@@ -5,6 +5,8 @@
 import type { Db, Item } from "../db.js";
 import { getItem } from "../db.js";
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
+import { ensurePayload, queueRevise } from "./jobs.js";
+import { recordPriceChange } from "./priceAdvice.js";
 
 const siteName = (m: string) => MARKETPLACES[m as MarketplaceId]?.name ?? m;
 
@@ -14,7 +16,15 @@ export function ensureHistory(db: Db) {
   db.exec(`CREATE TABLE IF NOT EXISTS item_changes (id INTEGER PRIMARY KEY, batch TEXT NOT NULL, item_id INTEGER NOT NULL, field TEXT NOT NULL,
     old_value TEXT, new_value TEXT, source TEXT NOT NULL DEFAULT 'edit', stats TEXT, undone_by TEXT, at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE INDEX IF NOT EXISTS item_changes_item ON item_changes(item_id, batch);`);
+  ensurePayload(db); // history reads which sites each change went to
+  try {
+    db.exec("ALTER TABLE item_changes ADD COLUMN grp TEXT"); // one bulk edit across many items
+  } catch {
+    /* already there */
+  }
 }
+
+export const newGroupId = () => `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 const t = (s: string) => Date.parse(s.includes("T") ? s : s.replace(" ", "T") + "Z");
 const DAY = 86400_000;
@@ -32,7 +42,7 @@ function snapshot(item: Item) {
 }
 
 /** Save one set of changes (one "batch"). Returns its id, or null if nothing changed. */
-export function recordChanges(db: Db, itemId: number, changes: Change[], source = "edit") {
+export function recordChanges(db: Db, itemId: number, changes: Change[], source = "edit", grp: string | null = null) {
   if (!changes.length) return null;
   ensureHistory(db);
   const item = getItem(db, itemId);
@@ -40,14 +50,14 @@ export function recordChanges(db: Db, itemId: number, changes: Change[], source 
   const batch = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const stats = JSON.stringify(snapshot(item));
   for (const c of changes)
-    db.prepare("INSERT INTO item_changes (batch, item_id, field, old_value, new_value, source, stats) VALUES (?, ?, ?, ?, ?, ?, ?)").run(batch, itemId, c.field, JSON.stringify(c.old ?? null), JSON.stringify(c.new ?? null), source, stats);
+    db.prepare("INSERT INTO item_changes (batch, item_id, field, old_value, new_value, source, stats, grp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(batch, itemId, c.field, JSON.stringify(c.old ?? null), JSON.stringify(c.new ?? null), source, stats, grp);
   return batch;
 }
 
 const show = (v: unknown) => (typeof v === "string" ? v : v === null || v === undefined ? "" : JSON.stringify(v));
 
 /** Did it help? Views/day and watchers before vs after (needs 3+ days after; "early" until 7). */
-function impact(item: Item, statsJson: string | null, at: string, soldAt: string | null) {
+export function impact(item: Item, statsJson: string | null, at: string, soldAt: string | null) {
   if (!statsJson) return null;
   const s = JSON.parse(statsJson) as { views: number; watchers: number; listedDays: number; listings: number[] };
   const days = (Date.now() - t(at)) / DAY;
@@ -107,7 +117,7 @@ export function itemHistory(db: Db, itemId: number): HistoryEvent[] {
       at: first.at,
       batch,
       source: first.source,
-      title: first.source === "edit" ? "You changed" : first.source.startsWith("undo") ? "Undone" : first.source === "fresh title" ? "Fresh title" : first.source,
+      title: first.source === "edit" ? "You changed" : first.source.startsWith("undo") ? "Undone" : first.source === "fresh title" ? "Fresh title" : first.source === "bulk" ? "Bulk change" : first.source === "title test" ? "Title test" : first.source,
       changes: rs.map((r) => {
         const fmt = (v: unknown) => (r.field === "price" && typeof v === "number" ? "$" + v.toFixed(2) : show(v));
         return { field: r.field, old: fmt(JSON.parse(r.old_value)), new: fmt(JSON.parse(r.new_value)) };
@@ -119,7 +129,7 @@ export function itemHistory(db: Db, itemId: number): HistoryEvent[] {
       seq: first.id,
     });
   }
-  for (const p of db.prepare("SELECT old_price, new_price, reason, at FROM price_changes WHERE item_id = ? AND reason != 'manual'").all(itemId) as { old_price: number; new_price: number; reason: string; at: string }[])
+  for (const p of db.prepare("SELECT old_price, new_price, reason, at FROM price_changes WHERE item_id = ? AND reason NOT IN ('manual', 'bulk')").all(itemId) as { old_price: number; new_price: number; reason: string; at: string }[])
     events.push({ kind: "drop", at: p.at, title: `${p.reason === "auto_drop" ? "Automatic price drop" : p.reason === "smart_drop" ? "Smart price drop" : "Price change"}: $${p.old_price.toFixed(2)} → $${p.new_price.toFixed(2)}` });
   // One line per site (a site with one listing per size shows a count).
   const bySite = new Map<string, { at: string; n: number }>();
@@ -149,4 +159,57 @@ export function undoBatch(db: Db, itemId: number, batch: string) {
     else restore.push({ field: r.field, old: cur, new: JSON.parse(r.old_value) });
   }
   return { restore, skipped, mark: (undoBatchId: string) => db.prepare("UPDATE item_changes SET undone_by = ? WHERE item_id = ? AND batch = ?").run(undoBatchId, itemId, batch) };
+}
+
+/** Put a batch's old values back on the item and send them to every live listing. */
+export function applyUndo(db: Db, itemId: number, batch: string) {
+  const before = getItem(db, itemId);
+  if (!before) throw Object.assign(new Error("Not found"), { status: 404 });
+  const u = undoBatch(db, itemId, batch);
+  if (!u.restore.length) return { restored: [] as string[], skipped: u.skipped, pushed: [] as ReturnType<typeof queueRevise> };
+  const sets = u.restore.map((c) => `${c.field} = ?`).join(", ");
+  db.prepare(`UPDATE items SET ${sets}, updated_at = datetime('now') WHERE id = ?`).run(...u.restore.map((c) => (typeof c.new === "object" && c.new !== null ? JSON.stringify(c.new) : (c.new as string | number | null))), itemId);
+  const price = u.restore.find((c) => c.field === "price");
+  if (price && before.price > 0) recordPriceChange(db, itemId, before.price, Number(price.new), "manual");
+  const undoBatchId = recordChanges(db, itemId, u.restore, "undo")!;
+  u.mark(undoBatchId);
+  const pushed = queueRevise(db, itemId, u.restore.map((c) => c.field), { oldPrice: before.price, batch: undoBatchId, now: true });
+  return { restored: u.restore.map((c) => c.field), skipped: u.skipped, pushed };
+}
+
+/** Recent bulk edits (one row per bulk action), newest first. */
+export function bulkGroups(db: Db, limit = 10) {
+  ensureHistory(db);
+  const rows = db
+    .prepare(
+      `SELECT grp, MIN(at) AS at, COUNT(DISTINCT item_id) AS items, GROUP_CONCAT(DISTINCT field) AS fields, MIN(source) AS source,
+         COUNT(DISTINCT CASE WHEN undone_by IS NOT NULL THEN item_id END) AS undone
+       FROM item_changes WHERE grp IS NOT NULL GROUP BY grp ORDER BY MIN(id) DESC LIMIT ?`,
+    )
+    .all(limit) as { grp: string; at: string; items: number; fields: string; source: string; undone: number }[];
+  return rows.map((r) => {
+    const sample = db.prepare("SELECT old_value, new_value FROM item_changes WHERE grp = ? AND field = 'price' LIMIT 1").get(r.grp) as { old_value: string; new_value: string } | undefined;
+    const pct = sample ? Math.round(((JSON.parse(sample.new_value) - JSON.parse(sample.old_value)) / JSON.parse(sample.old_value)) * 100) : null;
+    return { ...r, fields: r.fields.split(","), pctExample: pct, allUndone: r.undone >= r.items };
+  });
+}
+
+/** Undo every item in one bulk edit. Items changed again since keep their newer values. */
+export function undoGroup(db: Db, grp: string) {
+  ensureHistory(db);
+  const batches = db.prepare("SELECT DISTINCT item_id, batch FROM item_changes WHERE grp = ? AND undone_by IS NULL").all(grp) as { item_id: number; batch: string }[];
+  if (!batches.length) {
+    const any = db.prepare("SELECT 1 FROM item_changes WHERE grp = ? LIMIT 1").get(grp);
+    throw Object.assign(new Error(any ? "Already undone" : "No such bulk change"), { status: any ? 400 : 404 });
+  }
+  let restored = 0;
+  const kept: number[] = [];
+  for (const b of batches) {
+    if (!getItem(db, b.item_id)) continue;
+    const r = applyUndo(db, b.item_id, b.batch);
+    if (r.restored.length) restored++;
+    if (r.skipped.length) kept.push(b.item_id);
+    if (!r.restored.length) db.prepare("UPDATE item_changes SET undone_by = 'skipped' WHERE item_id = ? AND batch = ?").run(b.item_id, b.batch);
+  }
+  return { restored, kept: kept.length, keptItems: kept };
 }

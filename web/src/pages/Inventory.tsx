@@ -4,6 +4,7 @@ import { api, money, type Item } from "../api";
 import { Modal, MpBadge, QtyBar, toast, useFetch, useMarketplaces } from "../ui";
 import Lightbox from "../components/Lightbox";
 import ImportInventory from "../components/ImportInventory";
+import { BulkChanges } from "../components/EditTools";
 
 const VIEWS = [
   { key: "inventory", label: "Inventory", hint: "Everything in stock" },
@@ -27,6 +28,7 @@ export default function Inventory() {
   const [q, setQ] = useState("");
   const [mp, setMp] = useState("");
   const [sel, setSel] = useState<Set<number>>(new Set());
+  const [bulkTick, setBulkTick] = useState(0);
   const [bulk, setBulk] = useState<null | "crosslist" | "price">(null);
   const [importing, setImporting] = useState(false);
   const [limit, setLimit] = useState(300);
@@ -65,6 +67,8 @@ export default function Inventory() {
           <Link className="btn-primary" to="/items/new">✨ New listing</Link>
         </div>
       </div>
+
+      <BulkChanges tick={bulkTick} onUndone={() => reload()} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
@@ -224,7 +228,7 @@ export default function Inventory() {
 
       <ImportInventory open={importing} onClose={() => setImporting(false)} onDone={() => (setImporting(false), reload())} />
       <BulkCrosslist open={bulk === "crosslist"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), setSel(new Set()), reload())} />
-      <BulkPrice open={bulk === "price"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), reload())} />
+      <BulkPrice open={bulk === "price"} ids={[...sel]} onClose={() => setBulk(null)} onDone={() => (setBulk(null), setBulkTick((x) => x + 1), reload())} />
     </div>
   );
 }
@@ -272,7 +276,7 @@ function BulkPrice({ open, ids, onClose, onDone }: { open: boolean; ids: number[
         className="btn-primary mt-4 w-full"
         onClick={async () => {
           const r = await api.post<unknown[]>("/api/tools/bulk-price", { itemIds: ids, pct });
-          toast(`Updated ${r.length} price(s)`);
+          toast(`Updated ${r.length} price(s). Changed your mind? “Recent bulk changes” above has Undo.`);
           onDone();
         }}
       >

@@ -511,12 +511,15 @@ function Devices() {
 }
 
 /** Send item edits to live listings automatically (on by default). */
+interface PushSt { on: boolean; delayMinutes: number; buyerHours: boolean; hours: { timezone: string; learned: boolean; sales: number; needed: number; quietStart: number; quietEnd: number; busiestHour: number | null } }
+const hr = (h: number) => (h === 0 ? "midnight" : h === 12 ? "noon" : h < 12 ? `${h}am` : `${h - 12}pm`);
 function AutoPush() {
-  const [st, setSt] = useState<{ on: boolean; delayMinutes: number } | null>(null);
-  useEffect(() => void api.get<{ on: boolean; delayMinutes: number }>("/api/auto-push").then(setSt).catch(() => setSt(null)), []);
+  const [st, setSt] = useState<PushSt | null>(null);
+  useEffect(() => void api.get<PushSt>("/api/auto-push").then(setSt).catch(() => setSt(null)), []);
   if (st === null) return null;
   const on = st.on;
-  const save = async (next: { on: boolean; delayMinutes: number }) => setSt(await api.put<{ on: boolean; delayMinutes: number }>("/api/auto-push", next));
+  const save = async (next: Partial<PushSt>) => setSt(await api.put<PushSt>("/api/auto-push", { on: st.on, delayMinutes: st.delayMinutes, buyerHours: st.buyerHours, ...next }));
+  const h = st.hours;
   return (
     <section className="card space-y-2 p-4">
       <h2 className="font-semibold">⤴️ Send edits to live listings</h2>
@@ -537,6 +540,20 @@ function AutoPush() {
             <option value={240}>in batches every 4 hours</option>
           </select>
           <span className="w-full text-xs text-zinc-500">Batches gather a flurry of small edits into one update per listing, so marketplaces see fewer changes.</span>
+        </label>
+      )}
+      {on && (
+        <label className="ml-6 flex items-start gap-2 text-sm">
+          <input type="checkbox" className="mt-1" checked={st.buyerHours} onChange={(e) => void save({ buyerHours: e.target.checked })} />
+          <span>
+            Hold edits during quiet hours ({hr(h.quietStart)} to {hr(h.quietEnd)}) and send them when buyers are back
+            <span className="block text-xs text-zinc-500">
+              {h.learned
+                ? `Learned from your ${h.sales} sales this year: those 8 hours sell the least${h.busiestHour !== null ? `; your busiest hour is ${hr(h.busiestHour)}` : ""}.`
+                : `Using 11pm to 7am until you have ${h.needed} sales (${h.sales} so far); then FlipDesk picks your own quiet hours.`}{" "}
+              Time zone: {h.timezone}. “Push changes” on an item still sends right away.
+            </span>
+          </span>
         </label>
       )}
     </section>

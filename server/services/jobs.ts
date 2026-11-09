@@ -3,6 +3,7 @@ import { adapterFor, isExtensionMarketplace } from "../marketplaces/adapters.js"
 import { MARKETPLACES, type MarketplaceId } from "../marketplaces/registry.js";
 import { saveProblem, withRecording } from "./replay.js";
 import { ebayIsLive } from "../marketplaces/ebay.js";
+import { buyerHoursOn, nextBuyerTime } from "./buyerHours.js";
 
 /** Units to offer on a marketplace: all remaining units, or 1 on single-quantity sites. */
 export function listingQty(m: MarketplaceId, remaining: number) {
@@ -12,7 +13,7 @@ export function listingQty(m: MarketplaceId, remaining: number) {
 /** What can change on a live listing (besides quantity, which has its own job). */
 export const REVISE_FIELDS = ["title", "description", "price", "keywords", "specifics", "condition", "brand", "size", "color", "photos"] as const;
 
-function ensurePayload(db: Db) {
+export function ensurePayload(db: Db) {
   try {
     db.exec("ALTER TABLE jobs ADD COLUMN payload TEXT");
   } catch {
@@ -51,7 +52,10 @@ export function queueRevise(db: Db, itemId: number, fields: string[], opts: { ol
   if (!item) return [];
   const out: { marketplace: MarketplaceId; mode: "api" | "extension"; fields: string[]; sendAt?: string }[] = [];
   const delay = opts.now ? 0 : pushDelayMinutes(db);
-  const notBefore = delay ? new Date(Date.now() + delay * 60_000).toISOString() : undefined;
+  let due = Date.now() + delay * 60_000;
+  // Quiet hours: an edit made while buyers are asleep waits until they're back.
+  if (!opts.now && buyerHoursOn(db)) due = Math.max(due, nextBuyerTime(db, new Date(due)).getTime());
+  const notBefore = due > Date.now() + 1000 ? new Date(due).toISOString() : undefined;
   for (const l of item.listings.filter((x) => x.status === "active")) {
     let f = fields.filter((x) => (REVISE_FIELDS as readonly string[]).includes(x));
     if (f.includes("price")) {
@@ -310,4 +314,44 @@ export function claimExtensionJob(db: Db, marketplaces: MarketplaceId[]) {
   const item = full && listing ? listingView(full, listing) : full;
   const variation = full && listing?.variation_id ? full.variations.find((v) => v.id === listing.variation_id) : undefined;
   return { job, item, listing: listing ?? null, variation: variation ?? null, marketplace: MARKETPLACES[job.marketplace as MarketplaceId] };
+}
+
+/**
+ * Updates to live listings that didn't go through and haven't been fixed since: the newest update job per
+ * listing failed, nothing newer is waiting or done, and the listing is still live.
+ */
+export function failedUpdates(db: Db) {
+  ensurePayload(db);
+  const rows = db
+    .prepare(
+      `SELECT j.id, j.item_id, j.marketplace, j.type, j.result, j.payload, j.updated_at, i.title, i.sku FROM jobs j
+       JOIN items i ON i.id = j.item_id JOIN listings l ON l.id = j.listing_id
+       WHERE j.status = 'failed' AND j.type IN ('revise', 'update') AND l.status = 'active'
+         AND j.id = (SELECT MAX(k.id) FROM jobs k WHERE k.listing_id = j.listing_id AND k.type IN ('revise', 'update'))
+       ORDER BY j.id DESC LIMIT 100`,
+    )
+    .all() as { id: number; item_id: number; marketplace: string; type: string; result: string | null; payload: string | null; updated_at: string; title: string; sku: string }[];
+  return rows.map((r) => ({
+    jobId: r.id,
+    itemId: r.item_id,
+    title: r.title,
+    sku: r.sku,
+    marketplace: MARKETPLACES[r.marketplace as MarketplaceId]?.name ?? r.marketplace,
+    fields: r.type === "update" ? ["price"] : (readPayload(r.payload).fields ?? []),
+    error: (JSON.parse(r.result ?? "{}") as { error?: string }).error ?? "unknown error",
+    at: r.updated_at,
+  }));
+}
+
+/** Try failed updates again (all of them, or the given job ids). They go now, not at the next batch time. */
+export function retryUpdates(db: Db, jobIds?: number[]) {
+  const ids = jobIds ?? failedUpdates(db).map((f) => f.jobId);
+  for (const id of ids) {
+    const j = db.prepare("SELECT payload FROM jobs WHERE id = ? AND status = 'failed'").get(id) as { payload: string | null } | undefined;
+    if (!j) continue;
+    const p = readPayload(j.payload);
+    delete p.notBefore;
+    db.prepare("UPDATE jobs SET status = 'pending', attempts = 0, payload = ?, updated_at = datetime('now') WHERE id = ?").run(j.payload === null ? null : JSON.stringify(p), id);
+  }
+  return ids.length;
 }

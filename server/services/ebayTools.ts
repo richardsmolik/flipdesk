@@ -4,6 +4,7 @@ import { ebaySendOffer } from "../marketplaces/ebay.js";
 import type { MarketplaceId } from "../marketplaces/registry.js";
 import { enqueue, requestDelist } from "./jobs.js";
 import { advise, learn, recordPriceChange } from "./priceAdvice.js";
+import { newGroupId, recordChanges } from "./history.js";
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -71,6 +72,7 @@ export function staleListings(db: Db, minDays = 30): StaleRow[] {
 
 /** Change prices across items; respects each item's floor (min_price). Queues update jobs for live listings. */
 export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amount?: number; set?: number }, reason = "bulk") {
+  const grp = itemIds.length > 1 ? newGroupId() : null; // many items at once: undo them together
   return tx(db, () => {
     const results: { itemId: number; from: number; to: number }[] = [];
     for (const id of itemIds) {
@@ -83,6 +85,7 @@ export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amo
       if (to === item.price) continue;
       recordPriceChange(db, id, item.price, to, reason);
       db.prepare("UPDATE items SET price = ?, updated_at = datetime('now') WHERE id = ?").run(to, id);
+      recordChanges(db, id, [{ field: "price", old: item.price, new: to }], reason === "today" ? "Today's tip" : "bulk", grp);
       for (const l of item.listings.filter((x) => x.status === "active")) {
         db.prepare("UPDATE listings SET price = ? WHERE id = ?").run(to, l.id);
         enqueue(db, l.marketplace as MarketplaceId, "update", id, l.id);
@@ -90,7 +93,7 @@ export function bulkPrice(db: Db, itemIds: number[], change: { pct?: number; amo
       results.push({ itemId: id, from: item.price, to });
     }
     if (results.length) logActivity(db, "price", `Bulk price change on ${results.length} item(s)`);
-    return results;
+    return Object.assign(results, { group: results.length > 1 ? grp : null });
   });
 }
 
